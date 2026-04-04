@@ -6,3 +6,4 @@ dist/
 *.bak
 models/*.onnx
 .neuromcp/
+*.tgz
