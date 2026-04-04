@@ -17,18 +17,18 @@ async function loadOrt(): Promise<NonNullable<typeof ort>> {
 const MODEL_FILENAME = 'bge-small-en-v1.5.onnx';
 
 function resolveModelPath(): string | null {
-  // Try multiple locations relative to this file's directory
   const thisDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    // From src/embeddings/ → ../../models/
-    resolve(thisDir, '..', '..', 'models', MODEL_FILENAME),
-    // From dist/embeddings/ → ../../models/
+    // From dist/ (bundled) → ../models/ (package root)
+    resolve(thisDir, '..', 'models', MODEL_FILENAME),
+    // From src/embeddings/ (dev) → ../../models/
     resolve(thisDir, '..', '..', 'models', MODEL_FILENAME),
     // Relative to cwd
     resolve(process.cwd(), 'models', MODEL_FILENAME),
+    // Common install location: node_modules/neuromcp/models/
+    resolve(thisDir, 'models', MODEL_FILENAME),
   ];
 
-  // Deduplicate
   const unique = [...new Set(candidates)];
   for (const candidate of unique) {
     if (existsSync(candidate)) return candidate;

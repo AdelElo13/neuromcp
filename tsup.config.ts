@@ -7,6 +7,5 @@ export default defineConfig({
   clean: true,
   dts: true,
   sourcemap: true,
-  banner: { js: '#!/usr/bin/env node' },
   external: ['better-sqlite3', 'onnxruntime-node', 'sqlite-vec'],
 });
