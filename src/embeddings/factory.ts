@@ -2,35 +2,53 @@ import type { NeuromcpConfig } from '../config.js';
 import type { Logger } from '../observability/logger.js';
 import type { EmbeddingProvider } from './types.js';
 import { OnnxEmbeddingProvider } from './onnx.js';
+import { OllamaEmbeddingProvider } from './ollama.js';
 
 export async function createEmbeddingProvider(
   config: NeuromcpConfig,
   logger: Logger,
 ): Promise<EmbeddingProvider> {
-  const requestedProvider = config.embeddingProvider;
+  const requested = config.embeddingProvider;
 
-  if (requestedProvider === 'auto' || requestedProvider === 'onnx') {
-    const provider = new OnnxEmbeddingProvider();
-    const available = await provider.isAvailable();
-
-    if (available) {
-      logger.info('embeddings', `Loaded ONNX provider: ${provider.name}`, {
-        dimensions: provider.dimensions,
+  // 1. Try Ollama first (if auto or explicitly requested) — real semantic quality
+  if (requested === 'auto' || requested === 'ollama') {
+    const model = config.embeddingModel === 'auto' ? 'nomic-embed-text' : config.embeddingModel;
+    const ollama = new OllamaEmbeddingProvider(config.ollamaHost, model);
+    if (await ollama.isAvailable()) {
+      logger.info('embeddings', `Using Ollama provider: ${ollama.name}`, {
+        host: config.ollamaHost,
+        dimensions: ollama.dimensions,
       });
-      return provider;
+      return ollama;
     }
-
-    if (requestedProvider === 'onnx') {
+    if (requested === 'ollama') {
       throw new Error(
-        'ONNX embedding provider requested but unavailable. ' +
-        'Run: npx tsx scripts/download-model.ts',
+        `Ollama provider requested but "${model}" not available at ${config.ollamaHost}. ` +
+        `Install with: ollama pull ${model}`,
+      );
+    }
+    logger.debug('embeddings', 'Ollama not available, falling back to ONNX');
+  }
+
+  // 2. Try ONNX (if auto or explicitly requested)
+  if (requested === 'auto' || requested === 'onnx') {
+    const onnx = new OnnxEmbeddingProvider();
+    if (await onnx.isAvailable()) {
+      logger.info('embeddings', `Using ONNX provider: ${onnx.name}`, {
+        dimensions: onnx.dimensions,
+      });
+      logger.warn('embeddings', 'ONNX uses simplified tokenization — for best quality, install Ollama with nomic-embed-text');
+      return onnx;
+    }
+    if (requested === 'onnx') {
+      throw new Error(
+        'ONNX provider requested but model not found. Run: node scripts/download-model.mjs',
       );
     }
   }
 
-  // Phase 1: only ONNX is supported
   throw new Error(
-    `No embedding provider available (requested: ${requestedProvider}). ` +
-    'Currently only ONNX is supported. Run: npx tsx scripts/download-model.ts',
+    `No embedding provider available (requested: ${requested}). ` +
+    'Install Ollama with nomic-embed-text (recommended), or run: node scripts/download-model.mjs for ONNX fallback.',
   );
 }
