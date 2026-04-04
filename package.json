@@ -1,11 +1,18 @@
 {
   "name": "neuromcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "neuromcp": "bin/neuromcp.mjs" },
-  "files": ["dist", "bin", "scripts", "README.md"],
+  "bin": {
+    "neuromcp": "bin/neuromcp.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "scripts",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",
@@ -14,10 +21,21 @@
     "lint": "tsc --noEmit",
     "postinstall": "node scripts/download-model.mjs || true"
   },
-  "keywords": ["mcp", "memory", "ai", "semantic-search", "vector", "sqlite", "claude", "cursor"],
+  "keywords": [
+    "mcp",
+    "memory",
+    "ai",
+    "semantic-search",
+    "vector",
+    "sqlite",
+    "claude",
+    "cursor"
+  ],
   "author": "AdelElo13",
   "license": "MIT",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^11.0.0",
