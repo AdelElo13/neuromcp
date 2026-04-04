@@ -22,7 +22,23 @@ npx neuromcp
 npx neuromcp
 ```
 
-The server starts on stdio, creates `~/.neuromcp/memory.db` on first run, and downloads the ONNX embedding model automatically.
+The server starts on stdio, creates `~/.neuromcp/memory.db` on first run, and downloads a fallback ONNX model automatically.
+
+### Recommended: Install Ollama for real semantic search
+
+neuromcp works out of the box with a built-in ONNX model, but for **real semantic understanding** (finding "how does auth work?" when the memory says "JWT tokens are validated in middleware"), install [Ollama](https://ollama.com) with `nomic-embed-text`:
+
+```bash
+# Install Ollama from https://ollama.com, then:
+ollama pull nomic-embed-text
+```
+
+neuromcp auto-detects Ollama at `localhost:11434` and upgrades automatically. No config needed.
+
+| Provider | Semantic Quality | Setup |
+|----------|-----------------|-------|
+| **Ollama + nomic-embed-text** | Excellent — real semantic understanding, 8K context | `ollama pull nomic-embed-text` |
+| ONNX (built-in fallback) | Basic — keyword overlap only, no true semantic search | Zero config |
 
 ## Installation
 
