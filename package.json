@@ -1,7 +1,12 @@
 {
   "name": "neuromcp",
   "version": "0.4.0",
+  "mcpName": "io.github.adelelo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AdelElo13/neuromcp.git"
+  },
   "type": "module",
   "main": "dist/index.js",
   "exports": {
