@@ -1,0 +1,83 @@
+{
+  "memories": [
+    { "id": "ns-a-1", "content": "project alpha uses react with nextjs for the frontend", "namespace": "project-alpha", "category": "decision", "tags": ["react", "nextjs"] },
+    { "id": "ns-a-2", "content": "project alpha api uses express with prisma orm", "namespace": "project-alpha", "category": "decision", "tags": ["express", "prisma"] },
+    { "id": "ns-a-3", "content": "project alpha deploys to vercel with preview branches", "namespace": "project-alpha", "category": "config", "tags": ["vercel", "deployment"] },
+    { "id": "ns-a-4", "content": "project alpha database is postgres on supabase hosted", "namespace": "project-alpha", "category": "config", "tags": ["postgres", "supabase"] },
+    { "id": "ns-a-5", "content": "project alpha auth uses clerk for authentication", "namespace": "project-alpha", "category": "decision", "tags": ["auth", "clerk"] },
+
+    { "id": "ns-b-1", "content": "project beta uses vue with nuxt for the frontend", "namespace": "project-beta", "category": "decision", "tags": ["vue", "nuxt"] },
+    { "id": "ns-b-2", "content": "project beta api uses fastify with drizzle orm", "namespace": "project-beta", "category": "decision", "tags": ["fastify", "drizzle"] },
+    { "id": "ns-b-3", "content": "project beta deploys to railway with auto scaling", "namespace": "project-beta", "category": "config", "tags": ["railway", "deployment"] },
+    { "id": "ns-b-4", "content": "project beta database is mysql on planetscale hosted", "namespace": "project-beta", "category": "config", "tags": ["mysql", "planetscale"] },
+    { "id": "ns-b-5", "content": "project beta auth uses lucia for authentication", "namespace": "project-beta", "category": "decision", "tags": ["auth", "lucia"] },
+
+    { "id": "ns-c-1", "content": "project gamma uses svelte with sveltekit for frontend", "namespace": "project-gamma", "category": "decision", "tags": ["svelte", "sveltekit"] },
+    { "id": "ns-c-2", "content": "project gamma api uses hono with kysely orm", "namespace": "project-gamma", "category": "decision", "tags": ["hono", "kysely"] },
+    { "id": "ns-c-3", "content": "project gamma deploys to cloudflare workers at edge", "namespace": "project-gamma", "category": "config", "tags": ["cloudflare", "deployment"] },
+    { "id": "ns-c-4", "content": "project gamma database is d1 sqlite on cloudflare", "namespace": "project-gamma", "category": "config", "tags": ["d1", "cloudflare"] },
+    { "id": "ns-c-5", "content": "project gamma auth uses workos for authentication", "namespace": "project-gamma", "category": "decision", "tags": ["auth", "workos"] }
+  ],
+  "queries": [
+    {
+      "query": "project alpha uses react with nextjs for the frontend",
+      "namespace": "project-alpha",
+      "expected_ids": ["ns-a-1"],
+      "excluded_ids": ["ns-b-1", "ns-c-1"]
+    },
+    {
+      "query": "project alpha api uses express with prisma",
+      "namespace": "project-alpha",
+      "expected_ids": ["ns-a-2"],
+      "excluded_ids": ["ns-b-2", "ns-c-2"]
+    },
+    {
+      "query": "project alpha deploys to vercel with preview",
+      "namespace": "project-alpha",
+      "expected_ids": ["ns-a-3"],
+      "excluded_ids": ["ns-b-3", "ns-c-3"]
+    },
+    {
+      "query": "project beta uses vue with nuxt for the frontend",
+      "namespace": "project-beta",
+      "expected_ids": ["ns-b-1"],
+      "excluded_ids": ["ns-a-1", "ns-c-1"]
+    },
+    {
+      "query": "project beta api uses fastify with drizzle",
+      "namespace": "project-beta",
+      "expected_ids": ["ns-b-2"],
+      "excluded_ids": ["ns-a-2", "ns-c-2"]
+    },
+    {
+      "query": "project beta database is mysql on planetscale",
+      "namespace": "project-beta",
+      "expected_ids": ["ns-b-4"],
+      "excluded_ids": ["ns-a-4", "ns-c-4"]
+    },
+    {
+      "query": "project gamma uses svelte with sveltekit",
+      "namespace": "project-gamma",
+      "expected_ids": ["ns-c-1"],
+      "excluded_ids": ["ns-a-1", "ns-b-1"]
+    },
+    {
+      "query": "project gamma deploys to cloudflare workers",
+      "namespace": "project-gamma",
+      "expected_ids": ["ns-c-3"],
+      "excluded_ids": ["ns-a-3", "ns-b-3"]
+    },
+    {
+      "query": "project gamma auth uses workos for authentication",
+      "namespace": "project-gamma",
+      "expected_ids": ["ns-c-5"],
+      "excluded_ids": ["ns-a-5", "ns-b-5"]
+    },
+    {
+      "query": "project alpha auth uses clerk for authentication",
+      "namespace": "project-alpha",
+      "expected_ids": ["ns-a-5"],
+      "excluded_ids": ["ns-b-5", "ns-c-5"]
+    }
+  ]
+}

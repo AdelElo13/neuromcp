@@ -1,0 +1,170 @@
+{
+  "memories": [
+    {
+      "id": "gov-high-1",
+      "content": "user confirmed preference for dark mode in all applications",
+      "source_trust": "high",
+      "category": "preference",
+      "tags": ["ui", "dark-mode"]
+    },
+    {
+      "id": "gov-high-2",
+      "content": "user confirmed api key rotation schedule is every 90 days",
+      "source_trust": "high",
+      "category": "config",
+      "tags": ["security", "api-keys"]
+    },
+    {
+      "id": "gov-high-3",
+      "content": "user confirmed deployment window is saturday 2am to 6am utc",
+      "source_trust": "high",
+      "category": "config",
+      "tags": ["deployment", "scheduling"]
+    },
+    {
+      "id": "gov-med-1",
+      "content": "auto detected preference for functional programming style",
+      "source_trust": "medium",
+      "category": "preference",
+      "tags": ["coding-style", "functional"]
+    },
+    {
+      "id": "gov-med-2",
+      "content": "auto detected preference for small focused commits",
+      "source_trust": "medium",
+      "category": "preference",
+      "tags": ["git", "workflow"]
+    },
+    {
+      "id": "gov-med-3",
+      "content": "auto detected test coverage target of eighty percent",
+      "source_trust": "medium",
+      "category": "config",
+      "tags": ["testing", "coverage"]
+    },
+    {
+      "id": "gov-low-1",
+      "content": "error log suggested increasing connection pool to fifty",
+      "source_trust": "low",
+      "category": "suggestion",
+      "tags": ["database", "tuning"]
+    },
+    {
+      "id": "gov-low-2",
+      "content": "error log suggested enabling query plan caching for postgres",
+      "source_trust": "low",
+      "category": "suggestion",
+      "tags": ["postgres", "performance"]
+    },
+    {
+      "id": "gov-low-3",
+      "content": "error log suggested adding retry logic for external api calls",
+      "source_trust": "low",
+      "category": "suggestion",
+      "tags": ["reliability", "retry"]
+    },
+    {
+      "id": "gov-unverified-1",
+      "content": "unverified claim that bun is faster than node for all workloads",
+      "source_trust": "unverified",
+      "category": "claim",
+      "tags": ["bun", "performance"]
+    },
+    {
+      "id": "gov-unverified-2",
+      "content": "unverified claim that tailwind is better than css modules always",
+      "source_trust": "unverified",
+      "category": "claim",
+      "tags": ["tailwind", "css"]
+    },
+    {
+      "id": "gov-tomb-1",
+      "content": "old preference for using yarn package manager now superseded",
+      "is_tombstoned": true,
+      "source_trust": "medium",
+      "category": "preference",
+      "tags": ["yarn", "deprecated"]
+    },
+    {
+      "id": "gov-tomb-2",
+      "content": "old config for webpack bundler replaced by vite config",
+      "is_tombstoned": true,
+      "source_trust": "medium",
+      "category": "config",
+      "tags": ["webpack", "deprecated"]
+    },
+    {
+      "id": "gov-tomb-3",
+      "content": "old decision to use mongodb replaced by sqlite decision",
+      "is_tombstoned": true,
+      "source_trust": "high",
+      "category": "decision",
+      "tags": ["mongodb", "deprecated"]
+    }
+  ],
+  "queries": [
+    {
+      "query": "user confirmed preference for dark mode in all applications",
+      "min_trust": "high",
+      "expected_ids": ["gov-high-1"],
+      "excluded_ids": ["gov-med-1", "gov-low-1", "gov-unverified-1", "gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "user confirmed api key rotation schedule is every 90 days",
+      "min_trust": "high",
+      "expected_ids": ["gov-high-2"],
+      "excluded_ids": ["gov-med-2", "gov-low-2", "gov-unverified-2", "gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "auto detected preference for functional programming",
+      "min_trust": "medium",
+      "expected_ids": ["gov-med-1"],
+      "excluded_ids": ["gov-low-1", "gov-unverified-1", "gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "auto detected test coverage target of eighty",
+      "min_trust": "medium",
+      "expected_ids": ["gov-med-3"],
+      "excluded_ids": ["gov-unverified-1", "gov-unverified-2", "gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "error log suggested increasing connection pool",
+      "min_trust": "low",
+      "expected_ids": ["gov-low-1"],
+      "excluded_ids": ["gov-unverified-1", "gov-unverified-2", "gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "error log suggested adding retry logic for external",
+      "min_trust": "low",
+      "expected_ids": ["gov-low-3"],
+      "excluded_ids": ["gov-unverified-1", "gov-unverified-2", "gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "old preference for using yarn package manager now",
+      "min_trust": null,
+      "expected_ids": [],
+      "excluded_ids": ["gov-tomb-1"],
+      "description": "tombstoned memory should never appear"
+    },
+    {
+      "query": "old config for webpack bundler replaced by vite",
+      "min_trust": null,
+      "expected_ids": [],
+      "excluded_ids": ["gov-tomb-2"],
+      "description": "tombstoned memory should never appear"
+    },
+    {
+      "query": "user confirmed deployment window is saturday 2am",
+      "min_trust": "high",
+      "expected_ids": ["gov-high-3"],
+      "excluded_ids": ["gov-tomb-1", "gov-tomb-2", "gov-tomb-3"]
+    },
+    {
+      "query": "unverified claim that bun is faster than node",
+      "min_trust": "medium",
+      "expected_ids": [],
+      "excluded_ids": ["gov-unverified-1"],
+      "description": "unverified should be excluded when min_trust is medium"
+    }
+  ]
+}
