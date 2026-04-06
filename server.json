@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.adelelo13/neuromcp",
-  "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, knowledge graph, governance, and consolidation",
+  "name": "io.github.AdelElo13/neuromcp",
+  "description": "Semantic memory for AI agents with hybrid search, knowledge graph, and consolidation",
   "repository": {
     "url": "https://github.com/AdelElo13/neuromcp",
     "source": "github"
   },
-  "version": "0.4.1",
+  "version": "0.4.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "neuromcp",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

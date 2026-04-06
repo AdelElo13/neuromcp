@@ -5,6 +5,57 @@ export type ConsolidationAction = 'merge' | 'prune' | 'decay' | 'reindex' | 'tom
 export type OperationType = 'consolidate' | 'reindex' | 'import' | 'export';
 export type OperationStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
+// ─── Knowledge Graph Types ──────────────────────────────────────────
+export type RelationType =
+  | 'causes'
+  | 'fixes'
+  | 'contradicts'
+  | 'relates_to'
+  | 'part_of'
+  | 'depends_on'
+  | 'supersedes'
+  | 'similar_to';
+
+export interface Entity {
+  readonly id: string;
+  readonly name: string;
+  readonly entity_type: string;
+  readonly namespace: string;
+  readonly metadata: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly is_deleted: number;
+}
+
+export interface Relation {
+  readonly id: string;
+  readonly source_entity_id: string;
+  readonly target_entity_id: string;
+  readonly relation_type: string;
+  readonly weight: number;
+  readonly metadata: string;
+  readonly namespace: string;
+  readonly valid_from: string | null;
+  readonly valid_to: string | null;
+  readonly created_at: string;
+  readonly is_deleted: number;
+}
+
+export interface MemoryEntity {
+  readonly memory_id: string;
+  readonly entity_id: string;
+  readonly role: string;
+}
+
+// ─── Contradiction Types ────────────────────────────────────────────
+export interface Contradiction {
+  readonly existing_id: string;
+  readonly new_content: string;
+  readonly existing_content: string;
+  readonly similarity: number;
+  readonly resolution: 'supersede' | 'coexist' | 'flag';
+}
+
 export interface Memory {
   readonly id: string;
   readonly content: string;
@@ -32,6 +83,11 @@ export interface Memory {
   readonly supersedes_id: string | null;
   readonly superseded_by_id: string | null;
   readonly metadata: string;
+  // Phase 3: Temporal validity
+  readonly valid_from: string | null;
+  readonly valid_to: string | null;
+  // Phase 4: Cognitive
+  readonly surprise_score: number;
 }
 
 export interface MemoryWithScore extends Memory {
@@ -128,4 +184,37 @@ export interface OperationRecord {
   readonly items_processed: number;
   readonly error: string | null;
   readonly metadata: string;
+}
+
+// ─── Graph Query Results ────────────────────────────────────────────
+export interface GraphNode {
+  readonly entity: Entity;
+  readonly memory_count: number;
+}
+
+export interface GraphEdge {
+  readonly relation: Relation;
+  readonly source_name: string;
+  readonly target_name: string;
+}
+
+export interface GraphQueryResult {
+  readonly nodes: readonly GraphNode[];
+  readonly edges: readonly GraphEdge[];
+  readonly traversal_depth: number;
+}
+
+// ─── Backfill Result ────────────────────────────────────────────────
+export interface BackfillResult {
+  readonly total: number;
+  readonly embedded: number;
+  readonly skipped: number;
+  readonly errors: number;
+}
+
+// ─── Store Result extended ──────────────────────────────────────────
+export interface StoreResultExtended extends StoreResult {
+  readonly contradictions?: readonly Contradiction[];
+  readonly surprise_score?: number;
+  readonly entities_extracted?: readonly string[];
 }

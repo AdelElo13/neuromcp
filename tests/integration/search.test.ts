@@ -85,11 +85,10 @@ describe('searchMemory', () => {
     );
 
     expect(results.length).toBeGreaterThan(0);
-    // Scores should be in descending order
-    for (let i = 1; i < results.length; i++) {
-      expect(results[i - 1]!.similarity_score).toBeGreaterThanOrEqual(
-        results[i]!.similarity_score,
-      );
+    // After MMR re-ranking, scores may not be strictly descending
+    // (diversity trade-off), but all results should have positive scores
+    for (const r of results) {
+      expect(r.similarity_score).toBeGreaterThan(0);
     }
   });
 

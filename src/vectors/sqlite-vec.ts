@@ -66,9 +66,13 @@ export class SqliteVecStore implements VectorStore {
       )
       .all(buf, k) as Array<{ id: string; distance: number }>;
 
+    // sqlite-vec returns L2 (Euclidean) distance.
+    // For L2-normalized vectors: cosine_similarity = 1 - L2²/2
+    // We convert to "cosine distance" (1 - cosine_similarity = L2²/2)
+    // so that `1 - distance` gives true cosine similarity.
     return rows.map((row) => ({
       id: row.id,
-      distance: row.distance,
+      distance: (row.distance * row.distance) / 2,
     }));
   }
 

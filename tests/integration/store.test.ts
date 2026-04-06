@@ -146,7 +146,9 @@ describe('storeMemory', () => {
     expect(row['agent_id']).toBe('agent-1');
     expect(row['category']).toBe('code');
     expect(JSON.parse(row['tags'] as string)).toEqual(['typescript', 'mcp']);
-    expect(row['importance']).toBe(0.9);
+    // importance is adjusted by surprise score: min(0.9 + surprise*0.2, 1.0)
+    // In a near-empty DB, surprise ≈ 1.0, so adjusted ≈ 1.0
+    expect(row['importance']).toBeGreaterThanOrEqual(0.9);
     expect(JSON.parse(row['metadata'] as string)).toEqual({ key: 'value' });
     expect(row['expires_at']).toBe('2030-01-01T00:00:00Z');
   });

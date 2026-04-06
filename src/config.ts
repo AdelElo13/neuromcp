@@ -20,6 +20,16 @@ export interface NeuromcpConfig {
   readonly claudeCodeIntegration: 'auto' | 'enabled' | 'disabled';
   readonly logLevel: 'debug' | 'info' | 'warn' | 'error';
   readonly logFormat: 'text' | 'json';
+  // Phase 3: Contradiction
+  readonly contradictionThreshold: number;
+  // Phase 4: Cognitive
+  readonly surpriseDecayDays: number;
+  readonly primingBoost: number;
+  readonly mmrLambda: number;
+  // HTTP transport
+  readonly httpEnabled: boolean;
+  readonly httpPort: number;
+  readonly httpHost: string;
 }
 
 function env(key: string, fallback: string): string {
@@ -60,5 +70,12 @@ export function loadConfig(): NeuromcpConfig {
     claudeCodeIntegration: env('NEUROMCP_CLAUDE_CODE_INTEGRATION', 'auto') as NeuromcpConfig['claudeCodeIntegration'],
     logLevel: env('NEUROMCP_LOG_LEVEL', 'info') as NeuromcpConfig['logLevel'],
     logFormat: env('NEUROMCP_LOG_FORMAT', 'text') as NeuromcpConfig['logFormat'],
+    contradictionThreshold: envNum('NEUROMCP_CONTRADICTION_THRESHOLD', 0.82),
+    surpriseDecayDays: envNum('NEUROMCP_SURPRISE_DECAY_DAYS', 7),
+    primingBoost: envNum('NEUROMCP_PRIMING_BOOST', 0.15),
+    mmrLambda: envNum('NEUROMCP_MMR_LAMBDA', 0.7),
+    httpEnabled: envBool('NEUROMCP_HTTP_ENABLED', false),
+    httpPort: envNum('NEUROMCP_HTTP_PORT', 3200),
+    httpHost: env('NEUROMCP_HTTP_HOST', '127.0.0.1'),
   };
 }

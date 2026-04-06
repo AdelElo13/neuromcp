@@ -26,6 +26,26 @@ function recordVersion(db: Database, version: number, description: string): void
   ).run(version, description);
 }
 
+function migrateV1ToV2(db: Database, logger: Logger): void {
+  logger.info('migrations', 'Running v1 to v2 migration: knowledge graph + temporal + cognitive');
+
+  const alterStatements = [
+    'ALTER TABLE memories ADD COLUMN valid_from TEXT',
+    'ALTER TABLE memories ADD COLUMN valid_to TEXT',
+    'ALTER TABLE memories ADD COLUMN surprise_score REAL NOT NULL DEFAULT 0.0',
+  ];
+
+  for (const stmt of alterStatements) {
+    try {
+      db.prepare(stmt).run();
+    } catch {
+      // Column already exists
+    }
+  }
+
+  applySchema(db);
+}
+
 export function runMigrations(db: Database, dbPath: string, logger: Logger): void {
   const currentVersion = getCurrentVersion(db);
 
@@ -37,7 +57,6 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     return;
   }
 
-  // Back up before migration (only if DB has existing data)
   if (currentVersion > 0) {
     const backupPath = `${dbPath}.backup-v${currentVersion}`;
     logger.info('migrations', 'Backing up database before migration', {
@@ -53,7 +72,15 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     to: SCHEMA_VERSION,
   });
 
-  applySchema(db);
+  if (currentVersion < 2) {
+    migrateV1ToV2(db, logger);
+  }
+
+  if (currentVersion < 3) {
+    logger.info('migrations', 'Running v2 to v3 migration: claims table, HTTP transport support');
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

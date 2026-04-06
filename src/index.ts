@@ -8,16 +8,20 @@ import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
 import { createEmbeddingProvider } from './embeddings/factory.js';
 import { createServer } from './server.js';
+import { startScheduler } from './scheduler.js';
+import { startHttpTransport } from './transport/http.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger({ level: config.logLevel, format: config.logFormat });
   const metrics = createMetrics();
 
-  logger.info('startup', 'Loading neuromcp', {
+  logger.info('startup', 'Loading neuromcp v0.3.0', {
     dbPath: config.dbPath,
     embeddingProvider: config.embeddingProvider,
     defaultNamespace: config.defaultNamespace,
+    autoConsolidate: config.autoConsolidate,
+    httpEnabled: config.httpEnabled,
   });
 
   // Open database and run migrations
@@ -34,11 +38,36 @@ async function main(): Promise<void> {
   // Create MCP server with all tools, resources, and prompts
   const server = createServer({ db, vecStore, embedder, config, logger, metrics });
 
-  // Connect via stdio transport
+  // Start auto-consolidation scheduler
+  const stopScheduler = startScheduler({ db, vecStore, embedder, config, logger, metrics });
+
+  // Connect via stdio transport (primary)
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   logger.info('startup', 'neuromcp MCP server running on stdio');
+
+  // Optionally start HTTP transport (dual mode)
+  if (config.httpEnabled) {
+    try {
+      await startHttpTransport(server, {
+        port: config.httpPort,
+        host: config.httpHost,
+      }, logger);
+    } catch (err: unknown) {
+      logger.warn('startup', 'HTTP transport failed to start, running stdio-only', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Cleanup on exit
+  const cleanup = (): void => {
+    stopScheduler();
+    process.exit(0);
+  };
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
 }
 
 main().catch((error: unknown) => {

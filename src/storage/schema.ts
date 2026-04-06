@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -29,7 +29,10 @@ const CREATE_TABLES = `
     tombstoned_at TEXT,
     supersedes_id TEXT,
     superseded_by_id TEXT,
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    valid_from TEXT,
+    valid_to TEXT,
+    surprise_score REAL NOT NULL DEFAULT 0.0
   );
 
   CREATE TABLE IF NOT EXISTS consolidation_log (
@@ -62,6 +65,53 @@ const CREATE_TABLES = `
     applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     description TEXT
   );
+
+  -- Knowledge Graph: Entities
+  CREATE TABLE IF NOT EXISTS entities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT 'concept',
+    namespace TEXT NOT NULL DEFAULT 'default',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    is_deleted INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- Knowledge Graph: Relations (typed edges with temporal validity)
+  CREATE TABLE IF NOT EXISTS relations (
+    id TEXT PRIMARY KEY,
+    source_entity_id TEXT NOT NULL REFERENCES entities(id),
+    target_entity_id TEXT NOT NULL REFERENCES entities(id),
+    relation_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    namespace TEXT NOT NULL DEFAULT 'default',
+    valid_from TEXT,
+    valid_to TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    is_deleted INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- Junction: memories <-> entities
+  CREATE TABLE IF NOT EXISTS memory_entities (
+    memory_id TEXT NOT NULL REFERENCES memories(id),
+    entity_id TEXT NOT NULL REFERENCES entities(id),
+    role TEXT NOT NULL DEFAULT 'mentioned',
+    PRIMARY KEY (memory_id, entity_id)
+  );
+
+  -- Claims: atomic verifiable facts extracted from memories
+  CREATE TABLE IF NOT EXISTS claims (
+    id TEXT PRIMARY KEY,
+    memory_id TEXT NOT NULL REFERENCES memories(id),
+    content TEXT NOT NULL,
+    subject TEXT,
+    predicate TEXT,
+    object TEXT,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
 `;
 
 const CREATE_INDEXES = `
@@ -82,6 +132,22 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(type);
   CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
   CREATE INDEX IF NOT EXISTS idx_operations_namespace ON operations(namespace);
+  CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+  CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+  CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace);
+  CREATE INDEX IF NOT EXISTS idx_entities_deleted ON entities(is_deleted);
+  CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_entity_id);
+  CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_entity_id);
+  CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type);
+  CREATE INDEX IF NOT EXISTS idx_relations_namespace ON relations(namespace);
+  CREATE INDEX IF NOT EXISTS idx_relations_validity ON relations(valid_from, valid_to);
+  CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id);
+  CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_memories_valid_from ON memories(valid_from);
+  CREATE INDEX IF NOT EXISTS idx_memories_valid_to ON memories(valid_to);
+  CREATE INDEX IF NOT EXISTS idx_claims_memory_id ON claims(memory_id);
+  CREATE INDEX IF NOT EXISTS idx_claims_subject ON claims(subject);
+  CREATE INDEX IF NOT EXISTS idx_claims_confidence ON claims(confidence);
 `;
 
 function ftsTableExists(db: Database): boolean {

@@ -1,6 +1,6 @@
 # neuromcp
 
-Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation.
+Semantic memory for AI agents — local-first MCP server with hybrid search, compiled wiki knowledge, and crash-resilient session persistence.
 
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![license](https://img.shields.io/npm/l/neuromcp)](./LICENSE)
@@ -11,90 +11,76 @@ npx neuromcp
 
 ## Why
 
-AI agents forget everything between sessions. The default MCP memory server stores flat key-value pairs with keyword search — fine for "remember my name is Bob", useless for "what was the architectural decision we made about authentication last week?"
+AI agents forget everything between sessions. Existing solutions either store flat key-value pairs (useless for real knowledge) or require cloud infrastructure and API keys.
 
-neuromcp solves this with **hybrid search** (vector embeddings + full-text), **memory governance** (namespaces, trust levels, lineage tracking), and **automatic consolidation** (dedup, decay, prune) — all running locally in a single SQLite file. No cloud, no API keys, no infrastructure.
+neuromcp gives you two layers of memory:
 
-## Before & After
+1. **MCP Server** — hybrid search (vector + full-text), memory governance, automatic consolidation, all in a single SQLite file
+2. **Wiki Knowledge Base** (v0.5) — compiled Markdown knowledge that survives crashes, compounds over sessions, and gives your agent project-aware context at every startup
 
-| | Without neuromcp | With neuromcp |
-|---|---|---|
-| Session memory | Gone when you close the terminal | Persisted, searchable, ranked by relevance |
-| Search | Exact keyword match | Semantic — "auth architecture" finds "JWT validation middleware" |
-| Duplicates | Same fact stored 50 times | Content-hash dedup + similarity-based merge |
-| Stale memories | Accumulate forever | Automatic decay, pruning, and TTL sweeps |
-| Multi-project | Everything in one pile | Namespace isolation per project |
-| Trust | All memories equal | Trust levels (high/medium/low) + source tracking |
-| Setup | API keys, cloud accounts, config files | `npx neuromcp` — zero config, runs locally |
+Inspired by [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Mastra's Observational Memory](https://mastra.ai/research/observational-memory), and [Zep's temporal knowledge graphs](https://arxiv.org/abs/2501.13956) — but simpler than all of them. No vector DB, no embeddings pipeline, no cloud. Just Markdown files + Git + hooks.
 
-## How It Works
+## Architecture
 
 ```
-Query: "how does auth work in this project?"
-                │
-                ▼
-    ┌───────────────────────┐
-    │   Hybrid Search       │
-    │                       │
-    │  Vector (semantic)    │──→ "JWT tokens validated in middleware" (0.87)
-    │  FTS (keyword)        │──→ "auth module uses passport.js"     (0.91)
-    │                       │
-    │  RRF Fusion           │──→ Combined ranking, best results first
-    └───────────────────────┘
-                │
-                ▼
-    Filters: namespace, category, trust, date range
-                │
-                ▼
-    Top results returned to agent
+~/.neuromcp/
+├── memory.db               ← SQLite: hybrid search, MCP tools
+├── wiki/                   ← Compiled knowledge (git-tracked)
+│   ├── index.md            ← Routekaart — LLM reads this FIRST
+│   ├── schema.md           ← Operating rules for the LLM
+│   ├── log.md              ← Append-only changelog
+│   ├── people/             ← User profiles, preferences
+│   ├── projects/           ← Project knowledge (stack, auth, URLs)
+│   ├── systems/            ← Infrastructure (tools, MCP servers)
+│   ├── patterns/           ← Reusable patterns (error fixes, routing)
+│   ├── decisions/          ← Architecture decisions with context
+│   └── skills/             ← Repeatable procedures
+└── raw/sessions/           ← Raw session logs (auto-generated)
 ```
 
-**Embeddings:** Auto-detects Ollama at localhost:11434 for real semantic search (nomic-embed-text). Falls back to built-in ONNX model (bge-small-en-v1.5) for basic similarity. Zero config either way.
+### How the wiki works
 
-**Storage:** Single SQLite file (`~/.neuromcp/memory.db`), WAL mode for concurrent access, content-hash deduplication at write time.
+| When | What happens |
+|------|-------------|
+| **Session start** | Hook injects `index.md` + user profile + auto-detected project page (~1300 tokens) |
+| **During session** | LLM updates wiki pages when learning something persistent |
+| **Every 8 tool calls** | Hook reminds LLM to update the wiki |
+| **Session end** | Hook writes raw session log + git auto-commits all wiki changes |
+| **Crash** | Checkpoint every 5 tool calls to file. Git history for rollback. |
 
-**Consolidation:** Plan-then-commit pipeline — preview what will change before applying. Deduplicates near-identical memories, decays old memories' importance over time, prunes below-threshold, sweeps tombstoned records past TTL.
-
-## Real-World Example
+### What the LLM knows at session start
 
 ```
-You: Where were we with the payment integration?
-
-Claude: [searches neuromcp for "payment integration"]
-
-Found 3 relevant memories:
-- (0.92) "Decided on Stripe over PayPal — better webhook reliability, 
-         session from 2026-03-28"
-- (0.87) "Payment webhook handler at src/api/webhooks/stripe.ts needs 
-         idempotency keys — known bug, not yet fixed"
-- (0.81) "Test coverage for payment module is at 64%, target is 80%"
-
-Based on our previous sessions: we chose Stripe, the webhook handler 
-needs idempotency keys (that's still open), and test coverage needs 
-work. Want me to start with the idempotency fix?
+Schema (operating rules) → How to maintain the wiki
+Index (knowledge map)    → What knowledge exists
+User profile             → Who you are, how you work
+Project page             → Current project details (auto-detected from cwd)
+Last session             → What happened last time
 ```
 
 ## Quick Start
+
+### 1. Start the MCP server
 
 ```bash
 npx neuromcp
 ```
 
-Creates `~/.neuromcp/memory.db` on first run. Downloads ONNX model automatically.
+### 2. Initialize the wiki (optional but recommended)
+
+```bash
+npx neuromcp-init-wiki
+```
+
+This creates the wiki structure, copies hook scripts, and initializes git. Follow the printed instructions to add hooks to your Claude Code settings.
 
 ### Recommended: Add Ollama for real semantic search
 
 ```bash
-# Install Ollama from https://ollama.com, then:
 ollama pull nomic-embed-text
 ```
 
 neuromcp auto-detects it. No config needed.
-
-| Provider | Semantic Quality | Setup |
-|----------|-----------------|-------|
-| **Ollama + nomic-embed-text** | Excellent — real semantic understanding, 8K context | `ollama pull nomic-embed-text` |
-| ONNX (built-in fallback) | Basic — keyword overlap, no deep semantics | Zero config |
 
 ## Installation
 
@@ -175,10 +161,8 @@ Same format — add to your editor's MCP settings.
 | `memory://recent/{namespace}` | Recent in namespace |
 | `memory://id/{id}` | Single memory by ID |
 | `memory://tag/{tag}` | Memories by tag |
-| `memory://tag/{namespace}/{tag}` | Tag within namespace |
-| `memory://namespace/{ns}` | All in namespace (max 100) |
+| `memory://namespace/{ns}` | All in namespace |
 | `memory://consolidation/log` | Recent consolidation entries |
-| `memory://consolidation/log/{id}` | Specific operation log |
 | `memory://operations` | Active/recent operations |
 
 ### Prompts (3)
@@ -189,17 +173,58 @@ Same format — add to your editor's MCP settings.
 | `review_memory_candidate` | Show proposed memory alongside near-duplicates |
 | `consolidation_dry_run` | Preview consolidation without applying |
 
+## Wiki Knowledge Base
+
+The wiki is the compiled, human-readable knowledge layer. It replaces the chaos of session logs with structured, interlinked Markdown pages.
+
+### Why a wiki instead of more vector search?
+
+| Traditional RAG | neuromcp Wiki |
+|----------------|---------------|
+| Re-derives answers every query | Knowledge compiled once, refined over time |
+| Chunking artifacts, retrieval noise | Human-readable pages with source citations |
+| Vector DB, embedding pipeline | Plain Markdown + Git |
+| Black box retrieval | Auditable, editable, portable |
+| Knowledge evaporates | Knowledge compounds |
+
+### Wiki page format
+
+```markdown
+---
+title: My Project
+type: project
+created: 2026-04-06
+updated: 2026-04-06
+confidence: high
+related: [other-project, oauth-setup]
+---
+
+# My Project
+
+Description, stack, auth, deployment details...
+```
+
+### How to use
+
+The wiki works automatically once hooks are installed. The LLM:
+1. Reads `index.md` at session start to know what knowledge exists
+2. Reads specific pages when relevant to the current task
+3. Updates pages when learning something new
+4. Gets reminded every 8 tool calls if the wiki needs updating
+
+You can also browse and edit the wiki manually — it's just Markdown files.
+
 ## Memory Governance
 
-**Namespaces** isolate memories by project, agent, or domain. Each memory belongs to exactly one namespace. Use `NEUROMCP_NAMESPACE` env var or specify per-operation.
+**Namespaces** isolate memories by project, agent, or domain.
 
-**Trust levels** (`high`, `medium`, `low`, `unverified`) indicate confidence in the source. High-trust memories rank higher in search results and resist decay.
+**Trust levels** (`high`, `medium`, `low`, `unverified`) rank search results and control decay resistance.
 
-**Soft delete** tombstones memories instead of removing them. Tombstoned records survive for `NEUROMCP_TOMBSTONE_TTL_DAYS` (default 30) — recoverable until the next consolidation sweep.
+**Soft delete** tombstones memories — recoverable for 30 days.
 
-**Content hashing** (SHA-256) deduplicates at write time. Identical content in the same namespace returns the existing memory instead of creating a duplicate.
+**Content hashing** (SHA-256) deduplicates at write time.
 
-**Lineage tracking** records source (`user`, `auto`, `consolidation`, `claude-code`, `error`), project ID, and agent ID per memory. Full audit trail for governance.
+**Lineage tracking** records source, project ID, and agent ID per memory.
 
 ## Configuration
 
@@ -208,36 +233,24 @@ All via environment variables. Defaults work for most setups.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NEUROMCP_DB_PATH` | `~/.neuromcp/memory.db` | Database file path |
-| `NEUROMCP_MAX_DB_SIZE_MB` | `500` | Max database size |
 | `NEUROMCP_EMBEDDING_PROVIDER` | `auto` | `auto`, `onnx`, `ollama`, `openai` |
-| `NEUROMCP_EMBEDDING_MODEL` | `auto` | Model name (auto-detected) |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 | `NEUROMCP_DEFAULT_NAMESPACE` | `default` | Default namespace |
-| `NEUROMCP_TOMBSTONE_TTL_DAYS` | `30` | Days before permanent sweep |
 | `NEUROMCP_AUTO_CONSOLIDATE` | `false` | Enable periodic consolidation |
-| `NEUROMCP_CONSOLIDATE_INTERVAL_HOURS` | `24` | Consolidation frequency |
-| `NEUROMCP_DECAY_LAMBDA` | `0.01` | Importance decay rate |
-| `NEUROMCP_DEDUP_THRESHOLD` | `0.92` | Cosine similarity for dedup |
-| `NEUROMCP_MIN_IMPORTANCE` | `0.05` | Prune threshold |
-| `NEUROMCP_AUTO_COMMIT_SIMILARITY` | `0.95` | Auto-merge threshold |
-| `NEUROMCP_SWEEP_INTERVAL_HOURS` | `6` | TTL sweep frequency |
+| `NEUROMCP_TOMBSTONE_TTL_DAYS` | `30` | Days before permanent sweep |
 | `NEUROMCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## Comparison
 
-| Feature | neuromcp | @modelcontextprotocol/server-memory | mem0 | cortex-mcp |
-|---------|----------|--------------------------------------|------|------------|
-| Search | Hybrid (vector + FTS + RRF) | Keyword only | Vector only | Vector only |
-| Embeddings | Built-in ONNX (zero config) | None | External API | External API |
-| Governance | Namespaces, trust, soft delete | None | None | Basic |
-| Consolidation | Plan-then-commit | None | None | Manual |
-| Storage | SQLite (single file) | JSON file | Cloud / Postgres | SQLite |
+| Feature | neuromcp | @modelcontextprotocol/server-memory | mem0 | Karpathy Wiki |
+|---------|----------|--------------------------------------|------|---------------|
+| Search | Hybrid (vector + FTS + RRF) | Keyword only | Vector only | Index-based |
+| Wiki | Compiled Markdown + Git | None | None | Manual Markdown |
+| Session persistence | Crash-resilient hooks | None | None | None |
+| Project auto-detect | Yes (from cwd) | No | No | No |
+| Embeddings | Built-in ONNX (zero config) | None | External API | None |
+| Governance | Namespaces, trust, soft delete | None | None | None |
+| Storage | SQLite + Markdown | JSON file | Cloud / Postgres | Markdown |
 | Infrastructure | Zero | Zero | Cloud account | Zero |
-| MCP surface | 8 tools, 13 resources, 3 prompts | 5 tools | N/A | 4 tools |
-
-## Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 

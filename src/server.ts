@@ -13,6 +13,9 @@ import { forgetMemory } from './tools/forget.js';
 import { consolidate } from './tools/consolidate.js';
 import { memoryStats } from './tools/stats.js';
 import { exportMemories, importMemories } from './tools/admin.js';
+import { backfillEmbeddings } from './tools/backfill.js';
+import { createEntity, createRelation, queryGraph } from './tools/graph.js';
+import { searchClaims, getClaimsForMemory } from './cognitive/claims.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -33,7 +36,7 @@ export function createServer(deps: ServerDeps): McpServer {
   const { db, vecStore, embedder, config, logger, metrics } = deps;
 
   const server = new McpServer(
-    { name: 'neuromcp', version: '0.1.0' },
+    { name: 'neuromcp', version: '0.3.0' },
     {
       capabilities: {
         resources: {},
@@ -45,7 +48,7 @@ export function createServer(deps: ServerDeps): McpServer {
 
   // ─── Tool 1: store_memory ──────────────────────────────────────────
   server.registerTool('store_memory', {
-    description: 'Store a new memory with semantic deduplication. Returns the memory ID and whether it matched an existing memory.',
+    description: 'Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found, surprise score, and extracted entities.',
     inputSchema: {
       content: z.string().describe('The memory content to store'),
       namespace: z.string().optional().describe('Namespace to store in (default: config default)'),
@@ -58,6 +61,8 @@ export function createServer(deps: ServerDeps): McpServer {
       agent_id: z.string().optional().describe('Agent identifier'),
       metadata: z.record(z.unknown()).optional().describe('Arbitrary metadata'),
       expires_at: z.string().optional().describe('ISO 8601 expiration timestamp'),
+      valid_from: z.string().optional().describe('ISO 8601 timestamp when this fact becomes valid (default: now)'),
+      valid_to: z.string().optional().describe('ISO 8601 timestamp when this fact stops being valid'),
     },
   }, async (args) => {
     const result = await storeMemory(args, { db, vecStore, embedder, logger, metrics, config });
@@ -66,7 +71,7 @@ export function createServer(deps: ServerDeps): McpServer {
 
   // ─── Tool 2: search_memory ─────────────────────────────────────────
   server.registerTool('search_memory', {
-    description: 'Search memories using hybrid vector + full-text search with RRF ranking.',
+    description: 'Search memories using hybrid vector + full-text search with RRF ranking, graph boost, and cognitive priming. Supports temporal queries (valid_at) to find what was true at a specific time.',
     inputSchema: {
       query: z.string().describe('Search query text'),
       namespace: z.string().optional().describe('Namespace to search (default: config default)'),
@@ -78,6 +83,8 @@ export function createServer(deps: ServerDeps): McpServer {
       after: z.string().optional().describe('Only memories created after this ISO timestamp'),
       before: z.string().optional().describe('Only memories created before this ISO timestamp'),
       hybrid: z.boolean().optional().describe('Use hybrid search (default: true)'),
+      valid_at: z.string().optional().describe('ISO 8601 timestamp — only return memories valid at this time (temporal query)'),
+      graph_boost: z.boolean().optional().describe('Boost results connected via knowledge graph (default: true)'),
     },
   }, async (args) => {
     const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });
@@ -117,7 +124,7 @@ export function createServer(deps: ServerDeps): McpServer {
 
   // ─── Tool 5: consolidate ───────────────────────────────────────────
   server.registerTool('consolidate', {
-    description: 'Run consolidation: merge near-duplicates, decay stale memories, prune low-value, sweep expired. Set commit=true to apply.',
+    description: 'Run consolidation: merge near-duplicates, decay stale memories, prune low-value, sweep expired, purge old tombstones. Set commit=true to apply.',
     inputSchema: {
       namespace: z.string().optional().describe('Namespace to consolidate (default: config default)'),
       similarity_threshold: z.number().min(0).max(1).optional().describe('Similarity threshold for merging'),
@@ -167,6 +174,81 @@ export function createServer(deps: ServerDeps): McpServer {
     return textResult(result);
   });
 
+  // ─── Tool 9: backfill_embeddings ───────────────────────────────────
+  server.registerTool('backfill_embeddings', {
+    description: 'Recompute embeddings for all memories missing from the vector store. Also syncs FTS index.',
+    inputSchema: {},
+  }, async () => {
+    const result = await backfillEmbeddings(db, vecStore, embedder, logger, metrics);
+    return textResult(result);
+  });
+
+  // ─── Tool 10: create_entity ────────────────────────────────────────
+  server.registerTool('create_entity', {
+    description: 'Create or update an entity in the knowledge graph. Entities represent concepts, people, tools, or any named thing.',
+    inputSchema: {
+      name: z.string().describe('Entity name'),
+      entity_type: z.string().optional().describe('Entity type (default: "concept"). Examples: person, tool, project, concept, package, url'),
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+      metadata: z.record(z.unknown()).optional().describe('Arbitrary metadata'),
+    },
+  }, (args) => {
+    const entity = createEntity(args, db, config, logger, metrics);
+    return textResult(entity);
+  });
+
+  // ─── Tool 11: create_relation ──────────────────────────────────────
+  server.registerTool('create_relation', {
+    description: 'Create a typed relation between two entities in the knowledge graph. Supports temporal validity.',
+    inputSchema: {
+      source_entity_id: z.string().describe('Source entity ID'),
+      target_entity_id: z.string().describe('Target entity ID'),
+      relation_type: z.string().describe('Relation type: causes, fixes, contradicts, relates_to, part_of, depends_on, supersedes, similar_to'),
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+      weight: z.number().min(0).max(1).optional().describe('Relation strength 0-1 (default: 1.0)'),
+      metadata: z.record(z.unknown()).optional().describe('Arbitrary metadata'),
+      valid_from: z.string().optional().describe('ISO 8601 timestamp when relation becomes valid'),
+      valid_to: z.string().optional().describe('ISO 8601 timestamp when relation stops being valid'),
+    },
+  }, (args) => {
+    const relation = createRelation(args, db, config, logger, metrics);
+    return textResult(relation);
+  });
+
+  // ─── Tool 12: query_graph ─────────────────────────────────────────
+  server.registerTool('query_graph', {
+    description: 'Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries.',
+    inputSchema: {
+      entity_id: z.string().optional().describe('Start entity ID'),
+      entity_name: z.string().optional().describe('Start entity name (will find closest match)'),
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+      max_depth: z.number().int().min(1).max(5).optional().describe('Maximum traversal depth (default: 2)'),
+      relation_types: z.array(z.string()).optional().describe('Filter by relation types'),
+      valid_at: z.string().optional().describe('ISO 8601 timestamp — only show relations valid at this time'),
+      limit: z.number().int().min(1).max(200).optional().describe('Maximum nodes to return (default: 50)'),
+    },
+  }, (args) => {
+    const result = queryGraph(args, db, config, logger, metrics);
+    return textResult(result);
+  });
+
+  // ─── Tool 13: search_claims ─────────────────────────────────────────
+  server.registerTool('search_claims', {
+    description: 'Search atomic claims extracted from memories. Claims are verifiable facts with subject-predicate-object structure.',
+    inputSchema: {
+      query: z.string().optional().describe('Search text (matches content, subject, or object)'),
+      memory_id: z.string().optional().describe('Get all claims from a specific memory'),
+      limit: z.number().int().min(1).max(100).optional().describe('Max results (default: 20)'),
+    },
+  }, (args) => {
+    if (args.memory_id !== undefined) {
+      const claims = getClaimsForMemory(db, args.memory_id);
+      return textResult(claims);
+    }
+    const claims = searchClaims(db, args.query ?? '', args.limit ?? 20);
+    return textResult(claims);
+  });
+
   // ─── Resources ─────────────────────────────────────────────────────
   registerResources(server, deps);
 
@@ -174,7 +256,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 8,
+    tools: 13,
     resources: 13,
     prompts: 3,
   });
