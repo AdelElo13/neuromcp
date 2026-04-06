@@ -92,6 +92,16 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     applySchema(db);
   }
 
+  if (currentVersion < 5) {
+    logger.info('migrations', 'Running v4 to v5 migration: clusters table, cluster_id on memories');
+    try {
+      db.prepare('ALTER TABLE memories ADD COLUMN cluster_id TEXT REFERENCES clusters(id)').run();
+    } catch {
+      // Column already exists
+    }
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

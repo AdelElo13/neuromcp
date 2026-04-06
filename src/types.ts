@@ -87,6 +87,7 @@ export interface Memory {
   readonly valid_to: string | null;
   readonly surprise_score: number;
   readonly episode_id: string | null;
+  readonly cluster_id: string | null;
 }
 
 export interface MemoryWithScore extends Memory {

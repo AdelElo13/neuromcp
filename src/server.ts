@@ -17,6 +17,7 @@ import { backfillEmbeddings } from './tools/backfill.js';
 import { createEntity, createRelation, queryGraph } from './tools/graph.js';
 import { searchClaims, getClaimsForMemory } from './cognitive/claims.js';
 import { startEpisode, endEpisode, listEpisodes, getEpisode } from './tools/episode.js';
+import { clusterMemories } from './cognitive/clustering.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -300,6 +301,59 @@ export function createServer(deps: ServerDeps): McpServer {
     return textResult(episode);
   });
 
+  // ─── Cluster Tools ─────────────────────────────────────────────────
+
+  server.registerTool('cluster_memories', {
+    description: 'Run k-means clustering on memories in a namespace. Groups semantically related memories into clusters. Returns cluster labels, sizes, and assignments.',
+    inputSchema: {
+      namespace: z.string().optional().describe('Namespace to cluster (default: config default)'),
+      k: z.number().int().min(2).max(50).optional().describe('Number of clusters (auto-selected if omitted: sqrt(n/2), clamped 2-20)'),
+      max_iterations: z.number().int().optional().describe('Max k-means iterations (default: 10)'),
+    },
+  }, async (args) => {
+    const namespace = args.namespace ?? config.defaultNamespace;
+    const result = await clusterMemories(db, vecStore, embedder, namespace, {
+      k: args.k,
+      maxIterations: args.max_iterations,
+    });
+    return textResult({
+      clusters: result.clusters.map(c => ({ id: c.id, label: c.label, size: c.size })),
+      total_assignments: result.assignments.length,
+    });
+  });
+
+  server.registerTool('list_clusters', {
+    description: 'List all clusters in a namespace with their labels and memory counts.',
+    inputSchema: {
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+    },
+  }, (args) => {
+    const namespace = args.namespace ?? config.defaultNamespace;
+    const clusters = db.prepare(
+      'SELECT id, label, centroid_memory_id, size, created_at, updated_at FROM clusters WHERE namespace = ? ORDER BY size DESC'
+    ).all(namespace);
+    return textResult(clusters);
+  });
+
+  server.registerTool('get_cluster_memories', {
+    description: 'Get all memories in a specific cluster, ordered by distance from centroid.',
+    inputSchema: {
+      cluster_id: z.string().describe('Cluster ID'),
+      limit: z.number().int().optional().describe('Max memories to return (default: 20)'),
+    },
+  }, (args) => {
+    const limit = args.limit ?? 20;
+    const memories = db.prepare(`
+      SELECT m.id, m.content, m.category, m.importance, mc.distance
+      FROM memory_clusters mc
+      JOIN memories m ON m.id = mc.memory_id
+      WHERE mc.cluster_id = ? AND m.is_deleted = 0
+      ORDER BY mc.distance ASC
+      LIMIT ?
+    `).all(args.cluster_id, limit);
+    return textResult(memories);
+  });
+
   // ─── Resources ─────────────────────────────────────────────────────
   registerResources(server, deps);
 
@@ -307,7 +361,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 17,
+    tools: 20,
     resources: 13,
     prompts: 3,
   });

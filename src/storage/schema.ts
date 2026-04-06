@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -33,7 +33,8 @@ const CREATE_TABLES = `
     valid_from TEXT,
     valid_to TEXT,
     surprise_score REAL NOT NULL DEFAULT 0.0,
-    episode_id TEXT REFERENCES episodes(id)
+    episode_id TEXT REFERENCES episodes(id),
+    cluster_id TEXT REFERENCES clusters(id)
   );
 
   CREATE TABLE IF NOT EXISTS episodes (
@@ -112,6 +113,25 @@ const CREATE_TABLES = `
     PRIMARY KEY (memory_id, entity_id)
   );
 
+  -- Clusters: semantic groupings of related memories
+  CREATE TABLE IF NOT EXISTS clusters (
+    id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    label TEXT,
+    centroid_memory_id TEXT,
+    size INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  -- Junction: memories <-> clusters (with distance score)
+  CREATE TABLE IF NOT EXISTS memory_clusters (
+    memory_id TEXT NOT NULL REFERENCES memories(id),
+    cluster_id TEXT NOT NULL REFERENCES clusters(id),
+    distance REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (memory_id, cluster_id)
+  );
+
   -- Claims: atomic verifiable facts extracted from memories
   CREATE TABLE IF NOT EXISTS claims (
     id TEXT PRIMARY KEY,
@@ -162,6 +182,10 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace);
   CREATE INDEX IF NOT EXISTS idx_episodes_started_at ON episodes(started_at);
   CREATE INDEX IF NOT EXISTS idx_memories_episode_id ON memories(episode_id);
+  CREATE INDEX IF NOT EXISTS idx_clusters_namespace ON clusters(namespace);
+  CREATE INDEX IF NOT EXISTS idx_memories_cluster_id ON memories(cluster_id);
+  CREATE INDEX IF NOT EXISTS idx_memory_clusters_memory ON memory_clusters(memory_id);
+  CREATE INDEX IF NOT EXISTS idx_memory_clusters_cluster ON memory_clusters(cluster_id);
 `;
 
 function ftsTableExists(db: Database): boolean {
