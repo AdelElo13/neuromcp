@@ -36,7 +36,7 @@ export function createServer(deps: ServerDeps): McpServer {
   const { db, vecStore, embedder, config, logger, metrics } = deps;
 
   const server = new McpServer(
-    { name: 'neuromcp', version: '0.3.0' },
+    { name: 'neuromcp', version: '0.5.0' },
     {
       capabilities: {
         resources: {},

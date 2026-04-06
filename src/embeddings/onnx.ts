@@ -37,10 +37,13 @@ function resolveModelPath(): string | null {
 }
 
 /**
- * Simple hash-based tokenizer for MVP.
+ * DEGRADED: Hash-based tokenizer — NOT real BERT tokenization.
  * Maps whitespace-split tokens to pseudo vocabulary IDs via a deterministic hash.
- * This produces consistent but not linguistically accurate token IDs.
- * The eval harness (Task 10) will measure quality; upgrade to WordPiece later.
+ * This produces consistent but semantically poor embeddings compared to proper
+ * WordPiece tokenization. Similarity scores will be unreliable.
+ *
+ * For production use, strongly prefer Ollama with nomic-embed-text or OpenAI embeddings.
+ * ONNX is kept only as an offline fallback when no network provider is available.
  */
 function simpleTokenize(
   text: string,

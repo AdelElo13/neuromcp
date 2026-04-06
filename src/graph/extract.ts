@@ -3,13 +3,14 @@ import type { Entity } from '../types.js';
 import { upsertEntity, linkMemoryEntity } from './entities.js';
 
 /**
- * Lightweight entity extraction from memory content.
- * No LLM calls — uses pattern matching and heuristics.
+ * Entity extraction from memory content.
+ * Uses pattern matching with aggressive filtering to reduce false positives.
  *
  * Extracts:
- * - Capitalized noun phrases (proper nouns, project names)
- * - Technical terms (URLs, file paths, package names)
- * - Structured patterns (key: value, key=value)
+ * - Bracketed type markers: [person], [project], [tool], [config]
+ * - Technical identifiers: file paths, package names, URLs
+ * - Structured key:value patterns
+ * - Capitalized multi-word proper nouns (2+ words, strict filtering)
  */
 export function extractEntities(
   db: Database.Database,
@@ -21,39 +22,78 @@ export function extractEntities(
   const seen = new Set<string>();
 
   const addEntity = (name: string, entityType: string): void => {
-    const key = `${name.toLowerCase()}:${entityType}`;
+    const normalized = name.trim();
+    const key = `${normalized.toLowerCase()}:${entityType}`;
     if (seen.has(key)) return;
-    if (name.length < 2 || name.length > 100) return;
+    if (normalized.length < 2 || normalized.length > 100) return;
     seen.add(key);
 
-    const entity = upsertEntity(db, name, entityType, namespace);
+    const entity = upsertEntity(db, normalized, entityType, namespace);
     linkMemoryEntity(db, memoryId, entity.id);
     extracted.push(entity);
   };
 
-  // 1. Extract proper nouns (capitalized words not at sentence start)
-  //    Match sequences of 1-4 capitalized words
-  const properNounPattern = /(?:^|[.!?]\s+)(?:(?:[A-Z][a-z]+)(?:\s+[A-Z][a-z]+){0,3})/g;
+  // 1. Bracketed type markers — highest confidence
+  //    e.g. [person] Name, [project] GoAmanah, [tool] Playwright
+  const bracketPattern = /\[(\w+)\]\s+([^\n.,:;]+)/g;
+  for (const match of content.matchAll(bracketPattern)) {
+    const entityType = match[1]!.toLowerCase();
+    const name = match[2]!.trim().split(/\s{2,}/)[0]!.trim();
+    if (name.length >= 2 && VALID_ENTITY_TYPES.has(entityType)) {
+      addEntity(name, entityType);
+    }
+  }
+
+  // 2. File paths (must have at least 2 segments)
+  const pathPattern = /(?:~\/|\/(?:Users|home|var|etc|opt|usr|tmp))[\w./-]+/g;
+  for (const match of content.matchAll(pathPattern)) {
+    const p = match[0];
+    if (p.split('/').length >= 3) {
+      addEntity(p, 'path');
+    }
+  }
+
+  // 3. Package names (npm-style: @scope/package)
+  const scopedPackagePattern = /@[\w-]+\/[\w.-]+/g;
+  for (const match of content.matchAll(scopedPackagePattern)) {
+    addEntity(match[0], 'package');
+  }
+
+  // 4. URLs/domains
+  const urlPattern = /https?:\/\/[\w.-]+(?:\/[\w./-]*)?/g;
+  for (const match of content.matchAll(urlPattern)) {
+    addEntity(match[0], 'url');
+  }
+
+  // 5. GitHub-style references (owner/repo#123)
+  const ghRefPattern = /[\w-]+\/[\w.-]+#\d+/g;
+  for (const match of content.matchAll(ghRefPattern)) {
+    addEntity(match[0], 'reference');
+  }
+
+  // 6. Multi-word proper nouns — strict: only 2-4 capitalized words
+  //    NOT at sentence start, NOT common phrases
   const sentences = content.split(/[.!?\n]/);
   for (const sentence of sentences) {
     const trimmed = sentence.trim();
     if (trimmed.length === 0) continue;
 
-    // Skip the first word of each sentence, look at rest
     const words = trimmed.split(/\s+/);
-    let i = 1; // skip first word
+    let i = 1; // skip first word (sentence start)
     while (i < words.length) {
-      if (/^[A-Z][a-z]/.test(words[i]!)) {
-        // Collect consecutive capitalized words
+      if (/^[A-Z][a-z]{2,}$/.test(words[i]!)) {
         const phrase: string[] = [words[i]!];
         let j = i + 1;
-        while (j < words.length && /^[A-Z][a-z]/.test(words[j]!)) {
+        while (j < words.length && j - i < 4 && /^[A-Z][a-z]{2,}$/.test(words[j]!)) {
           phrase.push(words[j]!);
           j++;
         }
-        const name = phrase.join(' ');
-        if (!STOP_WORDS.has(name.toLowerCase())) {
-          addEntity(name, 'concept');
+        // Only accept multi-word proper nouns (single words are too noisy)
+        if (phrase.length >= 2) {
+          const name = phrase.join(' ');
+          if (!STOP_PHRASES.has(name.toLowerCase())) {
+            addEntity(name, 'concept');
+          }
         }
         i = j;
       } else {
@@ -62,45 +102,30 @@ export function extractEntities(
     }
   }
 
-  // 2. Extract technical identifiers
-  // File paths
-  const pathPattern = /(?:\/[\w.-]+){2,}/g;
-  for (const match of content.matchAll(pathPattern)) {
-    addEntity(match[0], 'path');
-  }
-
-  // Package names (npm-style: @scope/package or package-name)
-  const packagePattern = /(?:@[\w-]+\/[\w.-]+|(?<=\s|^)[\w][\w.-]*(?:\/[\w.-]+))/g;
-  for (const match of content.matchAll(packagePattern)) {
-    const name = match[0];
-    if (name.includes('/') && !name.startsWith('/') && name.length > 3) {
-      addEntity(name, 'package');
-    }
-  }
-
-  // URLs/domains
-  const urlPattern = /https?:\/\/[\w.-]+(?:\/[\w./-]*)?/g;
-  for (const match of content.matchAll(urlPattern)) {
-    addEntity(match[0], 'url');
-  }
-
-  // GitHub-style references (owner/repo#123)
-  const ghRefPattern = /[\w-]+\/[\w.-]+#\d+/g;
-  for (const match of content.matchAll(ghRefPattern)) {
-    addEntity(match[0], 'reference');
-  }
-
-  // 3. Extract key-value patterns as tagged entities
-  const kvPattern = /(?:^|\n)\s*([\w\s]+):\s*(.{3,80})$/gm;
+  // 7. Key: Value patterns — only for well-known keys
+  const kvPattern = /(?:^|\n)\s*((?:Project|Stack|Domain|Repo|Version|Status|Region|Provider|Host|Port|Database|Table|Key|Token|Model)):\s*(.{3,60})$/gmi;
   for (const match of content.matchAll(kvPattern)) {
     const key = match[1]!.trim();
-    if (key.split(/\s+/).length <= 3 && !STOP_WORDS.has(key.toLowerCase())) {
-      addEntity(key, 'attribute');
+    const value = match[2]!.trim();
+    if (!STOP_WORDS.has(key.toLowerCase()) && !STOP_WORDS.has(value.toLowerCase())) {
+      addEntity(`${key}: ${value}`, 'attribute');
     }
   }
 
   return extracted;
 }
+
+const VALID_ENTITY_TYPES = new Set([
+  'person', 'project', 'tool', 'config', 'system', 'service',
+  'package', 'library', 'framework', 'database', 'api', 'concept',
+  'organization', 'team', 'product', 'feature', 'error', 'pattern',
+]);
+
+const STOP_PHRASES = new Set([
+  'the following', 'for example', 'in order', 'such as',
+  'as well', 'in the', 'on the', 'at the', 'to the',
+  'not found', 'no such', 'has been', 'will be', 'can be',
+]);
 
 const STOP_WORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',

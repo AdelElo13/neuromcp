@@ -3,6 +3,7 @@ import type { Logger } from '../observability/logger.js';
 import type { EmbeddingProvider } from './types.js';
 import { OnnxEmbeddingProvider } from './onnx.js';
 import { OllamaEmbeddingProvider } from './ollama.js';
+import { OpenAIEmbeddingProvider } from './openai.js';
 
 export async function createEmbeddingProvider(
   config: NeuromcpConfig,
@@ -27,10 +28,28 @@ export async function createEmbeddingProvider(
         `Install with: ollama pull ${model}`,
       );
     }
-    logger.debug('embeddings', 'Ollama not available, falling back to ONNX');
+    logger.debug('embeddings', 'Ollama not available, trying OpenAI');
   }
 
-  // 2. Try ONNX (if auto or explicitly requested)
+  // 2. Try OpenAI (if auto or explicitly requested)
+  if (requested === 'auto' || requested === 'openai') {
+    const model = config.embeddingModel === 'auto' ? 'text-embedding-3-small' : config.embeddingModel;
+    const openai = new OpenAIEmbeddingProvider(model, undefined, config.embeddingUrl ?? undefined);
+    if (await openai.isAvailable()) {
+      logger.info('embeddings', `Using OpenAI provider: ${openai.name}`, {
+        dimensions: openai.dimensions,
+      });
+      return openai;
+    }
+    if (requested === 'openai') {
+      throw new Error(
+        'OpenAI provider requested but OPENAI_API_KEY not set or API unreachable.',
+      );
+    }
+    logger.debug('embeddings', 'OpenAI not available, falling back to ONNX');
+  }
+
+  // 3. Try ONNX (if auto or explicitly requested) — degraded quality
   if (requested === 'auto' || requested === 'onnx') {
     const onnx = new OnnxEmbeddingProvider();
     if (await onnx.isAvailable()) {
@@ -49,6 +68,7 @@ export async function createEmbeddingProvider(
 
   throw new Error(
     `No embedding provider available (requested: ${requested}). ` +
-    'Install Ollama with nomic-embed-text (recommended), or run: node scripts/download-model.mjs for ONNX fallback.',
+    'Install Ollama with nomic-embed-text (recommended), set OPENAI_API_KEY for OpenAI, ' +
+    'or run: node scripts/download-model.mjs for ONNX fallback.',
   );
 }
