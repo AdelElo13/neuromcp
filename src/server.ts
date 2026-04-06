@@ -18,6 +18,9 @@ import { createEntity, createRelation, queryGraph } from './tools/graph.js';
 import { searchClaims, getClaimsForMemory } from './cognitive/claims.js';
 import { startEpisode, endEpisode, listEpisodes, getEpisode } from './tools/episode.js';
 import { clusterMemories } from './cognitive/clustering.js';
+import { summarizeCluster, summarizeEpisode, summarizeMemories } from './cognitive/summarize.js';
+import { computePageRank, persistCentrality } from './graph/pagerank.js';
+import { updateAdaptiveImportance } from './cognitive/importance.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -38,7 +41,7 @@ export function createServer(deps: ServerDeps): McpServer {
   const { db, vecStore, embedder, config, logger, metrics } = deps;
 
   const server = new McpServer(
-    { name: 'neuromcp', version: '0.5.1' },
+    { name: 'neuromcp', version: '0.6.0' },
     {
       capabilities: {
         resources: {},
@@ -354,6 +357,74 @@ export function createServer(deps: ServerDeps): McpServer {
     return textResult(memories);
   });
 
+  // ─── Summary Tools ─────────────────────────────────────────────────
+
+  server.registerTool('summarize_cluster', {
+    description: 'Generate an extractive summary of a cluster. Selects the most central, representative sentences from cluster memories using embedding centrality.',
+    inputSchema: {
+      cluster_id: z.string().describe('Cluster ID to summarize'),
+      max_sentences: z.number().int().min(1).max(20).optional().describe('Max sentences in summary (default: 5)'),
+    },
+  }, async (args) => {
+    const result = await summarizeCluster(db, embedder, args.cluster_id, { maxSentences: args.max_sentences });
+    return textResult(result);
+  });
+
+  server.registerTool('summarize_episode', {
+    description: 'Generate an extractive summary of an episode. Selects the most central, representative sentences from episode memories.',
+    inputSchema: {
+      episode_id: z.string().describe('Episode ID to summarize'),
+      max_sentences: z.number().int().min(1).max(20).optional().describe('Max sentences in summary (default: 5)'),
+    },
+  }, async (args) => {
+    const result = await summarizeEpisode(db, embedder, args.episode_id, { maxSentences: args.max_sentences });
+    return textResult(result);
+  });
+
+  // ─── PageRank Tool ──────────────────────────────────────────────────
+
+  server.registerTool('compute_centrality', {
+    description: 'Run weighted PageRank over the knowledge graph to compute entity centrality scores. Entities with more connections and higher-weight edges rank higher. Persists results for search boosting.',
+    inputSchema: {
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+      damping: z.number().min(0).max(1).optional().describe('Damping factor (default: 0.85)'),
+      max_iterations: z.number().int().optional().describe('Max iterations (default: 20)'),
+    },
+  }, (args) => {
+    const namespace = args.namespace ?? config.defaultNamespace;
+    const results = computePageRank(db, namespace, {
+      damping: args.damping,
+      maxIterations: args.max_iterations,
+    });
+    const updated = persistCentrality(db, results);
+    return textResult({
+      entities_ranked: results.length,
+      persisted: updated,
+      top_10: results.slice(0, 10).map(r => ({
+        name: r.name,
+        type: r.entity_type,
+        centrality: Math.round(r.centrality * 10000) / 10000,
+      })),
+    });
+  });
+
+  // ─── Adaptive Importance Tool ───────────────────────────────────────
+
+  server.registerTool('update_importance', {
+    description: 'Recalculate adaptive importance for all memories in a namespace. Boosts frequently accessed, recently relevant, and graph-central memories. Run after clustering and PageRank for best results.',
+    inputSchema: {
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+    },
+  }, (args) => {
+    const namespace = args.namespace ?? config.defaultNamespace;
+    const result = updateAdaptiveImportance(db, namespace, {
+      accessBoost: config.accessBoost,
+      recencyBoost: config.recencyBoost,
+      centralityBoost: config.centralityBoost,
+    });
+    return textResult(result);
+  });
+
   // ─── Resources ─────────────────────────────────────────────────────
   registerResources(server, deps);
 
@@ -361,7 +432,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 20,
+    tools: 24,
     resources: 13,
     prompts: 3,
   });

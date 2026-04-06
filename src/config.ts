@@ -30,6 +30,10 @@ export interface NeuromcpConfig {
   readonly httpEnabled: boolean;
   readonly httpPort: number;
   readonly httpHost: string;
+  // Phase 5: Adaptive importance
+  readonly accessBoost: number;
+  readonly recencyBoost: number;
+  readonly centralityBoost: number;
 }
 
 function env(key: string, fallback: string): string {
@@ -77,5 +81,8 @@ export function loadConfig(): NeuromcpConfig {
     httpEnabled: envBool('NEUROMCP_HTTP_ENABLED', false),
     httpPort: envNum('NEUROMCP_HTTP_PORT', 3200),
     httpHost: env('NEUROMCP_HTTP_HOST', '127.0.0.1'),
+    accessBoost: envNum('NEUROMCP_ACCESS_BOOST', 0.05),
+    recencyBoost: envNum('NEUROMCP_RECENCY_BOOST', 0.1),
+    centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
   };
 }
