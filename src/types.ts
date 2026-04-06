@@ -88,6 +88,10 @@ export interface Memory {
   readonly surprise_score: number;
   readonly episode_id: string | null;
   readonly cluster_id: string | null;
+  readonly review_interval_days: number | null;
+  readonly ease_factor: number;
+  readonly next_review_at: string | null;
+  readonly review_count: number;
 }
 
 export interface MemoryWithScore extends Memory {

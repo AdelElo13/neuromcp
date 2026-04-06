@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -34,7 +34,11 @@ const CREATE_TABLES = `
     valid_to TEXT,
     surprise_score REAL NOT NULL DEFAULT 0.0,
     episode_id TEXT REFERENCES episodes(id),
-    cluster_id TEXT REFERENCES clusters(id)
+    cluster_id TEXT REFERENCES clusters(id),
+    review_interval_days REAL,
+    ease_factor REAL DEFAULT 2.5,
+    next_review_at TEXT,
+    review_count INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS episodes (
@@ -132,6 +136,18 @@ const CREATE_TABLES = `
     PRIMARY KEY (memory_id, cluster_id)
   );
 
+  -- Agent profiles for multi-agent sharing
+  CREATE TABLE IF NOT EXISTS agent_profiles (
+    agent_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    expertise TEXT NOT NULL DEFAULT '[]',
+    memory_count INTEGER NOT NULL DEFAULT 0,
+    last_active TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
   -- Claims: atomic verifiable facts extracted from memories
   CREATE TABLE IF NOT EXISTS claims (
     id TEXT PRIMARY KEY,
@@ -186,6 +202,8 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_memories_cluster_id ON memories(cluster_id);
   CREATE INDEX IF NOT EXISTS idx_memory_clusters_memory ON memory_clusters(memory_id);
   CREATE INDEX IF NOT EXISTS idx_memory_clusters_cluster ON memory_clusters(cluster_id);
+  CREATE INDEX IF NOT EXISTS idx_memories_next_review ON memories(next_review_at);
+  CREATE INDEX IF NOT EXISTS idx_agent_profiles_namespace ON agent_profiles(namespace);
 `;
 
 function ftsTableExists(db: Database): boolean {

@@ -102,6 +102,20 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     applySchema(db);
   }
 
+  if (currentVersion < 6) {
+    logger.info('migrations', 'Running v5 to v6 migration: spaced repetition, agent profiles');
+    const alterStatements = [
+      'ALTER TABLE memories ADD COLUMN review_interval_days REAL',
+      'ALTER TABLE memories ADD COLUMN ease_factor REAL DEFAULT 2.5',
+      'ALTER TABLE memories ADD COLUMN next_review_at TEXT',
+      'ALTER TABLE memories ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0',
+    ];
+    for (const stmt of alterStatements) {
+      try { db.prepare(stmt).run(); } catch { /* Column exists */ }
+    }
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {
