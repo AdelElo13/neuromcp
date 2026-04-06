@@ -30,10 +30,13 @@ export interface NeuromcpConfig {
   readonly httpEnabled: boolean;
   readonly httpPort: number;
   readonly httpHost: string;
-  // Phase 5: Adaptive importance
+  // Adaptive importance
   readonly accessBoost: number;
   readonly recencyBoost: number;
   readonly centralityBoost: number;
+  // Entity extraction
+  readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
+  readonly ollamaChatModel: string;
 }
 
 function env(key: string, fallback: string): string {
@@ -84,5 +87,7 @@ export function loadConfig(): NeuromcpConfig {
     accessBoost: envNum('NEUROMCP_ACCESS_BOOST', 0.05),
     recencyBoost: envNum('NEUROMCP_RECENCY_BOOST', 0.1),
     centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
+    entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'auto') as NeuromcpConfig['entityExtractionMode'],
+    ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
   };
 }

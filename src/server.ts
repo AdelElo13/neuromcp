@@ -21,6 +21,7 @@ import { clusterMemories } from './cognitive/clustering.js';
 import { summarizeCluster, summarizeEpisode, summarizeMemories } from './cognitive/summarize.js';
 import { computePageRank, persistCentrality } from './graph/pagerank.js';
 import { updateAdaptiveImportance } from './cognitive/importance.js';
+import { memoryTimeline } from './tools/timeline.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -425,6 +426,23 @@ export function createServer(deps: ServerDeps): McpServer {
     return textResult(result);
   });
 
+  // ─── Timeline Tool ─────────────────────────────────────────────────
+
+  server.registerTool('memory_timeline', {
+    description: 'Track how knowledge about a topic evolved over time. Follows supersession chains and shows full revision history.',
+    inputSchema: {
+      query: z.string().describe('Topic to track evolution of'),
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+      after: z.string().optional().describe('Only show entries after this ISO date'),
+      before: z.string().optional().describe('Only show entries before this ISO date'),
+      include_superseded: z.boolean().optional().describe('Include superseded (old) versions (default: true)'),
+      limit: z.number().int().optional().describe('Max entries (default: 20)'),
+    },
+  }, (args) => {
+    const result = memoryTimeline(db, args, config.defaultNamespace);
+    return textResult(result);
+  });
+
   // ─── Resources ─────────────────────────────────────────────────────
   registerResources(server, deps);
 
@@ -432,7 +450,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 24,
+    tools: 25,
     resources: 13,
     prompts: 3,
   });

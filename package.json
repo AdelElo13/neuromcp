@@ -1,6 +1,6 @@
 {
   "name": "neuromcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
@@ -56,6 +56,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
+    "eval": "tsx eval/runner.ts",
+    "eval:baseline": "tsx eval/runner.ts --update-baseline",
     "postinstall": "node scripts/download-model.mjs || true"
   },
   "keywords": [

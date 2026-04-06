@@ -1,6 +1,60 @@
 import type Database from 'better-sqlite3';
 import type { Entity } from '../types.js';
 import { upsertEntity, linkMemoryEntity } from './entities.js';
+import { createRelation } from './relations.js';
+import { extractWithLLM } from './llm-extract.js';
+
+/**
+ * Dispatch entity extraction: LLM first (if available), regex fallback.
+ */
+export async function extractEntitiesDispatch(
+  db: Database.Database,
+  memoryId: string,
+  content: string,
+  namespace: string,
+  config: { entityExtractionMode: string; ollamaHost: string; ollamaChatModel: string },
+  logger: { debug: (module: string, msg: string, meta?: Record<string, unknown>) => void },
+): Promise<readonly Entity[]> {
+  if (config.entityExtractionMode !== 'regex') {
+    try {
+      const result = await extractWithLLM(content, config.ollamaHost, config.ollamaChatModel);
+      const entities: Entity[] = [];
+      const entityMap = new Map<string, Entity>();
+
+      // Upsert entities
+      for (const e of result.entities) {
+        const entity = upsertEntity(db, e.name, e.type, namespace);
+        linkMemoryEntity(db, memoryId, entity.id);
+        entities.push(entity);
+        entityMap.set(e.name.toLowerCase(), entity);
+      }
+
+      // Create relations
+      for (const r of result.relations) {
+        const source = entityMap.get(r.source.toLowerCase());
+        const target = entityMap.get(r.target.toLowerCase());
+        if (source && target) {
+          createRelation(db, source.id, target.id, r.type, namespace);
+        }
+      }
+
+      if (entities.length > 0) {
+        logger.debug('extract', 'LLM extraction succeeded', {
+          entities: entities.length,
+          relations: result.relations.length,
+        });
+      }
+      return entities;
+    } catch (err: unknown) {
+      if (config.entityExtractionMode === 'llm') {
+        throw err; // strict mode: don't fall back
+      }
+      logger.debug('extract', 'LLM extraction failed, falling back to regex');
+    }
+  }
+
+  return extractEntities(db, memoryId, content, namespace);
+}
 
 /**
  * Entity extraction from memory content.

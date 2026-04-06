@@ -9,7 +9,7 @@ import type { StoreResultExtended, TrustLevel, MemorySource, Contradiction } fro
 import { defaultTrustForSource } from '../governance/trust.js';
 import { computeSurprise } from '../cognitive/surprise.js';
 import { detectContradictions, supersedMemory } from '../cognitive/contradiction.js';
-import { extractEntities } from '../graph/extract.js';
+import { extractEntities, extractEntitiesDispatch } from '../graph/extract.js';
 import { extractClaims } from '../cognitive/claims.js';
 import { eventBus } from '../transport/events.js';
 
@@ -274,10 +274,14 @@ export async function storeMemory(
     'INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, ?)',
   ).run(row.rowid, input.content, tagsJson, category);
 
-  // Step 7: Entity extraction (Phase 2)
+  // Step 7: Entity extraction — LLM (Ollama) with regex fallback
   let entitiesExtracted: readonly string[] = [];
   try {
-    const entities = extractEntities(db, id, input.content, namespace);
+    const entities = await extractEntitiesDispatch(db, id, input.content, namespace, {
+      entityExtractionMode: config.entityExtractionMode,
+      ollamaHost: config.ollamaHost,
+      ollamaChatModel: config.ollamaChatModel,
+    }, logger);
     entitiesExtracted = entities.map((e) => e.name);
     if (entities.length > 0) {
       logger.debug('store', 'Entities extracted', {
