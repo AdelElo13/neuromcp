@@ -81,6 +81,17 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     applySchema(db);
   }
 
+  if (currentVersion < 4) {
+    logger.info('migrations', 'Running v3 to v4 migration: episodes table, episode_id on memories');
+    // episodes table is created by applySchema, just add column to existing memories
+    try {
+      db.prepare('ALTER TABLE memories ADD COLUMN episode_id TEXT REFERENCES episodes(id)').run();
+    } catch {
+      // Column already exists
+    }
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

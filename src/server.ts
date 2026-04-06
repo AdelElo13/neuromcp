@@ -16,6 +16,7 @@ import { exportMemories, importMemories } from './tools/admin.js';
 import { backfillEmbeddings } from './tools/backfill.js';
 import { createEntity, createRelation, queryGraph } from './tools/graph.js';
 import { searchClaims, getClaimsForMemory } from './cognitive/claims.js';
+import { startEpisode, endEpisode, listEpisodes, getEpisode } from './tools/episode.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -63,6 +64,7 @@ export function createServer(deps: ServerDeps): McpServer {
       expires_at: z.string().optional().describe('ISO 8601 expiration timestamp'),
       valid_from: z.string().optional().describe('ISO 8601 timestamp when this fact becomes valid (default: now)'),
       valid_to: z.string().optional().describe('ISO 8601 timestamp when this fact stops being valid'),
+      episode_id: z.string().optional().describe('Episode ID to associate this memory with (from start_episode)'),
     },
   }, async (args) => {
     const result = await storeMemory(args, { db, vecStore, embedder, logger, metrics, config });
@@ -85,6 +87,7 @@ export function createServer(deps: ServerDeps): McpServer {
       hybrid: z.boolean().optional().describe('Use hybrid search (default: true)'),
       valid_at: z.string().optional().describe('ISO 8601 timestamp — only return memories valid at this time (temporal query)'),
       graph_boost: z.boolean().optional().describe('Boost results connected via knowledge graph (default: true)'),
+      episode_id: z.string().optional().describe('Filter by episode ID — only return memories from this episode'),
     },
   }, async (args) => {
     const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });
@@ -249,6 +252,54 @@ export function createServer(deps: ServerDeps): McpServer {
     return textResult(claims);
   });
 
+  // ─── Episode Tools ──────────────────────────────────────────────────
+
+  server.registerTool('start_episode', {
+    description: 'Start a new episode (session/task context). Memories stored with this episode_id will be grouped together. Use to track what happened during a session.',
+    inputSchema: {
+      title: z.string().describe('Episode title (e.g. "Deploy agentproofs-io", "Debug auth flow")'),
+      namespace: z.string().optional().describe('Namespace (default: config default)'),
+      metadata: z.record(z.unknown()).optional().describe('Arbitrary metadata'),
+    },
+  }, (args) => {
+    const episode = startEpisode(db, args, config.defaultNamespace);
+    return textResult(episode);
+  });
+
+  server.registerTool('end_episode', {
+    description: 'End an active episode. Optionally provide a summary, or one will be auto-generated from the most important memories in the episode.',
+    inputSchema: {
+      episode_id: z.string().describe('Episode ID to end'),
+      summary: z.string().optional().describe('Episode summary (auto-generated if omitted)'),
+    },
+  }, (args) => {
+    const result = endEpisode(db, args);
+    return textResult(result);
+  });
+
+  server.registerTool('list_episodes', {
+    description: 'List episodes in a namespace. Shows memory count per episode.',
+    inputSchema: {
+      namespace: z.string().optional().describe('Namespace to list from'),
+      limit: z.number().optional().describe('Max episodes to return (default: 20)'),
+      active_only: z.boolean().optional().describe('Only show active (not ended) episodes'),
+    },
+  }, (args) => {
+    const episodes = listEpisodes(db, args, config.defaultNamespace);
+    return textResult(episodes);
+  });
+
+  server.registerTool('get_episode', {
+    description: 'Get details of a specific episode including memory count.',
+    inputSchema: {
+      episode_id: z.string().describe('Episode ID to retrieve'),
+    },
+  }, (args) => {
+    const episode = getEpisode(db, args.episode_id);
+    if (!episode) return textResult({ error: 'Episode not found' });
+    return textResult(episode);
+  });
+
   // ─── Resources ─────────────────────────────────────────────────────
   registerResources(server, deps);
 
@@ -256,7 +307,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 13,
+    tools: 17,
     resources: 13,
     prompts: 3,
   });

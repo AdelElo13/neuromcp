@@ -25,8 +25,8 @@ export interface SearchInput {
   readonly hybrid?: boolean;
   // Phase 3: Temporal query
   readonly valid_at?: string;
-  // Phase 2: Graph boost
   readonly graph_boost?: boolean;
+  readonly episode_id?: string;
 }
 
 export interface SearchDeps {
@@ -204,6 +204,11 @@ export async function searchMemory(
       if (validFrom !== null && validFrom > input.valid_at) continue;
       // Memory must not have ended validity before valid_at
       if (validTo !== null && validTo <= input.valid_at) continue;
+    }
+
+    // Episode filter
+    if (input.episode_id !== undefined && memory.episode_id !== input.episode_id) {
+      continue;
     }
 
     results.push({ ...memory, similarity_score: candidate.score });

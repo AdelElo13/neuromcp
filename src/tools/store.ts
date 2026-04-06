@@ -25,9 +25,9 @@ export interface StoreInput {
   readonly agent_id?: string;
   readonly metadata?: Record<string, unknown>;
   readonly expires_at?: string;
-  // Phase 3: Temporal validity
   readonly valid_from?: string;
   readonly valid_to?: string;
+  readonly episode_id?: string;
 }
 
 export interface StoreDeps {
@@ -232,11 +232,11 @@ export async function storeMemory(
       schema_version, category, tags, importance, access_count,
       created_at, updated_at, last_accessed_at, expires_at,
       is_deleted, tombstoned_at, supersedes_id, superseded_by_id, metadata,
-      valid_from, valid_to, surprise_score
+      valid_from, valid_to, surprise_score, episode_id
     ) VALUES (
       ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'namespace', 2, ?, ?, ?, 0,
       ?, ?, NULL, ?, 0, NULL, NULL, NULL, ?,
-      ?, ?, ?
+      ?, ?, ?, ?
     )`,
   ).run(
     id,
@@ -259,6 +259,7 @@ export async function storeMemory(
     validFrom,
     input.valid_to ?? null,
     surpriseScore,
+    input.episode_id ?? null,
   );
 
   // Upsert embedding into vector store

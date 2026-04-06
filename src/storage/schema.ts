@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -32,7 +32,18 @@ const CREATE_TABLES = `
     metadata TEXT NOT NULL DEFAULT '{}',
     valid_from TEXT,
     valid_to TEXT,
-    surprise_score REAL NOT NULL DEFAULT 0.0
+    surprise_score REAL NOT NULL DEFAULT 0.0,
+    episode_id TEXT REFERENCES episodes(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS episodes (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ended_at TEXT,
+    summary TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
   );
 
   CREATE TABLE IF NOT EXISTS consolidation_log (
@@ -148,6 +159,9 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_claims_memory_id ON claims(memory_id);
   CREATE INDEX IF NOT EXISTS idx_claims_subject ON claims(subject);
   CREATE INDEX IF NOT EXISTS idx_claims_confidence ON claims(confidence);
+  CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace);
+  CREATE INDEX IF NOT EXISTS idx_episodes_started_at ON episodes(started_at);
+  CREATE INDEX IF NOT EXISTS idx_memories_episode_id ON memories(episode_id);
 `;
 
 function ftsTableExists(db: Database): boolean {

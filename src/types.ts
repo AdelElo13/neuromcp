@@ -83,11 +83,10 @@ export interface Memory {
   readonly supersedes_id: string | null;
   readonly superseded_by_id: string | null;
   readonly metadata: string;
-  // Phase 3: Temporal validity
   readonly valid_from: string | null;
   readonly valid_to: string | null;
-  // Phase 4: Cognitive
   readonly surprise_score: number;
+  readonly episode_id: string | null;
 }
 
 export interface MemoryWithScore extends Memory {
@@ -202,6 +201,21 @@ export interface GraphQueryResult {
   readonly nodes: readonly GraphNode[];
   readonly edges: readonly GraphEdge[];
   readonly traversal_depth: number;
+}
+
+// ─── Episodes (Laag 1: Episodisch Geheugen) ────────────────────────
+export interface Episode {
+  readonly id: string;
+  readonly title: string;
+  readonly namespace: string;
+  readonly started_at: string;
+  readonly ended_at: string | null;
+  readonly summary: string | null;
+  readonly metadata: string;
+}
+
+export interface EpisodeWithStats extends Episode {
+  readonly memory_count: number;
 }
 
 // ─── Backfill Result ────────────────────────────────────────────────
