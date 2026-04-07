@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import type { EmbeddingProvider } from '../embeddings/types.js';
 import type { VectorStore } from '../vectors/types.js';
 import { createHash } from 'node:crypto';
+import { summarizeMemories } from '../cognitive/summarize.js';
 
 export interface CompressionResult {
   readonly digests_created: number;
@@ -81,18 +82,28 @@ export async function compressMemories(
   let memoriesCompressed = 0;
   const now = new Date().toISOString();
 
+  // Transaction must be sync; pre-compute summaries async
+  const clusterSummaries: string[] = [];
+  for (const cluster of clusters) {
+    const members = cluster.map(i => oldMemories[i]!);
+    const memberIds = members.map(m => m.id);
+    const summaryResult = await summarizeMemories(db, embedder, memberIds, {
+      maxSentences: Math.min(5, members.length),
+      maxLength: 600,
+    });
+    clusterSummaries.push(
+      summaryResult.summary
+        ? `[digest] Compressed from ${members.length} memories: ${summaryResult.summary}`
+        : `[digest] Compressed from ${members.length} memories (no extractable sentences)`,
+    );
+  }
+
   const transaction = db.transaction(() => {
-    for (const cluster of clusters) {
+    for (let clusterIdx = 0; clusterIdx < clusters.length; clusterIdx++) {
+      const cluster = clusters[clusterIdx]!;
       const members = cluster.map(i => oldMemories[i]!);
       const maxImportance = Math.max(...members.map(m => m.importance));
-
-      // Merge content: take first sentence of each, deduplicate
-      const sentences = new Set<string>();
-      for (const mem of members) {
-        const first = mem.content.split(/[.!?\n]/)[0]?.trim();
-        if (first && first.length > 10) sentences.add(first);
-      }
-      const mergedContent = `[digest] Compressed from ${members.length} memories: ${[...sentences].join('. ')}`;
+      const mergedContent = clusterSummaries[clusterIdx]!;
 
       // Merge tags
       const allTags = new Set<string>();

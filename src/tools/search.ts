@@ -8,6 +8,7 @@ import type { Memory, MemoryWithScore, TrustLevel } from '../types.js';
 import { namespaceFilter } from '../governance/namespace.js';
 import { meetsMinTrust } from '../governance/trust.js';
 import { computePrimingBoosts, getRecentlyAccessed } from '../cognitive/priming.js';
+import { computeAdaptiveImportance } from '../cognitive/importance.js';
 import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
@@ -211,7 +212,16 @@ export async function searchMemory(
       continue;
     }
 
-    results.push({ ...memory, similarity_score: candidate.score });
+    // Adaptive importance: boost score by access patterns + recency + centrality
+    const factors = computeAdaptiveImportance(db, memory.id, {
+      accessBoost: config.accessBoost,
+      recencyBoost: config.recencyBoost,
+      centralityBoost: config.centralityBoost,
+    });
+    const adaptiveMultiplier = 0.7 + 0.3 * factors.adjusted; // range [0.7, 1.0]
+    const finalScore = candidate.score * adaptiveMultiplier;
+
+    results.push({ ...memory, similarity_score: finalScore });
   }
 
   // Step 9: MMR re-ranking for diversity

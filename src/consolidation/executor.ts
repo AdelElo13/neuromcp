@@ -5,6 +5,8 @@ import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import type { ConsolidationPlan, ConsolidationResult } from '../types.js';
 import { tombstone, tombstoneWithLineage } from '../governance/tombstone.js';
+import { computePageRank, persistCentrality } from '../graph/pagerank.js';
+import { updateAdaptiveImportance } from '../cognitive/importance.js';
 
 /**
  * Applies a consolidation plan in a single transaction.
@@ -127,18 +129,54 @@ export function executeConsolidationPlan(
 
   runAll();
 
+  // Post-consolidation: recompute PageRank centrality scores
+  // This keeps entity centrality fresh after merges/prunes change the graph
+  let pagerankUpdated = 0;
+  try {
+    const prResults = computePageRank(db, plan.namespace);
+    if (prResults.length > 0) {
+      pagerankUpdated = persistCentrality(db, prResults);
+    }
+    logger.info('consolidation', 'PageRank recomputed', {
+      entities: pagerankUpdated,
+    });
+  } catch (err) {
+    logger.warn('consolidation', 'PageRank recompute failed', {
+      error: String(err),
+    });
+  }
+
+  // Post-consolidation: refresh adaptive importance scores
+  let importanceRefreshed = 0;
+  try {
+    const result = updateAdaptiveImportance(db, plan.namespace);
+    importanceRefreshed = result.updated;
+    logger.info('consolidation', 'adaptive importance refreshed', {
+      updated: result.updated,
+      avg_delta: result.avg_delta.toFixed(4),
+    });
+  } catch (err) {
+    logger.warn('consolidation', 'adaptive importance refresh failed', {
+      error: String(err),
+    });
+  }
+
   logger.info('consolidation', 'plan executed', {
     operationId: plan.operation_id,
     merged,
     decayed,
     pruned,
     swept,
+    pagerankUpdated,
+    importanceRefreshed,
   });
 
   metrics.increment('consolidation.merged', merged);
   metrics.increment('consolidation.decayed', decayed);
   metrics.increment('consolidation.pruned', pruned);
   metrics.increment('consolidation.swept', swept);
+  metrics.record('consolidation.pagerank_entities', pagerankUpdated);
+  metrics.record('consolidation.importance_refreshed', importanceRefreshed);
   metrics.record('consolidation.exec_duration_ms', Date.now() - start);
 
   return {

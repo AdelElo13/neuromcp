@@ -21,8 +21,9 @@ export async function extractEntitiesDispatch(
       const entities: Entity[] = [];
       const entityMap = new Map<string, Entity>();
 
-      // Upsert entities
+      // Upsert entities (filter out file paths, URLs, and sentence-like names)
       for (const e of result.entities) {
+        if (isNoiseEntity(e.name, e.type)) continue;
         const entity = upsertEntity(db, e.name, e.type, namespace);
         linkMemoryEntity(db, memoryId, entity.id);
         entities.push(entity);
@@ -98,28 +99,13 @@ export function extractEntities(
     }
   }
 
-  // 2. File paths (must have at least 2 segments)
-  const pathPattern = /(?:~\/|\/(?:Users|home|var|etc|opt|usr|tmp))[\w./-]+/g;
-  for (const match of content.matchAll(pathPattern)) {
-    const p = match[0];
-    if (p.split('/').length >= 3) {
-      addEntity(p, 'path');
-    }
-  }
-
-  // 3. Package names (npm-style: @scope/package)
+  // 2. Package names (npm-style: @scope/package)
   const scopedPackagePattern = /@[\w-]+\/[\w.-]+/g;
   for (const match of content.matchAll(scopedPackagePattern)) {
     addEntity(match[0], 'package');
   }
 
-  // 4. URLs/domains
-  const urlPattern = /https?:\/\/[\w.-]+(?:\/[\w./-]*)?/g;
-  for (const match of content.matchAll(urlPattern)) {
-    addEntity(match[0], 'url');
-  }
-
-  // 5. GitHub-style references (owner/repo#123)
+  // 3. GitHub-style references (owner/repo#123)
   const ghRefPattern = /[\w-]+\/[\w.-]+#\d+/g;
   for (const match of content.matchAll(ghRefPattern)) {
     addEntity(match[0], 'reference');
@@ -180,6 +166,23 @@ const STOP_PHRASES = new Set([
   'as well', 'in the', 'on the', 'at the', 'to the',
   'not found', 'no such', 'has been', 'will be', 'can be',
 ]);
+
+/**
+ * Filter out noise entities: file paths, URLs, sentences, and overly generic names.
+ */
+function isNoiseEntity(name: string, entityType: string): boolean {
+  // File paths
+  if (name.startsWith('/') || name.startsWith('~/') || name.startsWith('./')) return true;
+  // URLs
+  if (/^https?:\/\//.test(name)) return true;
+  // Entity type is path or url
+  if (entityType === 'path' || entityType === 'url') return true;
+  // Sentence-like: contains a verb or is too long with spaces
+  if (name.length > 40 && name.includes(' ')) return true;
+  // Very short noise
+  if (name.length < 2) return true;
+  return false;
+}
 
 const STOP_WORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',

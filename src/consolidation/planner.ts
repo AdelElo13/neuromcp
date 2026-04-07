@@ -5,7 +5,7 @@ import type { Metrics } from '../observability/metrics.js';
 import type { ConsolidationPlan } from '../types.js';
 import { findDuplicates } from './dedup.js';
 import { computeDecay } from './decay.js';
-import { findExpired } from './sweep.js';
+import { findExpired, findStale } from './sweep.js';
 
 export interface ConsolidationOptions {
   readonly similarity_threshold: number;
@@ -46,6 +46,10 @@ export function createConsolidationPlan(
   // 3. Find expired memories
   const proposedSweeps = findExpired(db, namespace);
 
+  // 4. Find stale memories (not accessed in 90+ days with low importance)
+  const stalePrunes = findStale(db, namespace, 90, 0.3);
+  const allPrunes = [...proposedPrunes, ...stalePrunes];
+
   metrics.record('consolidation.plan_duration_ms', Date.now() - start);
 
   return {
@@ -54,12 +58,12 @@ export function createConsolidationPlan(
     created_at: new Date().toISOString(),
     proposed_merges: proposedMerges,
     proposed_decays: proposedDecays,
-    proposed_prunes: proposedPrunes,
+    proposed_prunes: allPrunes,
     proposed_ttl_sweeps: proposedSweeps,
     summary: {
       merge_count: proposedMerges.length,
       decay_count: proposedDecays.length,
-      prune_count: proposedPrunes.length,
+      prune_count: allPrunes.length,
       sweep_count: proposedSweeps.length,
     },
   };

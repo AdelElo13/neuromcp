@@ -5,6 +5,7 @@ import type { NeuromcpConfig } from './config.js';
 import type { Logger } from './observability/logger.js';
 import type { Metrics } from './observability/metrics.js';
 import { consolidate } from './tools/consolidate.js';
+import { compressMemories } from './consolidation/compress.js';
 import { purgeTombstones } from './governance/tombstone.js';
 
 export interface SchedulerDeps {
@@ -36,11 +37,11 @@ export function startScheduler(deps: SchedulerDeps): () => void {
     sweepIntervalHours: config.sweepIntervalHours,
   });
 
-  const runCycle = (): void => {
+  const runCycle = async (): Promise<void> => {
     try {
       logger.info('scheduler', 'Starting auto-consolidation cycle');
 
-      // Run consolidation with commit=true
+      // Run consolidation with commit=true (sync: dedup + decay + prune + sweep + PageRank + importance refresh)
       const output = consolidate(
         { commit: true, namespace: '*' },
         db, vecStore, embedder, config, logger, metrics,
@@ -53,6 +54,21 @@ export function startScheduler(deps: SchedulerDeps): () => void {
           pruned: output.result.pruned,
           swept: output.result.swept,
         });
+      }
+
+      // Compress old memories into digests (async: requires embeddings)
+      try {
+        const compression = await compressMemories(db, embedder, vecStore, '*');
+        if (compression.digests_created > 0 || compression.memories_hard_deleted > 0) {
+          logger.info('scheduler', 'Compression complete', {
+            digests: compression.digests_created,
+            compressed: compression.memories_compressed,
+            hardDeleted: compression.memories_hard_deleted,
+          });
+        }
+      } catch (compressErr: unknown) {
+        const msg = compressErr instanceof Error ? compressErr.message : String(compressErr);
+        logger.warn('scheduler', 'Compression failed', { error: msg });
       }
 
       // Purge old tombstones
@@ -70,10 +86,10 @@ export function startScheduler(deps: SchedulerDeps): () => void {
   };
 
   // Run once at startup (delayed by 30s to let server initialize)
-  const startupTimeout = setTimeout(runCycle, 30_000);
+  const startupTimeout = setTimeout(() => void runCycle(), 30_000);
 
   // Then run on interval
-  const interval = setInterval(runCycle, intervalMs);
+  const interval = setInterval(() => void runCycle(), intervalMs);
 
   return () => {
     clearTimeout(startupTimeout);

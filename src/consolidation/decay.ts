@@ -69,6 +69,7 @@ export function computeDecay(
     const ageMs = now - new Date(row.created_at).getTime();
     const ageDays = ageMs / 86_400_000;
 
+    // Standard prune: low importance + low access + old + not user-sourced
     if (
       newImportance < minImportance &&
       row.access_count < 3 &&
@@ -82,6 +83,22 @@ export function computeDecay(
         access_count: row.access_count,
         age_days: ageDays,
         reason: `decayed importance ${newImportance.toFixed(4)} below threshold ${minImportance}`,
+      });
+    }
+    // Stale prune: 90+ days without access, regardless of importance
+    // Still protect user-sourced and high-trust memories
+    else if (
+      daysSinceAccess >= 90 &&
+      row.access_count === 0 &&
+      row.source !== 'user' &&
+      row.source_trust !== 'high'
+    ) {
+      prunes.push({
+        id: row.id,
+        importance: newImportance,
+        access_count: row.access_count,
+        age_days: ageDays,
+        reason: `stale: ${Math.floor(daysSinceAccess)} days without access, zero access count`,
       });
     }
   }
