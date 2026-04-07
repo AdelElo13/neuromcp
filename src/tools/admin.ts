@@ -46,6 +46,7 @@ export function exportMemories(
 
   // Strip embedding-related fields from export (they are regenerated on import)
   const stripped = rows.map((row) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { embedding_model, embedding_dim, ...rest } = row;
     return rest;
   });

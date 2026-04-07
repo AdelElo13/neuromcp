@@ -4,7 +4,7 @@ import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import type { Entity, Relation, GraphQueryResult } from '../types.js';
 import { upsertEntity, searchEntities } from '../graph/entities.js';
-import { createRelation as createRel, getRelationsForEntity } from '../graph/relations.js';
+import { createRelation as createRel } from '../graph/relations.js';
 import { traverseGraph } from '../graph/traverse.js';
 
 // ─── create_entity ──────────────────────────────────────────────────

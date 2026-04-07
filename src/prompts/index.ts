@@ -3,7 +3,6 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ServerDeps } from '../server.js';
 import { searchMemory } from '../tools/search.js';
 import { consolidate } from '../tools/consolidate.js';
-import type { Memory } from '../types.js';
 
 export function registerPrompts(server: McpServer, deps: ServerDeps): void {
   const { db, vecStore, embedder, config, logger, metrics } = deps;

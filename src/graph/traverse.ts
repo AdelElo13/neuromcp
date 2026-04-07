@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { Entity, Relation, GraphNode, GraphEdge, GraphQueryResult } from '../types.js';
+import type { Entity, GraphNode, GraphEdge, GraphQueryResult } from '../types.js';
 import { getRelationsForEntity } from './relations.js';
 
 /**

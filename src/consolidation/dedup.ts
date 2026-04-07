@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { VectorStore } from '../vectors/types.js';
-import type { Memory, ProposedMerge } from '../types.js';
+import type { ProposedMerge } from '../types.js';
 import { isHigherTrust } from '../governance/trust.js';
 import type { TrustLevel } from '../types.js';
 

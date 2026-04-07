@@ -34,7 +34,7 @@ export function memoryTimeline(
   const limit = input.limit ?? 20;
 
   // Find memories matching the query (FTS)
-  let matchIds: string[] = [];
+  let matchIds: string[];
   try {
     const ftsQuery = '"' + input.query.replace(/"/g, '""') + '"';
     const ftsRows = db.prepare(`

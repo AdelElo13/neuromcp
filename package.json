@@ -1,6 +1,6 @@
 {
   "name": "neuromcp",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
@@ -55,7 +55,7 @@
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit",
+    "lint": "eslint src/ && tsc --noEmit",
     "eval": "tsx eval/runner.ts",
     "eval:baseline": "tsx eval/runner.ts --update-baseline",
     "postinstall": "node scripts/download-model.mjs || true"
@@ -78,16 +78,19 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^11.0.0",
-    "sqlite-vec": "^0.1.0",
     "onnxruntime-node": "^1.18.0",
+    "sqlite-vec": "^0.1.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.0.0",
+    "eslint": "^10.2.0",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.58.0",
     "vitest": "^3.0.0"
   }
 }

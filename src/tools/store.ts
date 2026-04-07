@@ -9,7 +9,7 @@ import type { StoreResultExtended, TrustLevel, MemorySource, Contradiction } fro
 import { defaultTrustForSource } from '../governance/trust.js';
 import { computeSurprise } from '../cognitive/surprise.js';
 import { detectContradictions, supersedMemory } from '../cognitive/contradiction.js';
-import { extractEntities, extractEntitiesDispatch } from '../graph/extract.js';
+import { extractEntitiesDispatch } from '../graph/extract.js';
 import { extractClaims } from '../cognitive/claims.js';
 import { eventBus } from '../transport/events.js';
 
