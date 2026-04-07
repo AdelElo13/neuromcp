@@ -103,14 +103,16 @@ export async function findTransferable(
 /**
  * Transfer memories from source to target namespace.
  */
-export function transferMemories(
+export async function transferMemories(
   db: Database.Database,
+  embedder: EmbeddingProvider,
+  vecStore: VectorStore,
   input: {
     memory_ids: string[];
     target_namespace: string;
     adapt?: boolean;
   },
-): TransferResult {
+): Promise<TransferResult> {
   const adapt = input.adapt !== false;
   let transferred = 0;
   let skippedDuplicates = 0;
@@ -165,6 +167,19 @@ export function transferMemories(
   });
 
   transaction();
+
+  // Embed transferred memories so they appear in vector search
+  const transferredMems = db.prepare(`
+    SELECT id, content FROM memories
+    WHERE namespace = ? AND source = 'consolidation' AND is_deleted = 0
+      AND json_extract(metadata, '$.transferred_from') IS NOT NULL
+      AND created_at = ?
+  `).all(input.target_namespace, now) as Array<{ id: string; content: string }>;
+
+  for (const mem of transferredMems) {
+    const embedding = await embedder.embed(mem.content);
+    vecStore.upsert(mem.id, embedding);
+  }
 
   return { transferred, skipped_duplicates: skippedDuplicates, target_namespace: input.target_namespace };
 }

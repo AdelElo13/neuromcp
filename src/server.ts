@@ -552,7 +552,7 @@ export function createServer(deps: ServerDeps): McpServer {
       target_namespace: z.string().describe('Target namespace'),
       adapt: z.boolean().optional().describe('Strip project-specific paths/hosts (default: true)'),
     },
-  }, (args) => textResult(transferMemories(db, args)));
+  }, async (args) => textResult(await transferMemories(db, embedder, vecStore, args)));
 
   // ─── Resources ─────────────────────────────────────────────────────
   registerResources(server, deps);

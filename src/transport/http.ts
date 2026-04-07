@@ -2,7 +2,13 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type Database from 'better-sqlite3';
+import type { VectorStore } from '../vectors/types.js';
+import type { EmbeddingProvider } from '../embeddings/types.js';
+import type { NeuromcpConfig } from '../config.js';
 import type { Logger } from '../observability/logger.js';
+import type { Metrics } from '../observability/metrics.js';
+import { searchMemory } from '../tools/search.js';
 import { eventBus } from './events.js';
 
 export interface HttpTransportOptions {
@@ -10,14 +16,24 @@ export interface HttpTransportOptions {
   readonly host: string;
 }
 
+export interface HttpDeps {
+  readonly db: Database.Database;
+  readonly vecStore: VectorStore;
+  readonly embedder: EmbeddingProvider;
+  readonly config: NeuromcpConfig;
+  readonly logger: Logger;
+  readonly metrics: Metrics;
+}
+
 /**
- * Start an HTTP server with Streamable HTTP transport.
- * Runs alongside stdio — enables remote MCP clients.
+ * Start an HTTP server with Streamable HTTP transport + search API.
+ * Runs alongside stdio — enables remote MCP clients and hook consumption.
  */
 export async function startHttpTransport(
   server: McpServer,
   options: HttpTransportOptions,
   logger: Logger,
+  deps?: HttpDeps,
 ): Promise<Server> {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
@@ -26,10 +42,54 @@ export async function startHttpTransport(
   const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type' });
+      res.end();
+      return;
+    }
+
     // Health endpoint
     if (url.pathname === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', version: '0.2.0' }));
+      res.end(JSON.stringify({ status: 'ok', version: '0.7.0' }));
+      return;
+    }
+
+    // Search API — lightweight endpoint for hooks / auto-context injection
+    if (url.pathname === '/api/search' && req.method === 'GET' && deps) {
+      const query = url.searchParams.get('q') ?? '';
+      const namespace = url.searchParams.get('namespace') ?? deps.config.defaultNamespace;
+      const limit = Math.min(20, parseInt(url.searchParams.get('limit') ?? '5', 10));
+
+      if (!query) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: 'q parameter required' }));
+        return;
+      }
+
+      try {
+        const results = await searchMemory(
+          { query, namespace, limit, hybrid: true },
+          deps,
+        );
+
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({
+          results: results.map(r => ({
+            id: r.id,
+            content: r.content,
+            category: r.category,
+            importance: r.importance,
+            score: r.similarity_score,
+          })),
+          count: results.length,
+        }));
+      } catch (err: unknown) {
+        logger.warn('http', 'Search API failed', { error: err instanceof Error ? err.message : String(err) });
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: 'search failed' }));
+      }
       return;
     }
 
@@ -47,12 +107,7 @@ export async function startHttpTransport(
       };
 
       eventBus.on('memory', listener);
-
-      req.on('close', () => {
-        eventBus.off('memory', listener);
-      });
-
-      // Send initial keepalive
+      req.on('close', () => { eventBus.off('memory', listener); });
       res.write(': keepalive\n\n');
       return;
     }
@@ -85,6 +140,7 @@ export async function startHttpTransport(
       logger.info('http', `HTTP transport listening on ${options.host}:${options.port}`, {
         endpoints: {
           mcp: `http://${options.host}:${options.port}/mcp`,
+          search: `http://${options.host}:${options.port}/api/search?q=...`,
           events: `http://${options.host}:${options.port}/events`,
           health: `http://${options.host}:${options.port}/health`,
         },

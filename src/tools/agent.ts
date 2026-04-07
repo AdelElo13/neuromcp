@@ -88,31 +88,45 @@ export function agentConflicts(
   db: Database.Database,
   namespace: string,
   topic?: string,
-): Array<{ agent1: string; agent2: string; memory1: string; memory2: string; topic: string }> {
-  // Find memories from different agents on similar topics
+): Array<{ agent1: string; agent2: string; memory1_preview: string; memory2_preview: string; category: string; potential_conflict: string }> {
+  // Find memories from different agents on the same entity/topic
+  // Uses entity co-occurrence for semantic matching instead of just category
   let query = `
-    SELECT m1.agent_id as agent1, m2.agent_id as agent2,
-           m1.content as memory1, m2.content as memory2,
-           m1.category as topic
-    FROM memories m1
-    JOIN memories m2 ON m1.id < m2.id
-      AND m1.agent_id IS NOT NULL AND m2.agent_id IS NOT NULL
+    SELECT DISTINCT
+      m1.agent_id as agent1, m2.agent_id as agent2,
+      m1.content as memory1, m2.content as memory2,
+      m1.category as category,
+      e.name as shared_entity
+    FROM memory_entities me1
+    JOIN memory_entities me2 ON me1.entity_id = me2.entity_id AND me1.memory_id != me2.memory_id
+    JOIN entities e ON e.id = me1.entity_id AND e.is_deleted = 0
+    JOIN memories m1 ON m1.id = me1.memory_id AND m1.is_deleted = 0
+    JOIN memories m2 ON m2.id = me2.memory_id AND m2.is_deleted = 0
+    WHERE m1.agent_id IS NOT NULL AND m2.agent_id IS NOT NULL
       AND m1.agent_id != m2.agent_id
-      AND m1.namespace = m2.namespace
-      AND m1.category = m2.category
-      AND m1.is_deleted = 0 AND m2.is_deleted = 0
-    WHERE m1.namespace = ?
+      AND m1.namespace = ?
+      AND m1.id < m2.id
   `;
   const params: unknown[] = [namespace];
 
   if (topic) {
-    query += ' AND (m1.content LIKE ? OR m2.content LIKE ?)';
-    params.push(`%${topic}%`, `%${topic}%`);
+    query += ' AND e.name LIKE ?';
+    params.push(`%${topic}%`);
   }
 
   query += ' LIMIT 20';
 
-  return db.prepare(query).all(...params) as Array<{
-    agent1: string; agent2: string; memory1: string; memory2: string; topic: string;
+  const rows = db.prepare(query).all(...params) as Array<{
+    agent1: string; agent2: string; memory1: string; memory2: string;
+    category: string; shared_entity: string;
   }>;
+
+  return rows.map(r => ({
+    agent1: r.agent1,
+    agent2: r.agent2,
+    memory1_preview: r.memory1.slice(0, 150),
+    memory2_preview: r.memory2.slice(0, 150),
+    category: r.category,
+    potential_conflict: `Both agents have knowledge about "${r.shared_entity}"`,
+  }));
 }

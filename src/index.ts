@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const logger = createLogger({ level: config.logLevel, format: config.logFormat });
   const metrics = createMetrics();
 
-  logger.info('startup', 'Loading neuromcp v0.7.0', {
+  logger.info('startup', 'Loading neuromcp v0.7.1', {
     dbPath: config.dbPath,
     embeddingProvider: config.embeddingProvider,
     defaultNamespace: config.defaultNamespace,
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
       await startHttpTransport(server, {
         port: config.httpPort,
         host: config.httpHost,
-      }, logger);
+      }, logger, { db, vecStore, embedder, config, logger, metrics });
     } catch (err: unknown) {
       logger.warn('startup', 'HTTP transport failed to start, running stdio-only', {
         error: err instanceof Error ? err.message : String(err),

@@ -1,0 +1,26 @@
+[
+  {
+    "fixture": "/Users/a/projects/neuromcp/eval/fixtures/basic-recall.json",
+    "recall5": 1,
+    "recall10": 1,
+    "mrr": 1,
+    "hitRate": 1,
+    "searchP95Ms": 2.265000000000015
+  },
+  {
+    "fixture": "/Users/a/projects/neuromcp/eval/fixtures/cross-namespace.json",
+    "recall5": 1,
+    "recall10": 1,
+    "mrr": 1,
+    "hitRate": 1,
+    "searchP95Ms": 5.391708999999992
+  },
+  {
+    "fixture": "/Users/a/projects/neuromcp/eval/fixtures/governance.json",
+    "recall5": 1,
+    "recall10": 1,
+    "mrr": 1,
+    "hitRate": 1,
+    "searchP95Ms": 1.4908750000000168
+  }
+]

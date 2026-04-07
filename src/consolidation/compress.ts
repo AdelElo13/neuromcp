@@ -134,9 +134,27 @@ export async function compressMemories(
 
   transaction();
 
-  // Embed digests
-  for (const cluster of clusters) {
-    // Find the digest we just created (last N digests)
+  // Step 4b: Embed all new digests so they appear in vector search
+  const newDigests = db.prepare(`
+    SELECT id, content FROM memories
+    WHERE namespace = ? AND source = 'consolidation' AND is_deleted = 0
+      AND json_extract(metadata, '$.type') = 'digest'
+      AND created_at = ?
+  `).all(namespace, now) as Array<{ id: string; content: string }>;
+
+  for (const digest of newDigests) {
+    const embedding = await embedder.embed(digest.content);
+    vecStore.upsert(digest.id, embedding);
+
+    // Sync to FTS
+    const row = db.prepare('SELECT rowid FROM memories WHERE id = ?').get(digest.id) as { rowid: number } | undefined;
+    if (row) {
+      try {
+        db.prepare('INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, ?)').run(
+          row.rowid, digest.content, '[]', 'general',
+        );
+      } catch { /* FTS entry may already exist */ }
+    }
   }
 
   // Step 5: Hard delete ancient zero-access memories
