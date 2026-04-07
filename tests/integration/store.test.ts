@@ -51,7 +51,7 @@ describe('storeMemory', () => {
     vecStore.initialize(db);
     const logger = createLogger({ level: 'error', format: 'text' });
     const metrics = createMetrics();
-    const config = loadConfig();
+    const config = { ...loadConfig(), entityExtractionMode: 'regex' as const };
 
     deps = { db, vecStore, embedder: new FakeEmbedder(), logger, metrics, config };
   });

@@ -57,8 +57,9 @@ describe('searchMemory', () => {
     const config = loadConfig();
     const embedder = new FakeEmbedder();
 
-    storeDeps = { db, vecStore, embedder, logger, metrics, config };
-    searchDeps = { db, vecStore, embedder, logger, metrics, config };
+    const testConfig = { ...config, entityExtractionMode: 'regex' as const };
+    storeDeps = { db, vecStore, embedder, logger, metrics, config: testConfig };
+    searchDeps = { db, vecStore, embedder, logger, metrics, config: testConfig };
 
     // Seed memories
     await storeMemory({ content: 'typescript patterns and best practices', category: 'code', tags: ['typescript'], importance: 0.8 }, storeDeps);

@@ -62,7 +62,7 @@ export function setupTestDb(): TestContext {
   vecStore.initialize(db);
   const logger = createLogger({ level: 'error', format: 'text' });
   const metrics = createMetrics();
-  const config = loadConfig();
+  const config = { ...loadConfig(), entityExtractionMode: 'regex' as const };
   const embedder = new FakeEmbedder();
 
   return { db, vecStore, embedder, logger, metrics, config, dbPath };
