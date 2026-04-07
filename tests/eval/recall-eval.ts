@@ -130,6 +130,59 @@ const EVAL_QUESTIONS: readonly EvalQuestion[] = [
     expectedKeywords: ['dakdeel', 'schema', 'table'],
     category: 'project',
   },
+  // 2026-04-07/08 project knowledge
+  {
+    query: 'What is DuoVeto and what models does it use?',
+    expectedKeywords: ['duoveto', 'GPT-5.4', 'Claude', 'Opus', 'adversarial', 'code review'],
+    category: 'project',
+  },
+  {
+    query: 'What is roast-my-repo?',
+    expectedKeywords: ['roast', 'npm', 'CLI', 'code', 'GitHub'],
+    category: 'project',
+  },
+  {
+    query: 'What is Ship My Idea?',
+    expectedKeywords: ['telegram', 'bot', 'app', 'deploy', 'Vercel'],
+    category: 'project',
+  },
+  {
+    query: 'What is the DuoVeto GitHub App ID?',
+    expectedKeywords: ['3308741', 'GitHub App', 'duoveto'],
+    category: 'project',
+  },
+  {
+    query: 'What Stripe product is configured for DuoVeto?',
+    expectedKeywords: ['prod_UIHuUSPNJ9sBH8', '19', 'month', 'Pro'],
+    category: 'project',
+  },
+  // 2026-04-07/08 infrastructure knowledge
+  {
+    query: 'What is Pi-Agent and how is it configured?',
+    expectedKeywords: ['pi-agent', 'ollama', 'coding', 'CLI'],
+    category: 'infrastructure',
+  },
+  {
+    query: 'What is Codex CLI used for?',
+    expectedKeywords: ['codex', 'OpenAI', 'second opinion', 'OAuth'],
+    category: 'infrastructure',
+  },
+  {
+    query: 'What is Canopy Labs?',
+    expectedKeywords: ['eenmanszaak', 'KvK', 'business', 'Canopy'],
+    category: 'infrastructure',
+  },
+  // 2026-04-07/08 pattern knowledge
+  {
+    query: 'How does the second-opinion workflow work?',
+    expectedKeywords: ['codex', 'claude', 'spar', 'review', 'plan'],
+    category: 'pattern',
+  },
+  {
+    query: 'What confidence labels does DuoVeto use?',
+    expectedKeywords: ['dual-consensus', 'contested', 'single-model', 'confidence'],
+    category: 'pattern',
+  },
 ];
 
 // --- Evaluation logic (FTS-only, no embeddings needed) ---
