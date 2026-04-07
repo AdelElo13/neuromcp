@@ -111,6 +111,21 @@ export function extractEntities(
     addEntity(match[0], 'reference');
   }
 
+  // 4. File paths (absolute Unix paths)
+  const pathPattern = /(?:^|\s)(\/[\w./-]+(?:\.\w+)?)/g;
+  for (const match of content.matchAll(pathPattern)) {
+    const p = match[1]!;
+    if (p.length >= 4 && p.includes('/')) {
+      addEntity(p, 'path');
+    }
+  }
+
+  // 5. URLs (http/https)
+  const urlPattern = /https?:\/\/[^\s,;)>\]]+/g;
+  for (const match of content.matchAll(urlPattern)) {
+    addEntity(match[0], 'url');
+  }
+
   // 6. Multi-word proper nouns — strict: only 2-4 capitalized words
   //    NOT at sentence start, NOT common phrases
   const sentences = content.split(/[.!?\n]/);
