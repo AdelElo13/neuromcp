@@ -34,8 +34,36 @@ export function getDatabase(): DatabaseType {
   return _db;
 }
 
+let _walWriteCount = 0;
+const WAL_CHECKPOINT_INTERVAL = 1000;
+
+/**
+ * Trigger a WAL checkpoint if write count exceeds threshold.
+ * Call after batch inserts (e.g., verbatim ingestion).
+ */
+export function maybeCheckpointWal(db?: DatabaseType): void {
+  _walWriteCount++;
+  if (_walWriteCount >= WAL_CHECKPOINT_INTERVAL) {
+    const target = db ?? _db;
+    if (target !== null) {
+      target.pragma('wal_checkpoint(PASSIVE)');
+      _walWriteCount = 0;
+    }
+  }
+}
+
+/** Force a WAL checkpoint — use before shutdown or after large imports. */
+export function forceCheckpointWal(db?: DatabaseType): void {
+  const target = db ?? _db;
+  if (target !== null) {
+    target.pragma('wal_checkpoint(TRUNCATE)');
+    _walWriteCount = 0;
+  }
+}
+
 export function closeDatabase(): void {
   if (_db !== null) {
+    forceCheckpointWal(_db);
     _db.close();
     _db = null;
   }

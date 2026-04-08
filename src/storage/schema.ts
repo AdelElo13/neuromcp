@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -148,6 +148,18 @@ const CREATE_TABLES = `
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   );
 
+  -- Verbatim: raw conversation text, never consolidated or pruned
+  CREATE TABLE IF NOT EXISTS verbatim (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    agent_id TEXT,
+    episode_id TEXT REFERENCES episodes(id),
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
   -- Claims: atomic verifiable facts extracted from memories
   CREATE TABLE IF NOT EXISTS claims (
     id TEXT PRIMARY KEY,
@@ -204,12 +216,24 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_memory_clusters_cluster ON memory_clusters(cluster_id);
   CREATE INDEX IF NOT EXISTS idx_memories_next_review ON memories(next_review_at);
   CREATE INDEX IF NOT EXISTS idx_agent_profiles_namespace ON agent_profiles(namespace);
+  CREATE INDEX IF NOT EXISTS idx_verbatim_namespace ON verbatim(namespace);
+  CREATE INDEX IF NOT EXISTS idx_verbatim_episode_id ON verbatim(episode_id);
+  CREATE INDEX IF NOT EXISTS idx_verbatim_agent_id ON verbatim(agent_id);
+  CREATE INDEX IF NOT EXISTS idx_verbatim_created_at ON verbatim(created_at);
+  CREATE INDEX IF NOT EXISTS idx_verbatim_content_hash ON verbatim(content_hash);
 `;
 
 function ftsTableExists(db: Database): boolean {
   const row = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'"
   ).get() as { name: string } | undefined;
+  return row !== undefined;
+}
+
+function tableExists(db: Database, name: string): boolean {
+  const row = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+  ).get(name) as { name: string } | undefined;
   return row !== undefined;
 }
 
@@ -227,6 +251,25 @@ export function applySchema(db: Database): void {
         content='memories',
         content_rowid='rowid'
       );
+    `);
+  }
+
+  // Verbatim FTS5 with auto-sync triggers
+  if (!tableExists(db, 'verbatim_fts')) {
+    db.exec(`
+      CREATE VIRTUAL TABLE verbatim_fts USING fts5(
+        content,
+        content='verbatim',
+        content_rowid='rowid'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS verbatim_ai AFTER INSERT ON verbatim BEGIN
+        INSERT INTO verbatim_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS verbatim_ad AFTER DELETE ON verbatim BEGIN
+        INSERT INTO verbatim_fts(verbatim_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+      END;
     `);
   }
 }

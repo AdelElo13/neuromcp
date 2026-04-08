@@ -224,6 +224,32 @@ export interface EpisodeWithStats extends Episode {
 }
 
 // ─── Backfill Result ────────────────────────────────────────────────
+// ─── Verbatim (Raw Conversation Storage) ───────────────────────────
+export interface VerbatimEntry {
+  readonly id: string;
+  readonly content: string;
+  readonly content_hash: string;
+  readonly namespace: string;
+  readonly agent_id: string | null;
+  readonly episode_id: string | null;
+  readonly metadata: string;
+  readonly created_at: string;
+}
+
+export interface VerbatimWithScore extends VerbatimEntry {
+  readonly relevance_score: number;
+  readonly source: 'verbatim';
+}
+
+export interface VerbatimStats {
+  readonly total: number;
+  readonly by_namespace: Record<string, number>;
+  readonly oldest: string | null;
+  readonly newest: string | null;
+  readonly total_size_bytes: number;
+}
+
+// ─── Backfill Result ────────────────────────────────────────────────
 export interface BackfillResult {
   readonly total: number;
   readonly embedded: number;

@@ -4,6 +4,7 @@ import type { ServerDeps } from '../server.js';
 import { textResult } from './types.js';
 import { storeMemory } from '../tools/store.js';
 import { searchMemory } from '../tools/search.js';
+import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
 import { forgetMemory } from '../tools/forget.js';
 import { consolidate } from '../tools/consolidate.js';
@@ -142,5 +143,53 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
   }, async () => {
     const result = await backfillEmbeddings(db, vecStore, embedder, logger, metrics);
     return textResult(result);
+  });
+
+  server.registerTool('search_all', {
+    description: 'Unified search across both extracted memories and verbatim text. Returns results with source labels and per-source quotas.',
+    inputSchema: {
+      query: z.string().describe('Search query text'),
+      namespace: z.string().optional().describe('Namespace filter'),
+      limit: z.number().int().min(1).max(100).optional().describe('Max results per source (default: 5)'),
+      after: z.string().optional().describe('Only entries after this ISO timestamp'),
+      before: z.string().optional().describe('Only entries before this ISO timestamp'),
+      episode_id: z.string().optional().describe('Filter by episode'),
+    },
+  }, async (args) => {
+    const perSourceLimit = args.limit ?? 5;
+
+    // Search both sources in parallel
+    const [memoryResults, verbatimResults] = await Promise.all([
+      searchMemory(
+        { query: args.query, namespace: args.namespace, limit: perSourceLimit, after: args.after, before: args.before, episode_id: args.episode_id },
+        { db, vecStore, embedder, logger, metrics, config },
+      ),
+      Promise.resolve(searchVerbatim(
+        { query: args.query, namespace: args.namespace, limit: perSourceLimit, after: args.after, before: args.before, episode_id: args.episode_id },
+        db, config, logger, metrics,
+      )),
+    ]);
+
+    const labeled = {
+      memories: memoryResults.map((m) => ({
+        id: m.id,
+        content: m.content,
+        score: m.similarity_score,
+        source: 'extracted' as const,
+        created_at: m.created_at,
+        category: m.category,
+        importance: m.importance,
+      })),
+      verbatim: verbatimResults.map((v) => ({
+        id: v.id,
+        content: v.content,
+        score: v.relevance_score,
+        source: 'verbatim' as const,
+        created_at: v.created_at,
+      })),
+      total: memoryResults.length + verbatimResults.length,
+    };
+
+    return textResult(labeled);
   });
 }

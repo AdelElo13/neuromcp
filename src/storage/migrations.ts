@@ -116,6 +116,11 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     applySchema(db);
   }
 
+  if (currentVersion < 7) {
+    logger.info('migrations', 'Running v6 to v7 migration: verbatim table + FTS5');
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

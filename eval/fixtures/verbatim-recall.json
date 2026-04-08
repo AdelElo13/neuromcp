@@ -1,0 +1,198 @@
+{
+  "memories": [
+    {
+      "id": "v-info-1",
+      "content": "User's favorite programming language is Rust because of memory safety guarantees",
+      "category": "preference",
+      "tags": ["user-preference", "programming"]
+    },
+    {
+      "id": "v-info-2",
+      "content": "The user works at a company called TechNova in Amsterdam as a senior backend engineer",
+      "category": "fact",
+      "tags": ["user-info", "work"]
+    },
+    {
+      "id": "v-multi-1",
+      "content": "In session 3 the user mentioned they are migrating from PostgreSQL to CockroachDB",
+      "category": "decision",
+      "tags": ["database", "migration"]
+    },
+    {
+      "id": "v-multi-2",
+      "content": "The reason for migrating to CockroachDB was the need for multi-region support",
+      "category": "decision",
+      "tags": ["database", "migration"]
+    },
+    {
+      "id": "v-multi-3",
+      "content": "The migration timeline is Q2 2026, with a staging environment ready by March",
+      "category": "timeline",
+      "tags": ["database", "migration", "planning"]
+    },
+    {
+      "id": "v-temporal-1",
+      "content": "As of January 2026, the team size was 5 engineers",
+      "category": "fact",
+      "tags": ["team"],
+      "valid_from": "2026-01-01"
+    },
+    {
+      "id": "v-temporal-2",
+      "content": "As of March 2026, the team grew to 8 engineers after hiring 3 new backend developers",
+      "category": "fact",
+      "tags": ["team"],
+      "valid_from": "2026-03-01"
+    },
+    {
+      "id": "v-update-1",
+      "content": "The project uses React 18 for the frontend",
+      "category": "tech-stack",
+      "tags": ["frontend", "react"]
+    },
+    {
+      "id": "v-update-2",
+      "content": "The project upgraded from React 18 to React 19 in February 2026",
+      "category": "tech-stack",
+      "tags": ["frontend", "react"]
+    },
+    {
+      "id": "v-abstain-1",
+      "content": "The user's favorite food is sushi, they mentioned it during a casual conversation",
+      "category": "personal",
+      "tags": ["personal", "food"]
+    },
+    {
+      "id": "v-context-1",
+      "content": "During the code review, the user said: make sure we never use any in TypeScript, always use unknown instead",
+      "category": "coding-standard",
+      "tags": ["typescript", "code-review"]
+    },
+    {
+      "id": "v-context-2",
+      "content": "The deployment pipeline uses GitHub Actions with a canary release strategy on Vercel",
+      "category": "infrastructure",
+      "tags": ["deployment", "ci-cd"]
+    },
+    {
+      "id": "v-context-3",
+      "content": "Authentication is handled by Clerk with custom middleware for role-based access control",
+      "category": "infrastructure",
+      "tags": ["auth", "security"]
+    },
+    {
+      "id": "v-noise-1",
+      "content": "Random discussion about weather in Amsterdam being rainy this week",
+      "category": "general"
+    },
+    {
+      "id": "v-noise-2",
+      "content": "The user asked about how to install Docker on a new MacBook",
+      "category": "general",
+      "tags": ["docker"]
+    }
+  ],
+  "queries": [
+    {
+      "query": "What is the user's favorite programming language?",
+      "expected_ids": ["v-info-1"],
+      "description": "information extraction: single fact recall"
+    },
+    {
+      "query": "Where does the user work and what is their role?",
+      "expected_ids": ["v-info-2"],
+      "description": "information extraction: compound fact"
+    },
+    {
+      "query": "Why is the team migrating their database?",
+      "expected_ids": ["v-multi-1", "v-multi-2"],
+      "description": "multi-session reasoning: combine migration reason across sessions"
+    },
+    {
+      "query": "What is the database migration timeline?",
+      "expected_ids": ["v-multi-3"],
+      "description": "multi-session reasoning: specific timeline fact"
+    },
+    {
+      "query": "How many engineers are on the team?",
+      "expected_ids": ["v-temporal-2"],
+      "description": "temporal reasoning: latest fact should be returned"
+    },
+    {
+      "query": "What frontend framework does the project use?",
+      "expected_ids": ["v-update-2"],
+      "description": "knowledge update: should return latest React version"
+    },
+    {
+      "query": "What are the TypeScript coding standards?",
+      "expected_ids": ["v-context-1"],
+      "description": "information extraction: coding standards from review"
+    },
+    {
+      "query": "How is deployment handled?",
+      "expected_ids": ["v-context-2"],
+      "description": "information extraction: infrastructure"
+    },
+    {
+      "query": "What authentication system is used?",
+      "expected_ids": ["v-context-3"],
+      "description": "information extraction: auth system"
+    },
+    {
+      "query": "CockroachDB multi-region migration from PostgreSQL",
+      "expected_ids": ["v-multi-1", "v-multi-2", "v-multi-3"],
+      "description": "multi-session reasoning: full migration context"
+    },
+    {
+      "query": "What does the user like to eat?",
+      "expected_ids": ["v-abstain-1"],
+      "description": "personal fact recall"
+    },
+    {
+      "query": "team size growth in 2026",
+      "expected_ids": ["v-temporal-1", "v-temporal-2"],
+      "description": "temporal reasoning: team growth over time"
+    },
+    {
+      "query": "canary release strategy",
+      "expected_ids": ["v-context-2"],
+      "description": "specific technical term recall"
+    },
+    {
+      "query": "role-based access control",
+      "expected_ids": ["v-context-3"],
+      "description": "specific technical term recall"
+    },
+    {
+      "query": "Rust memory safety",
+      "expected_ids": ["v-info-1"],
+      "description": "concept-level recall across paraphrase"
+    },
+    {
+      "query": "What is the current status of the staging environment?",
+      "expected_ids": ["v-multi-3"],
+      "excluded_ids": ["v-noise-1", "v-noise-2"],
+      "description": "targeted recall with noise exclusion"
+    },
+    {
+      "query": "React upgrade history",
+      "expected_ids": ["v-update-1", "v-update-2"],
+      "description": "knowledge update: both old and new version"
+    },
+    {
+      "query": "hiring new backend developers",
+      "expected_ids": ["v-temporal-2"],
+      "description": "information extraction: hiring event"
+    },
+    {
+      "query": "TypeScript unknown vs any",
+      "expected_ids": ["v-context-1"],
+      "description": "code style preference recall"
+    },
+    {
+      "query": "GitHub Actions CI CD pipeline",
+      "expected_ids": ["v-context-2"],
+      "description": "infrastructure recall with synonyms"
+    }
+  ]
+}
