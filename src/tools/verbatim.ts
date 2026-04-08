@@ -107,11 +107,9 @@ export function searchVerbatim(
 
   const ftsQuery = sanitizeFtsQuery(input.query);
 
-  // Build WHERE conditions for post-filtering
-  const conditions: string[] = [];
   const params: unknown[] = [ftsQuery, limit * 3];
 
-  let sql = `
+  const sql = `
     SELECT v.*, rank AS fts_rank
     FROM verbatim_fts f
     JOIN verbatim v ON v.rowid = f.rowid
