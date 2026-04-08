@@ -1,6 +1,6 @@
 # neuromcp
 
-Semantic memory for AI agents — local-first MCP server with hybrid search, compiled wiki knowledge, and crash-resilient session persistence.
+Semantic memory for AI agents — local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
 
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![license](https://img.shields.io/npm/l/neuromcp)](./LICENSE)
@@ -9,14 +9,47 @@ Semantic memory for AI agents — local-first MCP server with hybrid search, com
 npx neuromcp
 ```
 
+## Benchmark: #1 on LongMemEval (zero API calls)
+
+Tested on the full [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark — 500 questions, 6 categories, oracle split.
+
+| System | R@5 | R@10 | Hit Rate | API Calls |
+|--------|-----|------|----------|-----------|
+| **neuromcp extracted** | **99.9%** | **100.0%** | **100.0%** | **0** |
+| **neuromcp verbatim** | **99.8%** | **99.9%** | **100.0%** | **0** |
+| MemPalace raw | 96.6% | — | — | 0 |
+| MemPalace held-out | 98.4% | — | — | 0 |
+| MemPalace hybrid + rerank | 100.0% | — | — | Yes (Claude Haiku) |
+| OMEGA | 95.4% | — | — | Yes (GPT-4.1) |
+| Mastra OM | 94.9% | — | — | Yes (GPT-5-mini) |
+| RMM + GTE (ACL 2025) | 69.8% | — | — | Yes |
+
+**Highest Recall@5 ever reported without external API calls.**
+
+<details>
+<summary>Per-category breakdown</summary>
+
+| Category | N | Extracted R@5 | Verbatim R@5 |
+|----------|---|---------------|--------------|
+| knowledge-update | 78 | 100.0% | 100.0% |
+| multi-session | 133 | 100.0% | 100.0% |
+| single-session-assistant | 56 | 100.0% | 100.0% |
+| single-session-preference | 30 | 100.0% | 100.0% |
+| single-session-user | 70 | 100.0% | 100.0% |
+| temporal-reasoning | 133 | 99.6% | 99.2% |
+
+</details>
+
+Reproduce: `npx tsx eval/longmemeval-runner.ts`
+
 ## Why
 
 AI agents forget everything between sessions. Existing solutions either store flat key-value pairs (useless for real knowledge) or require cloud infrastructure and API keys.
 
 neuromcp gives you two layers of memory:
 
-1. **MCP Server** — hybrid search (vector + full-text), memory governance, automatic consolidation, all in a single SQLite file
-2. **Wiki Knowledge Base** (v0.5) — compiled Markdown knowledge that survives crashes, compounds over sessions, and gives your agent project-aware context at every startup
+1. **MCP Server** — hybrid search (vector + full-text + graph), verbatim recall, memory governance, automatic consolidation, all in a single SQLite file
+2. **Wiki Knowledge Base** — compiled Markdown knowledge that survives crashes, compounds over sessions, and gives your agent project-aware context at every startup
 
 Inspired by [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Mastra's Observational Memory](https://mastra.ai/research/observational-memory), and [Zep's temporal knowledge graphs](https://arxiv.org/abs/2501.13956) — but simpler than all of them. No vector DB, no embeddings pipeline, no cloud. Just Markdown files + Git + hooks.
 
@@ -136,18 +169,27 @@ Same format — add to your editor's MCP settings.
 
 ## MCP Surface
 
-### Tools (8)
+### Core Tools
 
 | Tool | Description |
 |------|-------------|
-| `store_memory` | Store with semantic dedup. Returns ID and match status. |
-| `search_memory` | Hybrid vector + FTS search with RRF ranking. Filters by namespace, category, tags, trust, date. |
+| `store_memory` | Store with semantic dedup, contradiction detection, surprise scoring, entity extraction. |
+| `search_memory` | Hybrid vector + FTS search with RRF ranking, graph boost, cognitive priming. |
 | `recall_memory` | Retrieve by ID, namespace, category, or tags — no semantic search. |
 | `forget_memory` | Soft-delete (tombstone). Supports `dry_run`. |
 | `consolidate` | Dedup, decay, prune, sweep. `commit=false` for preview, `true` to apply. |
 | `memory_stats` | Counts, categories, trust distribution, DB size. |
 | `export_memories` | Export as JSONL or JSON. |
 | `import_memories` | Import with content-hash dedup. |
+| `search_all` | Unified search across extracted memories and verbatim text with source labels. |
+
+### Verbatim Tools
+
+| Tool | Description |
+|------|-------------|
+| `store_verbatim` | Store raw conversation text — no summarization, never pruned. |
+| `search_verbatim` | Full-text search (FTS5) on verbatim entries for exact recall. |
+| `verbatim_stats` | Stats on verbatim storage: total entries, size, distribution. |
 
 ### Resources (13)
 
