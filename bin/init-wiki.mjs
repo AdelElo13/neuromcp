@@ -90,38 +90,74 @@ if (existsSync(hooksDir)) {
   }
 }
 
-// Print setup instructions
-console.log('\n📋 Next steps:\n');
-console.log('Add these hooks to ~/.claude/settings.json:\n');
-console.log(`{
-  "hooks": {
-    "SessionStart": [{
-      "matcher": "*",
-      "hooks": [{
-        "type": "command",
-        "command": "node \\"${claudeHooksDir}/neuromcp-context-inject.js\\"",
-        "timeout": 5
-      }]
+// Auto-inject hooks into ~/.claude/settings.json
+const settingsPath = join(HOME, '.claude', 'settings.json');
+const neuromcpHooks = {
+  SessionStart: {
+    matcher: '*',
+    hooks: [{
+      type: 'command',
+      command: `node "${claudeHooksDir}/neuromcp-context-inject.js"`,
+      timeout: 5,
     }],
-    "PostToolUse": [{
-      "matcher": "*",
-      "hooks": [{
-        "type": "command",
-        "command": "CLAUDE_HOOK_EVENT=PostToolUse node \\"${claudeHooksDir}/neuromcp-persist.js\\"",
-        "timeout": 5,
-        "async": true
-      }]
+  },
+  PostToolUse: {
+    matcher: '*',
+    hooks: [{
+      type: 'command',
+      command: `CLAUDE_HOOK_EVENT=PostToolUse node "${claudeHooksDir}/neuromcp-persist.js"`,
+      timeout: 5,
+      async: true,
     }],
-    "Stop": [{
-      "matcher": "*",
-      "hooks": [{
-        "type": "command",
-        "command": "CLAUDE_HOOK_EVENT=Stop node \\"${claudeHooksDir}/neuromcp-persist.js\\"",
-        "timeout": 10
-      }]
-    }]
+  },
+  Stop: {
+    matcher: '*',
+    hooks: [{
+      type: 'command',
+      command: `CLAUDE_HOOK_EVENT=Stop node "${claudeHooksDir}/neuromcp-persist.js"`,
+      timeout: 10,
+    }],
+  },
+};
+
+function hasNeuromcpHook(entries, command) {
+  if (!Array.isArray(entries)) return false;
+  return entries.some(entry =>
+    Array.isArray(entry.hooks) && entry.hooks.some(h => h.command && h.command.includes(command))
+  );
+}
+
+try {
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+  } else {
+    mkdirSync(dirname(settingsPath), { recursive: true });
   }
-}`);
+
+  if (!settings.hooks) settings.hooks = {};
+  let added = 0;
+
+  for (const [eventType, entry] of Object.entries(neuromcpHooks)) {
+    if (!settings.hooks[eventType]) settings.hooks[eventType] = [];
+    const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject' : 'neuromcp-persist';
+    if (!hasNeuromcpHook(settings.hooks[eventType], marker)) {
+      settings.hooks[eventType].push(entry);
+      log(`Added ${eventType} hook to settings.json`);
+      added++;
+    } else {
+      skip(`${eventType} hook in settings.json`);
+    }
+  }
+
+  if (added > 0) {
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+    log(`Saved ${settingsPath.replace(HOME, '~')}`);
+  }
+} catch (err) {
+  console.log(`\n  ⚠ Could not auto-configure hooks in settings.json: ${err.message}`);
+  console.log('  Add them manually — see https://github.com/AdelElo13/neuromcp#hooks\n');
+}
 
 console.log('\n✅ Wiki ready at ~/.neuromcp/wiki/');
 console.log('   Start a Claude Code session — your wiki will be injected automatically.\n');

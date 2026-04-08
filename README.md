@@ -107,7 +107,7 @@ npx neuromcp
 npx neuromcp-init-wiki
 ```
 
-This creates the wiki structure, copies hook scripts, and initializes git. Follow the printed instructions to add hooks to your Claude Code settings.
+This creates the wiki structure, copies hook scripts, and automatically configures your Claude Code hooks in `~/.claude/settings.json`. Safe to run multiple times — won't overwrite existing hooks.
 
 ### Recommended: Add Ollama for real semantic search
 
