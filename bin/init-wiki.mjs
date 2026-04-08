@@ -159,5 +159,29 @@ try {
   console.log('  Add them manually — see https://github.com/AdelElo13/neuromcp#hooks\n');
 }
 
+// Install editor rules for non-Claude editors
+const rulesSource = join(TEMPLATES_DIR, 'rules', 'neuromcp.md');
+if (existsSync(rulesSource)) {
+  const editorRules = [
+    { name: 'Cursor', dir: join(HOME, '.cursor', 'rules'), file: 'neuromcp.mdc' },
+    { name: 'Windsurf', dir: join(HOME, '.windsurf', 'rules'), file: 'neuromcp.md' },
+    { name: 'Cline', dir: join(HOME, '.clinerules'), file: 'neuromcp.md' },
+  ];
+  const rulesContent = readFileSync(rulesSource, 'utf-8');
+
+  for (const editor of editorRules) {
+    const dest = join(editor.dir, editor.file);
+    if (existsSync(editor.dir)) {
+      if (!existsSync(dest)) {
+        writeFileSync(dest, rulesContent);
+        log(`Installed ${editor.name} rules: ${dest.replace(HOME, '~')}`);
+      } else {
+        skip(`${editor.name} rules`);
+      }
+    }
+  }
+}
+
 console.log('\n✅ Wiki ready at ~/.neuromcp/wiki/');
-console.log('   Start a Claude Code session — your wiki will be injected automatically.\n');
+console.log('   Start a Claude Code session — your wiki will be injected automatically.');
+console.log('   Cursor/Windsurf/Cline users: rules auto-installed if editor config detected.\n');

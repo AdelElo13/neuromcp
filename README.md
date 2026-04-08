@@ -109,6 +109,24 @@ npx neuromcp-init-wiki
 
 This creates the wiki structure, copies hook scripts, and automatically configures your Claude Code hooks in `~/.claude/settings.json`. Safe to run multiple times — won't overwrite existing hooks.
 
+### Editor Compatibility
+
+neuromcp works with any MCP-compatible editor. The experience varies by what each editor supports:
+
+| Feature | Claude Code | Cursor | Windsurf | Cline |
+|---------|-------------|--------|----------|-------|
+| MCP tools (40+) | Full | Full | Full | Full |
+| Auto-context at session start | Hooks (automatic) | Rules (LLM-driven) | Rules (LLM-driven) | Rules (LLM-driven) |
+| Auto-persist at session end | Hooks (automatic) | Rules (LLM-driven) | Rules (LLM-driven) | Rules (LLM-driven) |
+| Wiki reminders | Every 8 tool calls | No | No | No |
+| Crash-resilient checkpoints | Yes | No | No | No |
+
+**Claude Code** gets the full experience via native hooks — context injection and persistence happen automatically, even if the LLM forgets.
+
+**Cursor, Windsurf, Cline** get editor rules that instruct the LLM to call neuromcp tools at session start/end. This works well but depends on LLM compliance — it's ~90% as reliable as hooks.
+
+`npx neuromcp-init-wiki` auto-detects installed editors and installs the appropriate rules.
+
 ### Recommended: Add Ollama for real semantic search
 
 ```bash
