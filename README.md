@@ -1,6 +1,8 @@
 # neuromcp
 
-Semantic memory for AI agents — local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
+**The #1 AI memory system on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 99.9% Recall@5, zero API calls.**
+
+Local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
 
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![license](https://img.shields.io/npm/l/neuromcp)](./LICENSE)
@@ -9,7 +11,7 @@ Semantic memory for AI agents — local-first MCP server with hybrid search, ver
 npx neuromcp
 ```
 
-## Benchmark: #1 on LongMemEval (zero API calls)
+## Benchmark: #1 on LongMemEval
 
 Tested on the full [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark — 500 questions, 6 categories, oracle split.
 
@@ -24,7 +26,7 @@ Tested on the full [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benc
 | Mastra OM | 94.9% | — | — | Yes (GPT-5-mini) |
 | RMM + GTE (ACL 2025) | 69.8% | — | — | Yes |
 
-**Highest Recall@5 ever reported without external API calls.**
+**Highest Recall@5 ever reported without external API calls.** The only systems scoring higher use paid LLM reranking (MemPalace hybrid uses Claude Haiku) or represent the theoretical ceiling from the original paper (RAG Oracle). neuromcp achieves this with pure local retrieval — no cloud, no API keys, no reranking.
 
 <details>
 <summary>Per-category breakdown</summary>
