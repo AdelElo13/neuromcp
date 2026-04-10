@@ -219,7 +219,7 @@ async function main(): Promise<void> {
 
   // ─── Print Report ─────────────────────────────────────────────────
 
-  console.log('## LongMemEval Results — neuromcp v0.8.0\n');
+  console.log('## LongMemEval Results — neuromcp v0.9.4\n');
   console.log('### Verbatim Mode (FTS5)\n');
   console.log('| Type | N | R@5 | R@10 | Hit Rate |');
   console.log('|------|---|-----|------|----------|');
