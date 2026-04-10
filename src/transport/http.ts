@@ -47,7 +47,7 @@ export async function startHttpTransport(
     // Health endpoint
     if (url.pathname === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', version: '0.9.4' }));
+      res.end(JSON.stringify({ status: 'ok', version: '0.9.5' }));
       return;
     }
 
@@ -77,6 +77,7 @@ export async function startHttpTransport(
             category: r.category,
             importance: r.importance,
             score: r.similarity_score,
+            ...('explain' in r ? { explain: (r as { explain: unknown }).explain } : {}),
           })),
           count: results.length,
         }));
