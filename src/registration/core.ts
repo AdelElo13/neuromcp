@@ -54,6 +54,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       valid_at: z.string().optional().describe('ISO 8601 timestamp — only return memories valid at this time (temporal query)'),
       graph_boost: z.boolean().optional().describe('Boost results connected via knowledge graph (default: true)'),
       episode_id: z.string().optional().describe('Filter by episode ID — only return memories from this episode'),
+      explain: z.boolean().optional().describe('Include explanation metadata: trust reason, contradictions, temporal validity, claims, confidence breakdown (default: true)'),
     },
   }, async (args) => {
     const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });

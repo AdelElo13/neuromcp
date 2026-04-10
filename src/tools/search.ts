@@ -5,6 +5,8 @@ import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import type { NeuromcpConfig } from '../config.js';
 import type { Memory, MemoryWithScore, TrustLevel } from '../types.js';
+import type { MemoryWithExplanation } from '../cognitive/explain.js';
+import { explainMemory } from '../cognitive/explain.js';
 import { namespaceFilter } from '../governance/namespace.js';
 import { meetsMinTrust } from '../governance/trust.js';
 import { computePrimingBoosts, getRecentlyAccessed } from '../cognitive/priming.js';
@@ -28,6 +30,7 @@ export interface SearchInput {
   readonly valid_at?: string;
   readonly graph_boost?: boolean;
   readonly episode_id?: string;
+  readonly explain?: boolean;
 }
 
 export interface SearchDeps {
@@ -48,7 +51,7 @@ function sanitizeFtsQuery(query: string): string {
 export async function searchMemory(
   input: SearchInput,
   deps: SearchDeps,
-): Promise<readonly MemoryWithScore[]> {
+): Promise<readonly (MemoryWithScore | MemoryWithExplanation)[]> {
   const { db, vecStore, embedder, logger, metrics, config } = deps;
   const start = Date.now();
 
@@ -57,6 +60,7 @@ export async function searchMemory(
   const namespace = input.namespace ?? config.defaultNamespace;
   const minTrust = input.min_trust ?? 'low';
   const graphBoost = input.graph_boost !== false;
+  const explain = input.explain !== false; // default: true
 
   // Step 1: Generate query embedding
   const embedding = await embedder.embed(input.query);
@@ -241,6 +245,15 @@ export async function searchMemory(
     bumpAll();
   }
 
+  // Step 11: Enrich with explanations (default: on)
+  let enrichedResults: readonly (MemoryWithScore | MemoryWithExplanation)[] = finalResults;
+  if (explain) {
+    enrichedResults = finalResults.map((memory) => ({
+      ...memory,
+      explain: explainMemory(db, memory),
+    }));
+  }
+
   logger.info('search', 'search complete', {
     query: input.query,
     results: finalResults.length,
@@ -248,11 +261,12 @@ export async function searchMemory(
     hybrid,
     graphBoost: graphScores.size > 0,
     primingBoost: primingScores.size > 0,
+    explain,
     namespace,
   });
   metrics.increment('search.queries');
   metrics.record('search.results', finalResults.length);
   metrics.record('search.duration_ms', Date.now() - start);
 
-  return finalResults;
+  return enrichedResults;
 }
