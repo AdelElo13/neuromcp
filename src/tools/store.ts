@@ -11,6 +11,7 @@ import { computeSurprise } from '../cognitive/surprise.js';
 import { detectContradictions, supersedMemory } from '../cognitive/contradiction.js';
 import { extractEntitiesDispatch } from '../graph/extract.js';
 import { extractClaims } from '../cognitive/claims.js';
+import { createContradictionEdge } from '../graph/contradiction-edges.js';
 import { eventBus } from '../transport/events.js';
 
 export interface StoreInput {
@@ -313,13 +314,25 @@ export async function storeMemory(
     });
   }
 
-  // Step 9: Apply contradiction resolutions
+  // Step 9: Apply contradiction resolutions + create graph edges
   for (const contradiction of contradictions) {
     if (contradiction.resolution === 'supersede') {
       supersedMemory(db, contradiction.existing_id, id);
       logger.info('store', 'Memory superseded', {
         oldId: contradiction.existing_id,
         newId: id,
+      });
+    }
+    // For all resolutions (supersede, coexist, flag): create a 'contradicts' edge
+    // This enables later queries like "what contradicts this memory?"
+    try {
+      createContradictionEdge(db, id, contradiction.existing_id, namespace, {
+        resolution: contradiction.resolution,
+        similarity: contradiction.similarity,
+      });
+    } catch (err: unknown) {
+      logger.warn('store', 'Failed to create contradiction edge', {
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }

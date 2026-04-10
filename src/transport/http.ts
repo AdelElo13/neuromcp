@@ -9,6 +9,7 @@ import type { NeuromcpConfig } from '../config.js';
 import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import { searchMemory } from '../tools/search.js';
+import { storeMemory } from '../tools/store.js';
 import { eventBus } from './events.js';
 
 export interface HttpTransportOptions {
@@ -90,6 +91,30 @@ export async function startHttpTransport(
         res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(JSON.stringify({ error: 'search failed' }));
       }
+      return;
+    }
+
+    // Store API — enables hooks to use the full store pipeline (dedup, contradiction, embeddings, claims)
+    if (url.pathname === '/api/store' && req.method === 'POST' && deps) {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', async () => {
+        try {
+          const input = JSON.parse(body);
+          if (!input.content || typeof input.content !== 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({ error: 'content (string) required' }));
+            return;
+          }
+          const result = await storeMemory(input, deps);
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify(result));
+        } catch (err: unknown) {
+          logger.warn('http', 'Store API failed', { error: err instanceof Error ? err.message : String(err) });
+          res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ error: 'store failed' }));
+        }
+      });
       return;
     }
 

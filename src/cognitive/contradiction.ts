@@ -60,12 +60,17 @@ export async function detectContradictions(
     const signals = computeContradictionSignals(contentLower, existingLower);
 
     if (signals.score > 0.3) {
+      // Resolution ladder: strong signal → supersede, medium → coexist, weak → flag
+      const resolution: 'supersede' | 'coexist' | 'flag' =
+        signals.score > 0.5 ? 'supersede' :
+        signals.score > 0.35 ? 'coexist' : 'flag';
+
       contradictions.push({
         existing_id: existing.id,
         new_content: content,
         existing_content: existing.content,
         similarity,
-        resolution: signals.score > 0.5 ? 'supersede' : 'flag',
+        resolution,
       });
     }
   }

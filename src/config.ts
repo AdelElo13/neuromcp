@@ -81,7 +81,7 @@ export function loadConfig(): NeuromcpConfig {
     surpriseDecayDays: envNum('NEUROMCP_SURPRISE_DECAY_DAYS', 7),
     primingBoost: envNum('NEUROMCP_PRIMING_BOOST', 0.15),
     mmrLambda: envNum('NEUROMCP_MMR_LAMBDA', 0.7),
-    httpEnabled: envBool('NEUROMCP_HTTP_ENABLED', false),
+    httpEnabled: envBool('NEUROMCP_HTTP_ENABLED', true),
     httpPort: envNum('NEUROMCP_HTTP_PORT', 3200),
     httpHost: env('NEUROMCP_HTTP_HOST', '127.0.0.1'),
     accessBoost: envNum('NEUROMCP_ACCESS_BOOST', 0.05),
