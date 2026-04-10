@@ -205,7 +205,7 @@ Same format — add to your editor's MCP settings.
 | Tool | Description |
 |------|-------------|
 | `store_memory` | Store with semantic dedup, contradiction detection, surprise scoring, entity extraction. |
-| `search_memory` | Hybrid vector + FTS search with RRF ranking, graph boost, cognitive priming. |
+| `search_memory` | Hybrid vector + FTS search with RRF ranking, graph boost, cognitive priming. Returns explain metadata (trust, contradictions, claims, confidence). |
 | `recall_memory` | Retrieve by ID, namespace, category, or tags — no semantic search. |
 | `forget_memory` | Soft-delete (tombstone). Supports `dry_run`. |
 | `consolidate` | Dedup, decay, prune, sweep. `commit=false` for preview, `true` to apply. |
@@ -312,18 +312,64 @@ All via environment variables. Defaults work for most setups.
 | `NEUROMCP_TOMBSTONE_TTL_DAYS` | `30` | Days before permanent sweep |
 | `NEUROMCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
+## What's New in v0.9
+
+### Auto-Capture (v0.9.0)
+
+Session hooks automatically extract high-signal events — no manual `store_memory` calls needed:
+
+| Detected | Category | How |
+|----------|----------|-----|
+| CronCreate / ScheduleWakeup calls | `intent` | Regex on transcript |
+| "Remember this" / "Onthoud dit" | `decision` | Pattern matching |
+| Domain monitoring (whois checks) | `intent` | Command detection |
+| Key decisions ("we decided...") | `decision` | Language patterns |
+| Deployments (npm publish, etc.) | `event` | Command detection |
+
+### Full Pipeline Auto-Capture (v0.9.1)
+
+Auto-captured memories now go through the full store pipeline: dedup, contradiction detection, embeddings, entity extraction, and claims — via HTTP endpoint (`POST /api/store`). Falls back to raw SQL when HTTP is unavailable.
+
+Contradiction resolution now has three tiers:
+- **Supersede** (score > 0.5): old memory invalidated, new one takes over
+- **Coexist** (score 0.35–0.5): both kept, linked via `contradicts` edge in knowledge graph
+- **Flag** (score 0.3–0.35): reported for review
+
+### Explain Mode (v0.9.2)
+
+Every `search_memory` result includes an `explain` field:
+
+```json
+{
+  "explain": {
+    "source_trust": { "level": "high", "reason": "Directly provided by user" },
+    "temporal_validity": { "currently_valid": true, "superseded_by": null },
+    "contradictions": [{ "memory_id": "abc", "content_preview": "...", "resolution": "coexist" }],
+    "claims": [{ "subject": "neuromcp", "predicate": "version", "object": "0.9.2" }],
+    "confidence": { "retrieval_score": 0.016, "source_trust_score": 1.0, "overall": 0.85 }
+  }
+}
+```
+
+No other memory system provides this level of transparency.
+
 ## Comparison
 
-| Feature | neuromcp | @modelcontextprotocol/server-memory | mem0 | Karpathy Wiki |
-|---------|----------|--------------------------------------|------|---------------|
-| Search | Hybrid (vector + FTS + RRF) | Keyword only | Vector only | Index-based |
-| Wiki | Compiled Markdown + Git | None | None | Manual Markdown |
-| Session persistence | Crash-resilient hooks | None | None | None |
-| Project auto-detect | Yes (from cwd) | No | No | No |
-| Embeddings | Built-in ONNX (zero config) | None | External API | None |
-| Governance | Namespaces, trust, soft delete | None | None | None |
-| Storage | SQLite + Markdown | JSON file | Cloud / Postgres | Markdown |
-| Infrastructure | Zero | Zero | Cloud account | Zero |
+| Feature | neuromcp | Hindsight | Mem0 | Letta/MemGPT | agentmemory |
+|---------|----------|-----------|------|--------------|-------------|
+| **LongMemEval R@5** | **99.9%** | 91.4% | 49% | — | — |
+| Search | Hybrid (vector + FTS + RRF + graph) | Vector + rerank | Vector | Vector | Vector |
+| Auto-capture | Deterministic (no LLM cost) | LLM extraction | No | Agent self-edit | Yes |
+| Explain mode | Yes (trust, contradictions, claims) | No | No | No | No |
+| Knowledge graph | Entities, relations, PageRank | Entities + beliefs | No | No | No |
+| Contradiction detection | 3-tier (supersede/coexist/flag) + graph edges | Belief updating | No | No | No |
+| Temporal validity | valid_from/valid_to on memories + relations | Yes | No | No | No |
+| Wiki knowledge base | Compiled Markdown + Git | No | No | Tiered blocks | No |
+| Local-first | SQLite, zero cloud | SQLite | Cloud / Postgres | Server | Local |
+| Embeddings | Built-in ONNX (zero config) + Ollama | External | External API | External | External |
+| Governance | Namespaces, trust levels, soft delete | Namespaces | API keys | Agent-scoped | Cross-agent |
+| Infrastructure | Zero | Zero | Cloud account | Server | Zero |
+| Pricing | Free (MIT) | Free (MIT) | Freemium ($23.9M funded) | Free ($10M funded) | Free (Apache-2.0) |
 
 ## License
 
