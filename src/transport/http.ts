@@ -1,6 +1,4 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
-import { randomUUID } from 'node:crypto';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type Database from 'better-sqlite3';
 import type { VectorStore } from '../vectors/types.js';
@@ -36,14 +34,10 @@ export async function startHttpTransport(
   logger: Logger,
   deps?: HttpDeps,
 ): Promise<Server> {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-
   const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
-    // CORS preflight
+    // CORS preflight — permissive because server binds to 127.0.0.1 only (not externally accessible)
     if (req.method === 'OPTIONS') {
       res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type' });
       res.end();
@@ -53,7 +47,7 @@ export async function startHttpTransport(
     // Health endpoint
     if (url.pathname === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', version: '0.7.0' }));
+      res.end(JSON.stringify({ status: 'ok', version: '0.9.2' }));
       return;
     }
 
@@ -137,34 +131,20 @@ export async function startHttpTransport(
       return;
     }
 
-    // MCP Streamable HTTP endpoint
-    if (url.pathname === '/mcp') {
-      try {
-        await transport.handleRequest(req, res);
-      } catch (err: unknown) {
-        logger.error('http', 'Request handling failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'internal_error' }));
-        }
-      }
-      return;
-    }
-
     // 404
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'not_found' }));
   });
 
-  await server.connect(transport);
+  // NOTE: Do NOT call server.connect(transport) here — the MCP server is already
+  // connected via stdio. The HTTP server provides REST API endpoints (/api/store,
+  // /api/search, /events, /health) that call tool functions directly, not via MCP protocol.
 
   return new Promise((resolve) => {
     httpServer.listen(options.port, options.host, () => {
-      logger.info('http', `HTTP transport listening on ${options.host}:${options.port}`, {
+      logger.info('http', `HTTP API listening on ${options.host}:${options.port}`, {
         endpoints: {
-          mcp: `http://${options.host}:${options.port}/mcp`,
+          store: `http://${options.host}:${options.port}/api/store`,
           search: `http://${options.host}:${options.port}/api/search?q=...`,
           events: `http://${options.host}:${options.port}/events`,
           health: `http://${options.host}:${options.port}/health`,

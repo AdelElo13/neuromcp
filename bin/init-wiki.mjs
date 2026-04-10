@@ -92,7 +92,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     if (!existsSync(claudeHooksDir)) {
       mkdirSync(claudeHooksDir, { recursive: true });
     }
-    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js']) {
+    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js', 'neuromcp-auto-capture.js']) {
       const src = join(hooksDir, hook);
       const dest = join(claudeHooksDir, hook);
       if (!existsSync(dest) && existsSync(src)) {
@@ -132,6 +132,15 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
         timeout: 10,
       }],
     },
+    'Stop:auto-capture': {
+      matcher: '*',
+      hooks: [{
+        type: 'command',
+        command: `node "${claudeHooksDir}/neuromcp-auto-capture.js"`,
+        timeout: 15,
+        async: true,
+      }],
+    },
   };
 
   function hasNeuromcpHook(entries, command) {
@@ -153,10 +162,14 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     let added = 0;
 
     for (const [eventType, entry] of Object.entries(neuromcpHooks)) {
-      if (!settings.hooks[eventType]) settings.hooks[eventType] = [];
-      const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject' : 'neuromcp-persist';
-      if (!hasNeuromcpHook(settings.hooks[eventType], marker)) {
-        settings.hooks[eventType].push(entry);
+      // Stop:auto-capture is registered under the Stop event type
+      const actualEventType = eventType.startsWith('Stop:') ? 'Stop' : eventType;
+      if (!settings.hooks[actualEventType]) settings.hooks[actualEventType] = [];
+      const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject'
+        : eventType.includes('auto-capture') ? 'neuromcp-auto-capture'
+        : 'neuromcp-persist';
+      if (!hasNeuromcpHook(settings.hooks[actualEventType], marker)) {
+        settings.hooks[actualEventType].push(entry);
         log(`Added ${eventType} hook to settings.json`);
         added++;
       } else {
