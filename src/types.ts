@@ -1,6 +1,6 @@
 export type TrustLevel = 'high' | 'medium' | 'low' | 'unverified';
 export type Visibility = 'private' | 'namespace' | 'global';
-export type MemorySource = 'user' | 'auto' | 'consolidation' | 'claude-code' | 'error';
+export type MemorySource = 'user' | 'auto' | 'consolidation' | 'claude-code' | 'hook' | 'error';
 export type ConsolidationAction = 'merge' | 'prune' | 'decay' | 'reindex' | 'tombstone';
 export type OperationType = 'consolidate' | 'reindex' | 'import' | 'export';
 export type OperationStatus = 'running' | 'completed' | 'failed' | 'cancelled';

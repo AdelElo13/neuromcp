@@ -23,7 +23,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       category: z.string().optional().describe('Category label (e.g. "code", "conversation", "fact")'),
       tags: z.array(z.string()).optional().describe('Tags for filtering'),
       importance: z.number().min(0).max(1).optional().describe('Importance score 0-1 (default: 0.5)'),
-      source: z.enum(['user', 'auto', 'consolidation', 'claude-code', 'error']).optional().describe('Source of the memory'),
+      source: z.enum(['user', 'auto', 'consolidation', 'claude-code', 'hook', 'error']).optional().describe('Source of the memory'),
       source_trust: z.enum(['high', 'medium', 'low', 'unverified']).optional().describe('Trust level'),
       project_id: z.string().optional().describe('Project identifier'),
       agent_id: z.string().optional().describe('Agent identifier'),

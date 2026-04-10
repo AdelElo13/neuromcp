@@ -39,10 +39,11 @@ describe('defaultTrustForSource', () => {
     expect(defaultTrustForSource('user')).toBe('high');
   });
 
-  it('assigns medium trust to auto, consolidation, claude-code', () => {
+  it('assigns medium trust to auto, consolidation, claude-code, hook', () => {
     expect(defaultTrustForSource('auto')).toBe('medium');
     expect(defaultTrustForSource('consolidation')).toBe('medium');
     expect(defaultTrustForSource('claude-code')).toBe('medium');
+    expect(defaultTrustForSource('hook')).toBe('medium');
   });
 
   it('assigns low trust to error source', () => {

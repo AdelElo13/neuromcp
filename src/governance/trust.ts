@@ -25,6 +25,7 @@ export function defaultTrustForSource(source: MemorySource): TrustLevel {
     case 'consolidation':
     case 'auto':
     case 'claude-code':
+    case 'hook':
       return 'medium';
     case 'error':
       return 'low';
