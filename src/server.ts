@@ -10,6 +10,7 @@ import { registerGraphTools } from './registration/graph.js';
 import { registerEpisodeTools } from './registration/episodes.js';
 import { registerAgentTools } from './registration/agents.js';
 import { registerVerbatimTools } from './registration/verbatim.js';
+import { registerWikiTools } from './registration/wiki.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -41,6 +42,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerEpisodeTools(server, deps);
   registerAgentTools(server, deps);
   registerVerbatimTools(server, deps);
+  registerWikiTools(server, deps);
   registerResources(server, deps);
   registerPrompts(server, deps);
 

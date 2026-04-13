@@ -37,6 +37,8 @@ export interface NeuromcpConfig {
   // Entity extraction
   readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
   readonly ollamaChatModel: string;
+  // Wiki
+  readonly wikiDir: string;
 }
 
 function env(key: string, fallback: string): string {
@@ -89,5 +91,6 @@ export function loadConfig(): NeuromcpConfig {
     centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
     entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'auto') as NeuromcpConfig['entityExtractionMode'],
     ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
+    wikiDir: env('NEUROMCP_WIKI_DIR', resolve(homedir(), '.neuromcp', 'wiki')),
   };
 }
