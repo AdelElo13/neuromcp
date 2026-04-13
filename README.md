@@ -5,6 +5,7 @@
 Local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
 
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
+[![npm downloads](https://img.shields.io/npm/dw/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![license](https://img.shields.io/npm/l/neuromcp)](./LICENSE)
 
 ```bash

@@ -27,6 +27,7 @@ async function main() {
   const nodeStream = Readable.fromWeb(response.body);
   await pipeline(nodeStream, createWriteStream(MODEL_PATH));
   process.stderr.write('[neuromcp] Model downloaded.\n');
+  process.stderr.write('[neuromcp] ★ If neuromcp is useful, star us: https://github.com/AdelElo13/neuromcp\n');
 }
 
 main().catch(() => {
