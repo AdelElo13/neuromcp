@@ -15,6 +15,8 @@ export default defineConfig({
     'src/tools/admin.ts',
     'src/tools/backfill.ts',
     'src/tools/graph.ts',
+    'src/tools/wiki.ts',
+    'src/registration/wiki.ts',
     'src/storage/database.ts',
     'src/storage/migrations.ts',
     'src/storage/schema.ts',

@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from 'node:fs';
-import { join, relative, basename } from 'node:path';
+import { join } from 'node:path';
 import type { Logger } from '../observability/logger.js';
 import type { NeuromcpConfig } from '../config.js';
 
