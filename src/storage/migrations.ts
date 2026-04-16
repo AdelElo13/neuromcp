@@ -121,6 +121,24 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     applySchema(db);
   }
 
+  if (currentVersion < 8) {
+    logger.info('migrations', 'Running v7 to v8 migration: attention-based co-retrieval');
+    const coRetrievalStatements = [
+      `CREATE TABLE IF NOT EXISTS co_retrievals (
+        memory_a TEXT NOT NULL,
+        memory_b TEXT NOT NULL,
+        co_count INTEGER NOT NULL DEFAULT 1,
+        last_co_retrieved_at TEXT NOT NULL,
+        PRIMARY KEY (memory_a, memory_b)
+      )`,
+      'CREATE INDEX IF NOT EXISTS idx_co_retrievals_a ON co_retrievals(memory_a)',
+      'CREATE INDEX IF NOT EXISTS idx_co_retrievals_b ON co_retrievals(memory_b)',
+    ];
+    for (const stmt of coRetrievalStatements) {
+      try { db.prepare(stmt).run(); } catch { /* table/index exists */ }
+    }
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

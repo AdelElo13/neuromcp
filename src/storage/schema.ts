@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (

@@ -34,6 +34,9 @@ export interface NeuromcpConfig {
   readonly accessBoost: number;
   readonly recencyBoost: number;
   readonly centralityBoost: number;
+  // Attention-based retrieval (AttnRes-inspired)
+  readonly attentionWeight: number;
+  readonly blockAttentionWeight: number;
   // Entity extraction
   readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
   readonly ollamaChatModel: string;
@@ -89,6 +92,8 @@ export function loadConfig(): NeuromcpConfig {
     accessBoost: envNum('NEUROMCP_ACCESS_BOOST', 0.05),
     recencyBoost: envNum('NEUROMCP_RECENCY_BOOST', 0.1),
     centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
+    attentionWeight: envNum('NEUROMCP_ATTENTION_WEIGHT', 0.004),
+    blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),
     entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'auto') as NeuromcpConfig['entityExtractionMode'],
     ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
     wikiDir: env('NEUROMCP_WIKI_DIR', resolve(homedir(), '.neuromcp', 'wiki')),

@@ -11,6 +11,7 @@ import { namespaceFilter } from '../governance/namespace.js';
 import { meetsMinTrust } from '../governance/trust.js';
 import { computePrimingBoosts, getRecentlyAccessed } from '../cognitive/priming.js';
 import { computeAdaptiveImportance } from '../cognitive/importance.js';
+import { computeAttentionScores, computeBlockAttentionScores, recordCoRetrieval } from '../cognitive/attention.js';
 import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
@@ -148,6 +149,25 @@ export async function searchMemory(
     scored.push({ id, score });
   }
 
+  // Step 6.5: Attention-based co-retrieval boost (AttnRes-inspired)
+  try {
+    const attentionScores = computeAttentionScores(db, scored, {
+      attentionWeight: config.attentionWeight,
+    });
+    const blockScores = computeBlockAttentionScores(db, scored, {
+      blockWeight: config.blockAttentionWeight,
+    });
+    for (const s of scored) {
+      s.score += attentionScores.get(s.id) ?? 0;
+      s.score += blockScores.get(s.id) ?? 0;
+    }
+    if (attentionScores.size > 0) {
+      metrics.record('search.attention_boost_candidates', attentionScores.size);
+    }
+  } catch {
+    logger.warn('search', 'Attention scoring failed, proceeding without');
+  }
+
   scored.sort((a, b) => b.score - a.score);
 
   // Step 7: Fetch full rows, apply post-filters
@@ -232,7 +252,16 @@ export async function searchMemory(
   const mmrResults = mmrRerank(results, config.mmrLambda, limit);
   const finalResults = [...mmrResults];
 
-  // Step 10: Bump access counts in a transaction
+  // Step 10: Record co-retrieval patterns for attention learning
+  if (finalResults.length >= 2) {
+    try {
+      recordCoRetrieval(db, finalResults.map((r) => r.id));
+    } catch {
+      logger.warn('search', 'Co-retrieval recording failed');
+    }
+  }
+
+  // Step 11: Bump access counts in a transaction
   if (finalResults.length > 0) {
     const bumpStmt = db.prepare(
       "UPDATE memories SET access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
