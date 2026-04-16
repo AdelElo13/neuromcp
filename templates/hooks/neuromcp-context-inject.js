@@ -46,6 +46,35 @@ function getProjectPage() {
   return null;
 }
 
+/**
+ * Find the most recently modified wiki project page (within last 48h).
+ * Catches the "active project" even when cwd doesn't match — e.g. when
+ * the user runs Claude from their home directory while working on a
+ * project whose files live elsewhere.
+ */
+function getActiveProjectPage() {
+  const projectsDir = path.join(WIKI_DIR, 'projects');
+  if (!fs.existsSync(projectsDir)) return null;
+  try {
+    const now = Date.now();
+    const fortyEightHoursMs = 48 * 60 * 60 * 1000;
+    const candidates = fs.readdirSync(projectsDir)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => ({
+        slug: f.replace('.md', ''),
+        fullPath: path.join(projectsDir, f),
+        mtime: fs.statSync(path.join(projectsDir, f)).mtimeMs,
+      }))
+      .filter((c) => now - c.mtime < fortyEightHoursMs)
+      .sort((a, b) => b.mtime - a.mtime);
+    if (candidates.length === 0) return null;
+    const top = candidates[0];
+    return { slug: top.slug, content: readFile(top.fullPath), mtime: top.mtime };
+  } catch {
+    return null;
+  }
+}
+
 function getUserPage() {
   const peopleDir = path.join(WIKI_DIR, 'people');
   if (!fs.existsSync(peopleDir)) return null;
@@ -88,8 +117,17 @@ if (index) parts.push(`<neuromcp-index>\n${index}\n</neuromcp-index>`);
 const user = getUserPage();
 if (user) parts.push(`<neuromcp-user>\n${user}\n</neuromcp-user>`);
 
+// Active project — most recently edited wiki page (last 48h).
+// Ground truth of "what are we working on" regardless of cwd.
+const activeProject = getActiveProjectPage();
+if (activeProject && activeProject.content) {
+  const ago = Math.round((Date.now() - activeProject.mtime) / 60000);
+  parts.push(`<active-project slug="${activeProject.slug}" updated="${ago}m ago">\n${activeProject.content}\n</active-project>`);
+}
+
+// cwd-matched project page (only if different from active project)
 const project = getProjectPage();
-if (project && project.content) {
+if (project && project.content && (!activeProject || project.slug !== activeProject.slug)) {
   parts.push(`<neuromcp-project slug="${project.slug}">\n${project.content}\n</neuromcp-project>`);
 }
 
