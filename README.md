@@ -316,6 +316,20 @@ npx neuromcp-enable-consolidation
 
 **Change interval:** `npx neuromcp-enable-consolidation --interval 7200` (every 2 hours)
 
+### Auto-retrieve + wiki indexing
+
+Once the wiki has content, make it *searchable* so the `UserPromptSubmit` hook can surface relevant pages automatically (no more "LLM must remember to call `search`"):
+
+```bash
+npx neuromcp-index-wiki            # index all wiki pages into memories_fts
+npx neuromcp-index-wiki --rebuild  # wipe wiki entries first, then reindex
+npx neuromcp-index-wiki --dry-run  # preview what would change
+```
+
+The indexer splits each page on `##` section headers and stores every section as a deduplicated memory (`source='wiki'`, `category='wiki'`). The auto-retrieve hook then finds relevant sections at prompt time via FTS5 BM25 and injects them as `<neuromcp-recall>` context.
+
+The `neuromcp-auto-retrieve.js` hook is installed automatically by `neuromcp-init-wiki` and registered under `UserPromptSubmit` in Claude Code's `settings.json`. Re-run the indexer after large wiki updates (or schedule it — it's idempotent).
+
 ## Memory Governance
 
 **Namespaces** isolate memories by project, agent, or domain.
