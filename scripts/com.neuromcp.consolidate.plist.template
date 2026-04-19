@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  neuromcp consolidation launchd agent (macOS).
+
+  This file is a TEMPLATE. `bin/neuromcp-enable-consolidation` substitutes
+  the {{...}} placeholders with real values for the installing user and
+  writes the result to ~/Library/LaunchAgents/com.neuromcp.consolidate.plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.neuromcp.consolidate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{SCRIPT_PATH}}</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>{{INTERVAL_SECONDS}}</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{{PATH}}</string>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/.neuromcp/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/.neuromcp/launchd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

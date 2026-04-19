@@ -41,7 +41,8 @@
   },
   "bin": {
     "neuromcp": "bin/neuromcp.mjs",
-    "neuromcp-init-wiki": "bin/init-wiki.mjs"
+    "neuromcp-init-wiki": "bin/init-wiki.mjs",
+    "neuromcp-enable-consolidation": "bin/enable-consolidation.mjs"
   },
   "files": [
     "dist",

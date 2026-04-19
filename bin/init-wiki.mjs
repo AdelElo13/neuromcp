@@ -242,3 +242,7 @@ if (!requestedEditor) {
 } else {
   console.log(`   Configured for: ${requestedEditor}\n`);
 }
+
+console.log('💡 Optional: enable auto-consolidation (raw sessions → wiki every 4h):');
+console.log('   npx neuromcp-enable-consolidation\n');
+console.log('   Requires the `claude` CLI (Claude Code) + python3 on PATH.\n');

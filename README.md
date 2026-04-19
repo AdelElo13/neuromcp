@@ -288,6 +288,34 @@ The wiki works automatically once hooks are installed. The LLM:
 
 You can also browse and edit the wiki manually — it's just Markdown files.
 
+### Auto-consolidation (optional)
+
+Once you accumulate raw session logs, the wiki can be kept fresh automatically. A scheduled job reads unprocessed sessions, groups them per project (by detecting `$HOME/projects/<name>` paths in the session content), and uses the `claude` CLI to synthesise a `## [date]` entry into the right wiki page.
+
+```bash
+npx neuromcp-enable-consolidation
+```
+
+**What it installs:**
+- `~/.neuromcp/scripts/consolidate-sessions.py` — the worker
+- `~/.neuromcp/scripts/run-consolidation.sh` — threshold-guarded runner
+- **macOS**: a launchd agent that fires every 4 hours (`com.neuromcp.consolidate`)
+- **Linux**: prints a cron snippet to add manually
+
+**Requirements:**
+- `python3` ≥ 3.8 on `PATH`
+- the [`claude` CLI](https://claude.com/claude-code) on `PATH`
+
+**Guards built in:**
+- Threshold: skip if fewer than 5 unprocessed sessions
+- Output is extracted from a fenced markdown block; apology/narration text is rejected
+- Ledger (`~/.neuromcp/consolidation-ledger.json`) makes re-runs idempotent
+- Large project backlogs are auto-batched (default 15 sessions per `claude` call; override with `--max-sessions`)
+
+**Uninstall:** `npx neuromcp-enable-consolidation --uninstall`
+
+**Change interval:** `npx neuromcp-enable-consolidation --interval 7200` (every 2 hours)
+
 ## Memory Governance
 
 **Namespaces** isolate memories by project, agent, or domain.
