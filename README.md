@@ -120,13 +120,13 @@ Last session             → What happened last time
 npx neuromcp
 ```
 
-### 2. Initialize the wiki (optional but recommended)
+### 2. Initialize the wiki + hooks (**required** for closed-loop attribution)
 
 ```bash
 npx neuromcp-init-wiki
 ```
 
-This creates the wiki structure, installs hooks (Claude Code) and rules (other editors), and configures everything automatically. Safe to run multiple times — won't overwrite existing config.
+This creates the wiki structure, installs hooks (Claude Code) and rules (other editors), and configures everything automatically. **Without this step**, `npx neuromcp` still runs as a plain MCP server with 42 tools, but the critic hook that closes the attribution loop is not installed — retrieval works but usefulness scores never accumulate. Safe to run multiple times — won't overwrite existing config.
 
 ### Editor Compatibility
 

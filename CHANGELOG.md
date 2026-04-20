@@ -3,6 +3,26 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.7] — 2026-04-20
+
+Round-14 Codex nit: README still presented `npx neuromcp-init-wiki`
+as "optional but recommended", so a user who ran only
+`claude mcp add neuromcp -- npx -y neuromcp` would NOT get the critic
+hook and therefore not get the closed loop. Doc-only fix.
+
+### Changed
+
+- README step 2 renamed to "Initialize the wiki + hooks (**required**
+  for closed-loop attribution)". Added explicit paragraph: without
+  init-wiki, the server still runs with 42 tools, but usefulness
+  scores never accumulate because the critic hook isn't installed.
+- No code changes. This is purely an onboarding-honesty patch.
+
+### Verified
+
+- 276 / 276 tests pass
+- README accurately describes what each install step does
+
 ## [0.17.6] — 2026-04-20
 
 Round-13 Codex review: v0.17.5 closes the loop mechanically but
