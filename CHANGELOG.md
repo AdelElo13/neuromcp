@@ -3,6 +3,64 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.1] — 2026-04-20
+
+Round-10 review (Claude architect + Codex CLI) converged on **OVERSTATED**
+for v0.17.0 despite the clean primitive — the critic hook was too weak
+to call the loop "self-learning" and the reflection safeguards had gaps.
+This patch addresses every P0 and P1 finding.
+
+### Fixed — P0 critic hook (both reviewers)
+
+- **Event-scoping**. v0.17.0's critic built one `assistantText` blob from
+  the whole transcript and applied it to every uncritiqued event in the
+  last 4 hours. Cross-event and cross-session contamination guaranteed.
+  v0.17.1: each event is scored against `turnsAfter(transcript,
+  event.created_at)` only. A search from session 1 can no longer
+  collect citation credit from session 2's replies.
+- **Raised substring thresholds**. `MIN_HIT_CHARS` 30 → 60, `MIN_SNIPPET_LEN`
+  40 → 80. Reduces false-positive rate from boilerplate (imports, stock
+  greetings, JSON fragments, URLs). Does not solve the lexical-reuse
+  limitation — that's v0.18.0 work (local LLM judge).
+- **Critic hook SQL now transactional**. Critic writes `UPDATE events +
+  UPSERT usefulness + UPDATE join table` as a single `BEGIN;...;COMMIT;`
+  batch so partial failures can't drift the tables.
+
+### Fixed — P1 reflection circularity (both reviewers)
+
+- `generate_reflection` now excludes `category='reflection'` (no
+  self-feeding) and requires `helpful_count > harmful_count AND
+  usefulness_score > 0.6` (no reinforcing contradictory signal).
+- Auto-generated reflections now store with `source_trust='medium'` instead
+  of `'high'` — trust is earned, not asserted.
+
+### Fixed — P2 benchmark honesty
+
+- README headline softened: removed "#1 AI memory system" language and
+  added an explicit caveat block under the benchmark table explaining
+  that the oracle split measures session-retrieval accuracy, not
+  end-to-end answer correctness, and that a distractor-rich eval is
+  v0.18.0 work.
+- Removed the stale `99.9%` figure; the table and headline now
+  consistently say `99.8%`.
+- `eval/longmemeval-runner.ts` version label bumped to v0.17.1
+  (previously still printed `v0.9.4`).
+
+### Verified
+
+- 276 / 276 tests pass
+- Critic hook still runs cleanly against real transcripts
+- Lint + typecheck clean
+
+### Remaining deferrals — v0.18.0
+
+- Replace lexical-reuse critic with local LLM judge (Ollama Haiku) for
+  semantic helpfulness labels
+- Distractor-rich LongMemEval run
+- Drop `retrieval_events.retrieved_ids` JSON blob, make
+  `retrieval_event_memories` the authoritative source
+- Seeded nondeterminism for reproducible rankings when needed
+
 ## [0.17.0] — 2026-04-20
 
 Closes the attribution loop. v0.16.x shipped a well-built primitive that

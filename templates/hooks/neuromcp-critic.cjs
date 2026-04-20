@@ -33,10 +33,10 @@ const DB_PATH = process.env.NEUROMCP_DB || path.join(HOME, '.neuromcp', 'memory.
 const LOG_PATH = path.join(HOME, '.neuromcp', 'critic.log');
 const SQLITE_BIN = process.env.NEUROMCP_SQLITE || 'sqlite3';
 
-const MIN_SNIPPET_LEN = 40;     // skip memory snippets shorter than this
+const MIN_SNIPPET_LEN = 80;  // raised from 40 per P0 review     // skip memory snippets shorter than this
 const SNIPPET_WINDOW = 120;     // length of candidate substrings to test
 const SNIPPET_STEP = 60;        // sliding-window step
-const MIN_HIT_CHARS = 30;       // required overlap for a match
+const MIN_HIT_CHARS = 60;  // raised from 30 per P0 review — boilerplate like imports/greetings below this length       // required overlap for a match
 
 function log(line) {
   try { fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${line}\n`); } catch {}
@@ -84,8 +84,11 @@ function readTranscript(path) {
   }
 }
 
-function extractAssistantText(transcriptRaw) {
-  const assistantChunks = [];
+function extractAssistantTurns(transcriptRaw) {
+  // Returns array of { timestamp, text } for each assistant turn so we can
+  // scope-match per retrieval_event (codex P0 finding: one blob across all
+  // events causes cross-event contamination).
+  const turns = [];
   for (const line of transcriptRaw.split('\n')) {
     if (!line.trim()) continue;
     try {
@@ -93,18 +96,25 @@ function extractAssistantText(transcriptRaw) {
       if (entry.type !== 'assistant' && entry.message?.role !== 'assistant') continue;
       const msg = entry.message || entry;
       const content = msg.content;
-      if (typeof content === 'string') {
-        assistantChunks.push(content);
-      } else if (Array.isArray(content)) {
+      let text = '';
+      if (typeof content === 'string') text = content;
+      else if (Array.isArray(content)) {
         for (const block of content) {
-          if (typeof block?.text === 'string') assistantChunks.push(block.text);
+          if (typeof block?.text === 'string') text += (text ? '\n' : '') + block.text;
         }
       }
+      const ts = entry.timestamp || entry.created_at || msg.created_at || '';
+      if (text) turns.push({ timestamp: ts, text });
     } catch {
       // skip malformed lines
     }
   }
-  return assistantChunks.join('\n');
+  return turns;
+}
+
+function turnsAfter(turns, sinceIso) {
+  if (!sinceIso) return turns;
+  return turns.filter((t) => !t.timestamp || t.timestamp >= sinceIso);
 }
 
 function memoryCitedInText(memoryContent, responseText) {
@@ -157,16 +167,19 @@ function main() {
     log('transcript unreadable');
     return;
   }
-  const assistantText = extractAssistantText(transcriptRaw);
-  if (!assistantText) {
+  const turns = extractAssistantTurns(transcriptRaw);
+  if (turns.length === 0) {
     log('no assistant text in transcript');
     return;
   }
 
-  // Fetch events from this session that have no outcome yet
+  // Fetch events from this session that have no outcome yet. Per codex P0:
+  // each event is scored ONLY against assistant turns that occurred AFTER
+  // the event's created_at timestamp — not a blob of all turns in the
+  // 4-hour window.
   const windowSince = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
   const events = sql(
-    `SELECT id, namespace, retrieved_ids FROM retrieval_events
+    `SELECT id, namespace, retrieved_ids, created_at FROM retrieval_events
       WHERE outcome IS NULL AND created_at >= ?
       ORDER BY created_at DESC
       LIMIT 200`,
@@ -193,9 +206,14 @@ function main() {
     );
     if (!memories) continue;
 
+    // Score each memory ONLY against assistant turns after this specific event.
+    // Removes the cross-event contamination codex flagged.
+    const scopedTurns = turnsAfter(turns, ev.created_at);
+    if (scopedTurns.length === 0) continue;
+    const scopedText = scopedTurns.map((t) => t.text).join('\n');
     const cited = [];
     for (const m of memories) {
-      if (memoryCitedInText(m.content, assistantText)) cited.push(m.id);
+      if (memoryCitedInText(m.content, scopedText)) cited.push(m.id);
     }
 
     if (cited.length === 0) {
@@ -226,7 +244,8 @@ function main() {
         `UPDATE retrieval_event_memories SET was_cited = 1 WHERE event_id = '${ev.id}' AND memory_id = '${memId}';`
       );
     }
-    if (sqlExec(updates.join('\n'))) {
+    const atomicBatch = `BEGIN;\n${updates.join('\n')}\nCOMMIT;`;
+    if (sqlExec(atomicBatch)) {
       eventsCritiqued++;
       totalCited += cited.length;
     }

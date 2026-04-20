@@ -1,6 +1,6 @@
 # neuromcp
 
-**The #1 AI memory system on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 99.9% Recall@5, zero API calls.**
+**Local-first MCP memory server — 99.8% Recall@5 on LongMemEval oracle split (100 questions), zero API calls.**
 
 Local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
 
@@ -30,6 +30,14 @@ Comparison:
 | **neuromcp** | **99.8%** |
 
 Reproduce on your machine: `npx tsx eval/longmemeval-runner.ts --limit 100`.
+
+**Honest caveats:** the oracle split isolates the correct memory in a small
+corpus, which makes retrieval easier than production traffic with distractors
+and paraphrase. These numbers prove the ranker works correctly on clean inputs;
+they do NOT prove end-to-end answer quality. A distractor-rich eval is v0.18.0
+work. This is also session-retrieval accuracy, not answer correctness — the
+benchmark measures whether we find the right memory, not whether the LLM
+produces the right answer from it.
 
 
 ## Why

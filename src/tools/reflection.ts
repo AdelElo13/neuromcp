@@ -59,7 +59,12 @@ export function generateReflection(
 
   const sinceIso = new Date(Date.now() - windowDays * 24 * 3600 * 1000).toISOString();
 
-  // Pull memories that have been proven helpful at least minHelpful times.
+  // Pull memories that have been PROVEN helpful — require helpful > harmful
+  // AND usefulness_score > 0.6 so noisy or contradictory memories don't
+  // slip into the reflection pool. Exclude prior reflections (category =
+  // 'reflection') to prevent self-feeding: reflection → retrieval →
+  // citation → higher helpful_count → pool → more reflection on self.
+  // This closes both the v0.17.0 round-10 architect P1 and codex P1 loops.
   const rows = db
     .prepare(
       `SELECT m.id, m.content, m.category, m.created_at, u.helpful_count
@@ -67,7 +72,10 @@ export function generateReflection(
          JOIN memory_usefulness u ON u.memory_id = m.id
          WHERE m.is_deleted = 0
            AND m.namespace = ?
+           AND m.category != 'reflection'
            AND u.helpful_count >= ?
+           AND u.helpful_count > u.harmful_count
+           AND u.usefulness_score > 0.6
            AND m.created_at >= ?
          ORDER BY u.usefulness_score DESC, u.helpful_count DESC
          LIMIT 200`,
@@ -131,7 +139,7 @@ export function generateReflection(
   db.prepare(
     `INSERT INTO memories
        (id, content_hash, content, namespace, source, source_trust, category, tags, importance, metadata, created_at, updated_at, schema_version, visibility, embedding_model, embedding_dim)
-     VALUES (?, ?, ?, ?, 'consolidation', 'high', 'reflection', ?, ?, ?, ?, ?, 11, 'namespace', 'none', 0)`,
+     VALUES (?, ?, ?, ?, 'consolidation', 'medium', 'reflection', ?, ?, ?, ?, ?, 11, 'namespace', 'none', 0)`,
   ).run(
     reflection_id,
     contentHash,
