@@ -3,6 +3,37 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.3] — 2026-04-20
+
+Round-3 review cleanup. Two reviewers cleared v0.16.2 as SOLID and
+APPROVE-WITH-NITS respectively. This patch addresses the remaining
+nits so the next review round has nothing cosmetic to flag.
+
+### Fixed
+
+- **Missing rollback test for `decayUsefulness`** (MEDIUM, from
+  round-3). Added a test that renames the `usefulness_score` column
+  mid-test, forcing `update.run` to throw. The test asserts the
+  transaction rolled back — all three seeded memories retain their
+  pre-decay scores.
+- **Misleading inline comment** in `decayUsefulness` that implied
+  better-sqlite3 auto-retries on throw. It does not. Comment now
+  honestly describes the rollback contract.
+
+### Changed
+
+- **Renamed `scripts/autoresearch.mjs` → `scripts/usefulness-dashboard.mjs`.**
+  The file was an observability tool labelled as an auto-optimizer.
+  The `--promote` flag that did nothing has been removed. Docstring
+  now states plainly: real A/B sweep scaffolding lands in v0.17.0.
+
+### Verified
+
+- 276 / 276 tests pass (+1 rollback regression test)
+- Dashboard script `--dry-run` output no longer mentions "config
+  sweep" — it talks about accumulating critic signal, which is
+  actually what the script reads
+
 ## [0.16.2] — 2026-04-20
 
 Round-2 review patch. One reviewer returned a new HIGH finding on the

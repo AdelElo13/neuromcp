@@ -233,10 +233,11 @@ export function decayUsefulness(
   const update = db.prepare(
     `UPDATE memory_usefulness SET usefulness_score = ?, last_critiqued_at = ? WHERE memory_id = ?`
   );
-  // Counter lives inside the transaction closure and gets re-initialised on
-  // every invocation. better-sqlite3 rolls back on throw, so a mid-batch
-  // exception re-runs this function with `localDecayed = 0` and the caller
-  // never sees a partial count.
+  // Counter lives inside the transaction closure so that a mid-batch
+  // exception rolls back writes AND aborts the closure — `applyDecay()`
+  // re-throws, the outer `decayed` binding is never assigned, and the
+  // caller sees the exception with no partial count. better-sqlite3 does
+  // not retry automatically; the retry semantics are the caller's job.
   const applyDecay = db.transaction((): number => {
   let localDecayed = 0;
   const rows = selectStale.all(cutoffIso) as Array<{ memory_id: string; usefulness_score: number; decay_floor: number; anchor: string }>;

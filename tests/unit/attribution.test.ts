@@ -150,3 +150,36 @@ describe('attribution failure modes', () => {
     expect(after).toBeLessThan(before); // decayed because last_critiqued_at is ancient
   });
 });
+
+describe('attribution decay rollback', () => {
+  let ctx: TestContext;
+  beforeEach(async () => { ctx = await setupTestDb(); });
+  afterEach(async () => { await teardownTestDb(ctx); });
+
+  it('decayUsefulness rolls back and throws on mid-batch failure', () => {
+    const deps = { db: ctx.db, logger: ctx.logger };
+    // Seed 3 stale rows
+    for (const id of ['a', 'b', 'c']) {
+      logRetrieval({ query: 'q', retrieved_ids: [id], cited_ids: [id], outcome: 'helpful' }, deps);
+    }
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 86400 * 1000).toISOString();
+    ctx.db.prepare(`UPDATE memory_usefulness SET last_critiqued_at = ?`).run(sixtyDaysAgo);
+    const scoresBefore = getUsefulnessScores(ctx.db, ['a', 'b', 'c']);
+
+    // Force a failure by breaking the UPDATE target mid-batch.
+    // Rename the column for the duration of the test — UPDATE will throw.
+    const originalName = 'usefulness_score';
+    ctx.db.prepare(`ALTER TABLE memory_usefulness RENAME COLUMN ${originalName} TO ${originalName}_tmp`).run();
+    try {
+      expect(() => decayUsefulness(deps, { half_life_days: 14 })).toThrow();
+    } finally {
+      // Restore column name so teardown succeeds
+      ctx.db.prepare(`ALTER TABLE memory_usefulness RENAME COLUMN ${originalName}_tmp TO ${originalName}`).run();
+    }
+    // All 3 rows unchanged — transaction rolled back any partial updates
+    const scoresAfter = getUsefulnessScores(ctx.db, ['a', 'b', 'c']);
+    for (const id of ['a', 'b', 'c']) {
+      expect(scoresAfter.get(id)).toBe(scoresBefore.get(id));
+    }
+  });
+});

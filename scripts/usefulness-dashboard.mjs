@@ -1,25 +1,25 @@
 #!/usr/bin/env node
 /**
- * autoresearch.mjs — weekly self-optimisation loop.
+ * usefulness-dashboard.mjs — weekly stats report over critic signal.
  *
- * Codex's correction over my original plan: don't benchmark-chase
- * LongMemEval in isolation. Track real user outcomes (critic acceptance
- * rate from memory_usefulness) and only promote config variants that
- * improve helpful_rate in production.
+ * This is an OBSERVABILITY tool, not an optimizer. It reads the last 7
+ * days of retrieval_events + memory_usefulness and prints:
+ *   - total retrievals, labelled count, helpful_rate, harmful count
+ *   - top-10 most helpful memories (by usefulness_score)
+ *   - bottom-10 most harmful memories
+ *   - a recommendation string derived from helpful_rate thresholds
  *
- * Variants tried each cycle (edit the CONFIGS array to add more):
- *   - attentionWeight = 0.002 | 0.004 | 0.008
- *   - usefulnessFactor slope = 0.3 | 0.5 | 0.7
- *
- * Results are written to ~/.neuromcp/experiments/<timestamp>.md so you
- * can review the evidence before the auto-promoter changes defaults.
+ * It does NOT sweep configuration variants or promote winners — an
+ * earlier draft claimed to, but that work was never implemented and
+ * the file was renamed from `autoresearch.mjs` to match what it
+ * actually does. Real A/B sweep scaffolding lands in v0.17.0.
  *
  * Usage:
- *   node scripts/autoresearch.mjs            # full cycle
- *   node scripts/autoresearch.mjs --dry-run  # plan only
- *   node scripts/autoresearch.mjs --promote  # apply winner if lift > threshold
+ *   node scripts/usefulness-dashboard.mjs            # write report
+ *   node scripts/usefulness-dashboard.mjs --dry-run  # print, do not write
  *
- * Schedule via launchd for weekly autonomous runs.
+ * Writes to ~/.neuromcp/experiments/<timestamp>.md. Schedule via
+ * launchd (weekly StartInterval) for autonomous reporting.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -34,8 +34,6 @@ const EXP_DIR = join(HOME, '.neuromcp', 'experiments');
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
-const promote = args.includes('--promote');
-const promoteThreshold = 0.05; // need 5% improvement to promote
 
 if (!existsSync(DB_PATH)) {
   console.error(`DB not found: ${DB_PATH}`);
@@ -72,8 +70,7 @@ console.log(`  helpful_rate:       ${helpfulRate === null ? 'n/a' : helpfulRate.
 console.log(`  harmful:            ${summary?.harmful ?? 0}`);
 
 if (labelled < 10) {
-  console.log(`\nNot enough labelled data (< 10 events). Skipping config sweep.`);
-  console.log(`Call log_retrieval with outcomes on at least 10 searches before running autoresearch.`);
+  console.log(`\nNot enough labelled data (< 10 events). Run search_memory + cite_memories with outcomes to accumulate signal.`);
   db.close();
   process.exit(0);
 }
@@ -104,7 +101,7 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const reportPath = join(EXP_DIR, `${stamp}.md`);
 
 const lines = [
-  `# neuromcp autoresearch report — ${new Date().toISOString()}`,
+  `# neuromcp usefulness-dashboard report — ${new Date().toISOString()}`,
   '',
   `## Critic signal (last 7 days)`,
   '',
@@ -144,12 +141,6 @@ if (dryRun) {
 } else {
   writeFileSync(reportPath, lines.join('\n') + '\n');
   console.log(`\nReport: ${reportPath}`);
-}
-
-if (promote && helpfulRate !== null && helpfulRate > 0.7) {
-  console.log(`\npromote=true and helpful_rate=${helpfulRate.toFixed(3)} > 0.7 — current config is already good, no promotion needed.`);
-} else if (promote) {
-  console.log(`\npromote=true but signal insufficient or below threshold. No change.`);
 }
 
 db.close();
