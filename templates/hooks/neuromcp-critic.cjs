@@ -320,8 +320,22 @@ async function main() {
       `UPDATE retrieval_events SET cited_ids = '${citedJson}', outcome = '${outcome}', critic_reason = '${primaryReason.replace(/'/g, "''")}', model = '${useSemantic ? OLLAMA_MODEL : 'lexical'}', critiqued_at = '${now}' WHERE id = '${ev.id}';`
     );
     for (const v of verdicts) {
-      if (v.label === 'neutral') continue;
       const memId = v.id;
+      if (v.label === 'neutral') {
+        // v0.18.1 (architect round-16): record neutral signal so the
+        // prior can learn 'retrieved and explicitly not helpful'. Skipping
+        // neutrals entirely left no learning signal for observed-but-unused.
+        updates.push(
+          `INSERT INTO memory_usefulness (memory_id, namespace, helpful_count, neutral_count, harmful_count, total_observed, usefulness_score, last_updated, last_critiqued_at)
+           VALUES ('${memId}', '${ev.namespace.replace(/'/g, "''")}', 0, 1, 0, 1, 0.5, '${now}', '${now}')
+           ON CONFLICT(memory_id) DO UPDATE SET
+             neutral_count = neutral_count + 1,
+             total_observed = total_observed + 1,
+             last_updated = '${now}',
+             last_critiqued_at = '${now}';`
+        );
+        continue;
+      }
       const helpfulDelta = v.label === 'helpful' ? 1 : 0;
       const harmfulDelta = v.label === 'harmful' ? 1 : 0;
       const initialScore = helpfulDelta === 1 ? 0.67 : 0.33;

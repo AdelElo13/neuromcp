@@ -51,14 +51,15 @@ export interface TestContext {
   readonly dbPath: string;
 }
 
-export function setupTestDb(): TestContext {
+export function setupTestDb(opts?: { dimensions?: number }): TestContext {
+  const dims = opts?.dimensions ?? DIMS;
   const dbPath = join(
     tmpdir(),
     `neuromcp-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
   );
   const db = openDatabase(dbPath);
   applySchema(db);
-  const vecStore = new SqliteVecStore(DIMS);
+  const vecStore = new SqliteVecStore(dims);
   vecStore.initialize(db);
   const logger = createLogger({ level: 'error', format: 'text' });
   const metrics = createMetrics();

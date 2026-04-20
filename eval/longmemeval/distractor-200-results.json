@@ -1,5 +1,5 @@
 {
-  "distractors": 1000,
+  "distractors": 200,
   "results": [
     {
       "question_id": "gpt4_2655b836",
@@ -14,7 +14,7 @@
       "question_type": "temporal-reasoning",
       "recall5": 1,
       "recall10": 1,
-      "mrr": 0.5,
+      "mrr": 1,
       "hit": true
     },
     {
@@ -30,7 +30,7 @@
       "question_type": "temporal-reasoning",
       "recall5": 1,
       "recall10": 1,
-      "mrr": 0.2,
+      "mrr": 1,
       "hit": true
     },
     {
@@ -45,7 +45,7 @@
   "overall": {
     "r5": "100.0",
     "r10": "100.0",
-    "mrr": "74.0",
+    "mrr": "100.0",
     "hr": "100.0"
   }
 }

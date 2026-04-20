@@ -24,6 +24,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { storeMemory } from '../src/tools/store.js';
 import { searchMemory } from '../src/tools/search.js';
+import { createEmbeddingProvider } from '../src/embeddings/factory.js';
+import { loadConfig } from '../src/config.js';
+import { createLogger } from '../src/observability/logger.js';
 
 interface Turn { role: string; content: string; has_answer?: boolean }
 interface LongMemQuestion {
@@ -61,8 +64,8 @@ async function runQuestion(
   ctx: TestContext,
   q: LongMemQuestion,
   distractorPool: Array<{ text: string; sessionId: string }>,
+  embedder: TestContext['embedder'],
 ): Promise<QuestionResult> {
-  const embedder = ctx.embedder;
 
   // Pre-load distractors FIRST (they're just memories that shouldn't match)
   for (const d of distractorPool) {
@@ -146,10 +149,20 @@ function buildDistractorPool(allQuestions: LongMemQuestion[], count: number): Ar
       }
     }
   }
-  // Deterministic shuffle via seed so benchmark is reproducible
-  const seed = 42;
+  // Deterministic shuffle via seeded PRNG (mulberry32) so the benchmark
+  // is reproducible AND actually random. v0.18.0 shipped with a broken
+  // shuffle that always mapped j=0, producing a deterministic-head-of-array
+  // slice instead of random distractors.
+  let state = 42 >>> 0;
+  const random = () => {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
   for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(((seed * (i + 1)) % (i + 1)));
+    const j = Math.floor(random() * (i + 1));
     [pool[i], pool[j]] = [pool[j]!, pool[i]!];
   }
   return pool.slice(0, count);
@@ -168,6 +181,13 @@ async function main() {
   console.log(`=== LongMemEval WITH DISTRACTORS — neuromcp ===`);
   console.log(`Questions: ${filtered.length}`);
   console.log(`Distractors per run: ${opts.distractors}`);
+
+  // v0.18.1: production embedder (Ollama > OpenAI > ONNX), not the test
+  // FakeEmbedder. Round-16 codex caught that v0.18.0 used a hash stub.
+  const config = loadConfig();
+  const logger = createLogger(config);
+  const embedder = await createEmbeddingProvider(config, logger);
+  console.log(`Embedder: ${embedder.name} (dim=${embedder.dimensions})`);
   console.log('');
 
   const distractorPool = buildDistractorPool(questions, opts.distractors);
@@ -176,9 +196,9 @@ async function main() {
   const results: QuestionResult[] = [];
   for (let i = 0; i < filtered.length; i++) {
     process.stdout.write(`  Progress: ${i + 1}/${filtered.length}\r`);
-    const ctx = await setupTestDb();
+    const ctx = await setupTestDb({ dimensions: embedder.dimensions });
     try {
-      const result = await runQuestion(ctx, filtered[i]!, distractorPool);
+      const result = await runQuestion(ctx, filtered[i]!, distractorPool, embedder);
       results.push(result);
     } finally {
       await teardownTestDb(ctx);

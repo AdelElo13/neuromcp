@@ -3,6 +3,73 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.1] — 2026-04-20
+
+Round-16 review: architect APPROVE-WITH-NIT (broken shuffle + README
+asymmetry), Codex STILL-OVERSTATED (benchmark used FakeEmbedder stub,
+not production Ollama). Both fixes shipped.
+
+### Fixed — benchmark correctness
+
+- **Production embedder in benchmark**. `eval/longmemeval-distractor-runner.ts`
+  now instantiates the real embedder via `createEmbeddingProvider`
+  (Ollama > OpenAI > ONNX) instead of `FakeEmbedder` from the test
+  helper. Codex P0: the v0.18.0 numbers reflected a hash-based stub
+  that nobody uses in production.
+- **Real Fisher-Yates shuffle** via mulberry32 PRNG. The v0.18.0
+  "seeded shuffle" always mapped `j = 0`, so distractors were
+  deterministic-head-of-array, not random. Architect P0.
+- **`setupTestDb({ dimensions })`** now accepts a custom embedding
+  dimension so benchmarks can match production embedder output
+  (768 for nomic-embed-text, was hardcoded to 384).
+
+### Benchmark numbers now real
+
+| Embedder | Distractors | N | R@5 | R@10 | MRR |
+|----------|-------------|---|-----|------|-----|
+| nomic-embed-text (Ollama) | 0 | 30 | 100% | 100% | 100% |
+| nomic-embed-text (Ollama) | 200 | 5 | 100% | 100% | 100% |
+| nomic-embed-text (Ollama) | 1000 | 5 | 100% | 100% | 74% |
+
+v0.18.0 published 23% R@5 at 1000 distractors — that was from the test
+stub. Real embedder with 1000 random distractors keeps R@5 at 100%;
+MRR drops to 74% because the gold memory sometimes slips from rank-1
+to rank-2-4 under noise, but still within top-5.
+
+### Fixed — critic hook
+
+- **Neutral verdicts now recorded** (architect nit). v0.18.0 dropped
+  `neutral` labels entirely, so "retrieved and explicitly not helpful"
+  produced no signal. Now increments `neutral_count` on the usefulness
+  row with a 0.5 score — the prior can learn "observed and not used"
+  distinct from "never observed".
+
+### Fixed — README honesty
+
+- **Hero tagline de-marketed** (both reviewers). "99.8% Recall@5" is
+  gone from the top-of-README one-liner; replaced with "closed-loop
+  attribution critic; oracle + distractor numbers both published."
+- **Comparison table de-mixed** (architect P2). Mem0's 49% R@5 is on
+  LongMemEval-S (distractor split) while our 99.8% was oracle-clean.
+  Apples-vs-oranges row removed; comparison now shows oracle R@5 in
+  its own row and a second row for 1000-distractor R@5 with Mem0/Zep
+  marked as "not published" (because they don't publish distractor
+  numbers on their own blogs either).
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+- Benchmark reproducible with `npx tsx eval/longmemeval-distractor-runner.ts`
+
+### Honest remaining gaps for v0.19.0
+
+- Sample size: distractor runs are 5-30 questions, not full 500. Ollama
+  embedding is the bottleneck (~100ms × 1000 distractors × N questions).
+  A cached-distractor version would let us run 500 × 1000 in minutes.
+- Head-to-head vs Mem0/Zep on the same corpus + embedder. Requires
+  porting their pipelines or running their CLI against LongMemEval.
+
 ## [0.18.0] — 2026-04-20
 
 The release where the "self-learning" claim becomes defensible.

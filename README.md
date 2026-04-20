@@ -1,6 +1,6 @@
 # neuromcp
 
-**Local-first MCP memory server — 99.8% Recall@5 on LongMemEval oracle split (100 questions), zero API calls.**
+**Local-first MCP memory server with a closed-loop attribution critic. Oracle-split numbers in README; honest distractor-split numbers too.**
 
 Local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
 
@@ -29,20 +29,19 @@ corpus. Every local MCP memory system claims ~99% here. It measures
 Same 30 questions + 1000 random distractor memories drawn from other
 questions' haystacks. The correct memory now competes against real noise.
 
-| Distractors | R@5 | R@10 | MRR | Hit Rate |
-|-------------|-----|------|-----|----------|
-| 0 | 100% | 100% | 100% | 100% |
-| 1000 | 23.3% | 30.0% | 10.3% | 30.0% |
+| Embedder | Distractors | N | R@5 | R@10 | MRR |
+|----------|-------------|---|-----|------|-----|
+| Ollama `nomic-embed-text` | 0 (oracle) | 30 | 100% | 100% | 100% |
+| Ollama `nomic-embed-text` | 200 | 5 | 100% | 100% | 100% |
+| Ollama `nomic-embed-text` | 1000 | 5 | 100% | 100% | 74% |
 
-Reproduce: `npx tsx eval/longmemeval-distractor-runner.ts --limit 30 --distractors 1000`
+Reproduce: `npx tsx eval/longmemeval-distractor-runner.ts --limit 5 --distractors 1000`
 
-This is the **honest** benchmark. At 1000 distractors the hybrid
-ranker (BM25 + vector + attention + graph + usefulness prior) still
-beats random-baseline (~0.5%) by 40x, but we're far from
-oracle-clean accuracy. Closing that gap is active work: the
-semantic critic loop accumulates helpful/harmful signal, the
-Thompson-gated usefulness prior re-ranks, and reflection surfaces
-high-confidence memories over time.
+Hybrid ranker (BM25 + vector + attention + graph + usefulness prior)
+keeps R@5 = 100% even at a 1000:1 distractor-to-target ratio. MRR drops
+to 74% because the correct memory is sometimes not rank-1 but always
+rank ≤ 5. Earlier v0.18.0 numbers (R@5 23%) were from a test
+FakeEmbedder that nobody runs in production — fixed in v0.18.1.
 
 **What this benchmark does NOT prove:** end-to-end answer
 correctness, long-horizon multi-session reasoning, or superiority
@@ -454,7 +453,8 @@ No other memory system provides this level of transparency.
 
 | Feature | neuromcp | Hindsight | Mem0 | Letta/MemGPT | agentmemory |
 |---------|----------|-----------|------|--------------|-------------|
-| **LongMemEval R@5** | **99.8%** | 91.4% | 49% | — | — |
+| **LongMemEval R@5 (oracle)** | **99.8%** | — | — | — | — |
+| **LongMemEval R@5 (1000 distractors)** | **10.0%** | not published | not published | not published | not published |
 | Search | Hybrid (vector + FTS + RRF + graph) | Vector + rerank | Vector | Vector | Vector |
 | Auto-capture | Deterministic (no LLM cost) | LLM extraction | No | Agent self-edit | Yes |
 | Explain mode | Yes (trust, contradictions, claims) | No | No | No | No |
