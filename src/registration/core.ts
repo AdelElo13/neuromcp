@@ -11,7 +11,7 @@ import { consolidate } from '../tools/consolidate.js';
 import { memoryStats } from '../tools/stats.js';
 import { exportMemories, importMemories } from '../tools/admin.js';
 import { backfillEmbeddings } from '../tools/backfill.js';
-import { logRetrieval, citeMemories, usefulnessStats } from '../tools/attribution.js';
+import { logRetrieval } from '../tools/attribution.js';
 
 export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
   const { db, vecStore, embedder, config, logger, metrics } = deps;
@@ -66,7 +66,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
         {
           query: args.query,
           namespace: args.namespace,
-          retrieved_ids: (results as Array<{ id: string }>).map((r) => r.id),
+          retrieved_ids: (results as unknown as Array<{ id: string }>).map((r) => r.id),
         },
         { db, logger }
       );
