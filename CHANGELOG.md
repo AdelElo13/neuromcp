@@ -3,6 +3,31 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.3] — 2026-04-20
+
+Round-18 final convergence. Architect APPROVE. Codex APPROVE-WITH-NIT
+flagging one remaining unsupported superlative in the README. Fixed.
+
+### Fixed
+
+- **Removed "No other memory system provides this level of transparency"**
+  from README. Replaced with a factual statement of what we publish
+  (schema versions, consolidation math, critic output, benchmark
+  numbers with CIs) and an invitation to link to anyone doing the
+  same or better. No superlative unless benchmarked.
+
+### Verified
+
+- 276 / 276 tests pass
+- README now contains zero unsupported superlatives (grep clean)
+- v0.18.x line is the convergence release: both architect and codex
+  land on APPROVE pending this final line fix
+
+### What's still v0.19.0 work
+
+- Same-harness head-to-head vs Hindsight / Mem0 / Zep
+- Cached-distractor batching for full n=500 runs
+
 ## [0.18.2] — 2026-04-20
 
 Round-17 nits + first n=30 distractor benchmark.

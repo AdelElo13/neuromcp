@@ -464,7 +464,7 @@ Every `search_memory` result includes an `explain` field:
 }
 ```
 
-No other memory system provides this level of transparency.
+We publish all of this — schema versions, consolidation math, critic output, benchmark numbers with CIs — so you can audit exactly what the system remembers and how. If another local-first system publishes the same or better, link welcome.
 
 ## Comparison
 
