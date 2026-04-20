@@ -3,6 +3,28 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.5] — 2026-04-20
+
+Round-5 cleanup: dynamic version lookup for the HTTP health endpoint.
+
+### Fixed
+
+- **HTTP health endpoint now reads `version` from `package.json` at
+  request time** via `createRequire(import.meta.url)`. Previously the
+  version was a hardcoded string that drifted several releases behind
+  the package. Can no longer drift silently.
+- **HTTP e2e tests** updated to assert the shape + semver pattern
+  instead of a specific version literal.
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+
+### Still deferred to v0.17.0
+
+Same list as v0.16.4 — this patch is pure cleanup, no new primitives.
+
 ## [0.16.4] — 2026-04-20
 
 Round-4 polish. Both reviewers landed on APPROVE-WITH-NITS / APPROVE-WITH-CAVEAT,

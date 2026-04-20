@@ -1,4 +1,5 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
+import { createRequire } from 'node:module';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type Database from 'better-sqlite3';
 import type { VectorStore } from '../vectors/types.js';
@@ -47,7 +48,8 @@ export async function startHttpTransport(
     // Health endpoint
     if (url.pathname === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', version: '0.16.4' }));
+      const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+      res.end(JSON.stringify({ status: 'ok', version: pkg.version }));
       return;
     }
 

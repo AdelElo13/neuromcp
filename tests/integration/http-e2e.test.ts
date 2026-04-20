@@ -81,7 +81,8 @@ describe('HTTP transport E2E', () => {
     const { status, data } = await httpReq('GET', `${baseUrl}/health`);
 
     expect(status).toBe(200);
-    expect(data).toEqual({ status: 'ok', version: '0.9.5' });
+    expect(data.status).toEqual('ok');
+    expect(data.version).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it('POST /api/store → GET /api/search full auto-capture flow with explain metadata', async () => {
