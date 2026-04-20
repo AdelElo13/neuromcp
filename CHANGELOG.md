@@ -3,6 +3,44 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.6] — 2026-04-20
+
+Round-13 Codex review: v0.17.5 closes the loop mechanically but
+ships the critic hook as an orphan template — `neuromcp-init-wiki`
+never copies it to `~/.claude/scripts/hooks/` and never registers it
+as a Stop hook. Net effect: self-installed users run without the
+critic, so the attribution loop is only closed for people who
+manually wire it up. Packaging gap, not code gap.
+
+### Fixed
+
+- **`bin/init-wiki.mjs` now copies `neuromcp-critic.cjs`** into
+  `~/.claude/scripts/hooks/` alongside the other hook templates.
+- **`bin/init-wiki.mjs` now registers the critic as a Stop hook**
+  (`stop:neuromcp-critic`) in `~/.claude/settings.json`. Idempotent
+  on re-run.
+- **`docs/QUICKSTART.md`** replaces the fictional
+  `npx neuromcp enable-critic` command with the real flow: the
+  critic is now auto-installed by `neuromcp-init-wiki`. Added a
+  verification step (grep settings.json, tail the log).
+
+### Net effect
+
+A new user running `npx neuromcp-init-wiki` after `npx neuromcp`
+gets the full closed-loop attribution primitive out of the box. No
+manual hook wiring.
+
+### Verified
+
+- 276 / 276 tests pass
+- `grep neuromcp-critic ~/.claude/settings.json` returns the hook on
+  my machine after re-running init-wiki
+- Critic hook still executes cleanly against real transcripts
+
+### Still v0.18.0
+
+- Semantic (LLM-based) critic, drop JSON blob, distractor eval
+
 ## [0.17.5] — 2026-04-20
 
 Round-12 architect review caught a load-bearing gap in v0.17.4:

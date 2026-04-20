@@ -49,19 +49,24 @@ ollama pull nomic-embed-text
 neuromcp auto-detects it on next start. 768-dim embeddings, fully
 local, no data leaves your machine.
 
-## 4. Optional: enable the critic loop
+## 4. The critic loop (auto-installed)
 
-neuromcp v0.17.0+ can close the attribution loop automatically.
-Install the Stop hook once:
+`npx neuromcp-init-wiki` (from step 2) installs and registers the
+Stop hook `neuromcp-critic.cjs` automatically. After each Claude
+Code session, this scans the transcript, finds which memories Claude
+actually cited in its replies, and updates the usefulness prior so
+future searches rank proven-helpful memories higher.
+
+To verify it's active:
 
 ```bash
-npx neuromcp enable-critic
+grep neuromcp-critic ~/.claude/settings.json
+tail -3 ~/.neuromcp/critic.log  # after a few sessions
 ```
 
-After each Claude session, this scans the transcript, finds which
-memories Claude actually cited in its replies, and updates the
-usefulness prior so future searches rank proven-helpful memories
-higher.
+For strict per-session isolation set `NEUROMCP_SESSION_ID` in your
+MCP server env (otherwise the critic falls back to temporal-only
+scoping, which is still correct — just less paranoid).
 
 ## 5. See what's working
 

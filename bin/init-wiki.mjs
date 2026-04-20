@@ -92,7 +92,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     if (!existsSync(claudeHooksDir)) {
       mkdirSync(claudeHooksDir, { recursive: true });
     }
-    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs']) {
+    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs', 'neuromcp-critic.cjs']) {
       const src = join(hooksDir, hook);
       const dest = join(claudeHooksDir, hook);
       if (!existsSync(dest) && existsSync(src)) {
@@ -141,6 +141,15 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
         async: true,
       }],
     },
+    'Stop:neuromcp-critic': {
+      matcher: '*',
+      hooks: [{
+        type: 'command',
+        command: `node "${claudeHooksDir}/neuromcp-critic.cjs"`,
+        timeout: 30,
+        async: true,
+      }],
+    },
     UserPromptSubmit: {
       matcher: '*',
       hooks: [{
@@ -175,6 +184,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
       if (!settings.hooks[actualEventType]) settings.hooks[actualEventType] = [];
       const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject'
         : eventType.includes('auto-capture') ? 'neuromcp-auto-capture'
+        : eventType.includes('neuromcp-critic') ? 'neuromcp-critic'
         : eventType === 'UserPromptSubmit' ? 'neuromcp-auto-retrieve'
         : 'neuromcp-persist';
       if (!hasNeuromcpHook(settings.hooks[actualEventType], marker)) {
