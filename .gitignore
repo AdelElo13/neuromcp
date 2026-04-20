@@ -7,3 +7,6 @@ dist/
 models/*.onnx
 .neuromcp/
 *.tgz
+
+# Claude Code local worktrees and ephemeral state
+.claude/
