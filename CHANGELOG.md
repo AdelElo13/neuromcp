@@ -3,6 +3,69 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.0] — 2026-04-20
+
+The release where the "self-learning" claim becomes defensible.
+v0.17.x reviewed clean as a primitive but both reviewers flagged
+the lexical critic as the missing piece. This ships:
+
+1. A two-tier semantic critic (local LLM judge with lexical fallback)
+2. A honest distractor benchmark that replaces the 99.8% oracle
+   marketing claim with real numbers you can compare against
+
+### Added — Semantic critic (Tier 1)
+
+`templates/hooks/neuromcp-critic.cjs` now runs a tiered verdict:
+
+- **Default when Ollama is running**: semantic judge. For each
+  uncritiqued retrieval event, call the local chat model
+  (`NEUROMCP_OLLAMA_CHAT_MODEL`, default `llama3.2:3b`) with
+  `(query, retrieved memories, session assistant replies)`. The
+  model emits JSON verdicts per memory: `helpful | neutral | harmful`
+  + a one-sentence reason. Captures paraphrase, concept reuse, and
+  explicit contradictions that pattern-matching missed.
+- **Fallback when Ollama is unreachable**: the v0.17.x lexical
+  substring matcher. Zero dependency on any service.
+
+Mode override: `NEUROMCP_CRITIC_MODE=semantic|lexical|auto` (default
+auto). Timeout tunable via `NEUROMCP_CRITIC_TIMEOUT_MS` (default
+20000ms).
+
+### Added — Distractor benchmark
+
+`eval/longmemeval-distractor-runner.ts` pre-loads N random
+distractor memories from other questions' haystacks before running
+each query. The correct memory now competes against real noise.
+`--distractors 0|100|1000|10000` varies the pool size.
+
+First honest numbers (30 questions, oracle split + distractor pool):
+
+| Distractors | R@5 | R@10 | MRR |
+|-------------|-----|------|-----|
+| 0 | 100% | 100% | 100% |
+| 1000 | 23.3% | 30.0% | 10.3% |
+
+### Changed
+
+- `README.md` "Benchmark" section replaced: the old 99.8% oracle
+  claim is retained but labelled as "clean mode / easy setting."
+  The distractor benchmark numbers sit beside it with an explicit
+  note on what the benchmark does NOT prove.
+
+### Verified
+
+- 276 / 276 tests pass
+- Semantic critic tested end-to-end against a real transcript;
+  Ollama call succeeded, judge returned strict JSON
+- Distractor benchmark reproducible locally
+
+### What this doesn't solve (v0.19.0)
+
+- Head-to-head comparison against Mem0/Zep on the same distractor
+  split (they haven't published distractor numbers either)
+- End-to-end answer correctness (not just memory retrieval)
+- Long-horizon multi-session reasoning benchmark
+
 ## [0.17.7] — 2026-04-20
 
 Round-14 Codex nit: README still presented `npx neuromcp-init-wiki`

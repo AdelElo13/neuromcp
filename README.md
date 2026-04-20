@@ -12,32 +12,43 @@ Local-first MCP server with hybrid search, verbatim recall, and crash-resilient 
 npx neuromcp
 ```
 
-## Benchmark: LongMemEval results (v0.17.0)
+## Benchmarks (v0.18.0)
 
-Ran on 100 oracle-split questions from LongMemEval, local Ollama
-`nomic-embed-text` embeddings, fresh v0.17.0 config:
+### Oracle split (clean — easy mode)
 
 | Mode | R@5 | R@10 | Hit Rate |
 |------|-----|------|----------|
-| Verbatim (FTS5) | 99.8% | 100% | 100% |
-| Extracted (Hybrid) | 99.8% | 100% | 100% |
+| Extracted (hybrid) | 100% | 100% | 100% |
 
-Comparison:
+Oracle-split LongMemEval isolates the correct memory in a small
+corpus. Every local MCP memory system claims ~99% here. It measures
+"does the ranker work on clean inputs" — nothing more.
 
-| System | R@5 |
-|--------|-----|
-| MemPalace (claimed) | 96.6% |
-| **neuromcp** | **99.8%** |
+### Distractor split (v0.18.0, honest)
 
-Reproduce on your machine: `npx tsx eval/longmemeval-runner.ts --limit 100`.
+Same 30 questions + 1000 random distractor memories drawn from other
+questions' haystacks. The correct memory now competes against real noise.
 
-**Honest caveats:** the oracle split isolates the correct memory in a small
-corpus, which makes retrieval easier than production traffic with distractors
-and paraphrase. These numbers prove the ranker works correctly on clean inputs;
-they do NOT prove end-to-end answer quality. A distractor-rich eval is v0.18.0
-work. This is also session-retrieval accuracy, not answer correctness — the
-benchmark measures whether we find the right memory, not whether the LLM
-produces the right answer from it.
+| Distractors | R@5 | R@10 | MRR | Hit Rate |
+|-------------|-----|------|-----|----------|
+| 0 | 100% | 100% | 100% | 100% |
+| 1000 | 23.3% | 30.0% | 10.3% | 30.0% |
+
+Reproduce: `npx tsx eval/longmemeval-distractor-runner.ts --limit 30 --distractors 1000`
+
+This is the **honest** benchmark. At 1000 distractors the hybrid
+ranker (BM25 + vector + attention + graph + usefulness prior) still
+beats random-baseline (~0.5%) by 40x, but we're far from
+oracle-clean accuracy. Closing that gap is active work: the
+semantic critic loop accumulates helpful/harmful signal, the
+Thompson-gated usefulness prior re-ranks, and reflection surfaces
+high-confidence memories over time.
+
+**What this benchmark does NOT prove:** end-to-end answer
+correctness, long-horizon multi-session reasoning, or superiority
+over commercial cloud systems (Mem0, Zep) on their own benchmarks.
+Those comparisons need their numbers on the same distractor split,
+which hasn't been published.
 
 
 ## Why
