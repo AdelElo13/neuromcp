@@ -1,6 +1,6 @@
 # neuromcp
 
-**Local-first MCP memory server with a closed-loop attribution critic. Oracle-split numbers in README; honest distractor-split numbers too.**
+**Local-first MCP memory server with closed-loop attribution critic. Oracle-split and distractor-split benchmark numbers both published, with sample-size caveats.**
 
 Local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
 
@@ -33,15 +33,32 @@ questions' haystacks. The correct memory now competes against real noise.
 |----------|-------------|---|-----|------|-----|
 | Ollama `nomic-embed-text` | 0 (oracle) | 30 | 100% | 100% | 100% |
 | Ollama `nomic-embed-text` | 200 | 5 | 100% | 100% | 100% |
+| Ollama `nomic-embed-text` | **500** | **30** | **93.3%** | **93.3%** | **80.3%** |
 | Ollama `nomic-embed-text` | 1000 | 5 | 100% | 100% | 74% |
 
 Reproduce: `npx tsx eval/longmemeval-distractor-runner.ts --limit 5 --distractors 1000`
 
+> **Sample sizes.** The 500-distractor row is n=30 (Wilson 95% CI for
+> 28/30 ≈ 78-99% R@5). The 1000-distractor row is n=5 — preliminary,
+> Wilson 95% CI [57%, 100%]. The 1000-distractor n=30 run takes ~36 min
+> on a single Ollama instance; cached-distractor batching is v0.19.0
+> work. Treat 500-distractor numbers as defensible, 1000-distractor as
+> directionally positive but underpowered.
+
+
+> **Head-to-head comparison is explicit v0.19.0 work.** Hindsight (local
+> OSS MCP, ~94.6% LongMemEval claimed) and Mem0/Zep publish their own
+> numbers on their own harnesses. Until we run all of them against the
+> same corpus + embedder, calling any local MCP server "state of the art"
+> is marketing, not measurement. neuromcp publishes its numbers with
+> sample-size caveats so you can judge direction; don't read absolute
+> superiority into them yet.
+
 Hybrid ranker (BM25 + vector + attention + graph + usefulness prior)
-keeps R@5 = 100% even at a 1000:1 distractor-to-target ratio. MRR drops
-to 74% because the correct memory is sometimes not rank-1 but always
-rank ≤ 5. Earlier v0.18.0 numbers (R@5 23%) were from a test
-FakeEmbedder that nobody runs in production — fixed in v0.18.1.
+keeps R@5 = 100% at 1000:1 distractor:target ratio on the observed
+sample. MRR drops to 74% because the correct memory is sometimes not
+rank-1 but always rank ≤ 5 in what we saw. Earlier v0.18.0 numbers
+(R@5 23%) were from a test FakeEmbedder — fixed in v0.18.1.
 
 **What this benchmark does NOT prove:** end-to-end answer
 correctness, long-horizon multi-session reasoning, or superiority
@@ -454,7 +471,7 @@ No other memory system provides this level of transparency.
 | Feature | neuromcp | Hindsight | Mem0 | Letta/MemGPT | agentmemory |
 |---------|----------|-----------|------|--------------|-------------|
 | **LongMemEval R@5 (oracle)** | **99.8%** | — | — | — | — |
-| **LongMemEval R@5 (1000 distractors)** | **10.0%** | not published | not published | not published | not published |
+| **LongMemEval R@5 (1000 distractors, n=5, Ollama)** | **100%** (preliminary, CI [57%, 100%]) | not published | not published | not published | not published |
 | Search | Hybrid (vector + FTS + RRF + graph) | Vector + rerank | Vector | Vector | Vector |
 | Auto-capture | Deterministic (no LLM cost) | LLM extraction | No | Agent self-edit | Yes |
 | Explain mode | Yes (trust, contradictions, claims) | No | No | No | No |

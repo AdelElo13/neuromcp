@@ -3,6 +3,54 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.18.2] — 2026-04-20
+
+Round-17 nits + first n=30 distractor benchmark.
+
+### Added — first n=30 distractor benchmark
+
+Ran 30 LongMemEval oracle questions × 500 random distractor memories
+with the production Ollama nomic-embed-text embedder:
+
+| Distractors | N | R@5 | R@10 | MRR | Hit Rate |
+|-------------|---|-----|------|-----|----------|
+| 500 | 30 | 93.3% | 93.3% | 80.3% | 93.3% |
+
+Wilson 95% CI for 28/30 R@5 ≈ [78%, 99%]. This is the first
+defensible-sample-size distractor result; previous runs were n=5
+(Wilson 95% CI [57%, 100%]).
+
+### Fixed — round-17 nits
+
+- **README stale `10.0%` figure** (codex). The comparison table still
+  carried the FakeEmbedder number from v0.18.0. Replaced with the new
+  n=5 / Ollama "100% (preliminary, CI [57%, 100%])" with the
+  comparison columns honestly marked "not published" for competitors
+  who don't publish distractor numbers either.
+- **README "state of the art" language** (architect + codex). Removed
+  from hero. The README now leads with "closed-loop attribution
+  critic; oracle and distractor numbers both published with
+  sample-size caveats" instead.
+- **Head-to-head acknowledgement** (codex). Added explicit blockquote
+  noting that any "best local MCP memory" claim requires same-harness
+  comparison against Hindsight (94.6% claimed) and Mem0/Zep — which
+  is v0.19.0 work, not shipped here.
+
+### What's still v0.19.0
+
+- Full n=500 distractor run (cached-distractor batching to make it
+  finish in minutes instead of hours).
+- Same-harness head-to-head: port Hindsight, Mem0, Zep against the
+  identical corpus + embedder + distractor pool.
+- End-to-end answer correctness (not just retrieval).
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+- New benchmark row reproducible with
+  `npx tsx eval/longmemeval-distractor-runner.ts --limit 30 --distractors 500`
+
 ## [0.18.1] — 2026-04-20
 
 Round-16 review: architect APPROVE-WITH-NIT (broken shuffle + README
