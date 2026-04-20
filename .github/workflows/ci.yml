@@ -31,8 +31,10 @@ jobs:
       - name: Download ONNX model
         run: npx tsx scripts/download-model.ts
 
-      - name: Run tests
-        run: npm test
-
+      # Build before tests so integration specs that invoke the published
+      # bins (bin/embed.mjs etc.) can resolve ../dist/embeddings/factory.js.
       - name: Build
         run: npm run build
+
+      - name: Run tests
+        run: npm test
