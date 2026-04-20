@@ -37,6 +37,11 @@ export interface NeuromcpConfig {
   // Attention-based retrieval (AttnRes-inspired)
   readonly attentionWeight: number;
   readonly blockAttentionWeight: number;
+  // Usefulness prior (v0.17.x). Gate explorative sampling behind a
+  // minimum observation threshold, and cap the multiplicative range so
+  // the prior is a tiebreaker rather than a dominator.
+  readonly usefulnessExplorationThreshold: number;
+  readonly usefulnessFactorRange: number;
   // Entity extraction
   readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
   readonly ollamaChatModel: string;
@@ -94,6 +99,8 @@ export function loadConfig(): NeuromcpConfig {
     centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
     attentionWeight: envNum('NEUROMCP_ATTENTION_WEIGHT', 0.004),
     blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),
+    usefulnessExplorationThreshold: envNum('NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD', 3),
+    usefulnessFactorRange: envNum('NEUROMCP_USEFULNESS_FACTOR_RANGE', 0.5),
     entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'auto') as NeuromcpConfig['entityExtractionMode'],
     ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
     wikiDir: env('NEUROMCP_WIKI_DIR', resolve(homedir(), '.neuromcp', 'wiki')),

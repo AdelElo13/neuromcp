@@ -3,6 +3,47 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.3] — 2026-04-20
+
+Round-11 review (architect subagent + Codex CLI) downgraded v0.17.2
+from "OVERSTATED" to "narrowly overstated — three live defects away
+from APPROVE." This patch fixes all three plus a design improvement.
+
+### Fixed
+
+- **README internal contradiction**. Line 446 still carried a stale
+  `99.9%` figure while the rest of the document and the benchmark
+  table said `99.8%`. Aligned.
+- **`scripts/ab-sweep.mjs` read path** now uses the normalised
+  `retrieval_event_memories` join table instead of `JSON.parse`-ing
+  `retrieved_ids`/`cited_ids` blobs. This was Codex's exact round-10
+  P1 finding that v0.17.2 only half-fixed (writes went to both tables,
+  reads stayed on JSON).
+- **`scripts/ab-sweep.mjs` variants** now model production's factor
+  range `[0.75, 1.25]` instead of the stale v0.17.0 range `[0.5, 1.5]`.
+  The sweep additionally tests `EXPLORATION_THRESHOLD ∈ {1, 3, 5}` so
+  the knobs can be tuned empirically.
+
+### Changed — now configurable
+
+- `NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD` (default 3). Previously
+  a hardcoded magic number in `src/tools/search.ts` step 6.6.
+- `NEUROMCP_USEFULNESS_FACTOR_RANGE` (default 0.5 → factor ∈ [0.75, 1.25]).
+  Previously hardcoded. Now both knobs the A/B sweep tests are reachable
+  from production config.
+
+### Verified
+
+- 276 / 276 tests pass
+- Retrieval quality: MRR 100%, R@5 100%, Hit Rate 100%, P95 2.6ms
+
+### Still deferred to v0.18.0
+
+- Local LLM judge (Ollama Haiku) to replace lexical-reuse critic
+- Distractor-rich benchmark
+- Drop `retrieval_events.retrieved_ids` JSON blob entirely (make join
+  table authoritative, derive JSON only for presentation)
+
 ## [0.17.2] — 2026-04-20
 
 Critical fix for v0.17.1 CI regression. v0.17.1 passed 275/276 tests

@@ -33,11 +33,17 @@ const EXP_DIR = join(HOME, '.neuromcp', 'experiments');
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 
+// Production defaults (src/tools/search.ts step 6.6):
+//   EXPLORATION_THRESHOLD = 3, FACTOR_RANGE = 0.5 → factor ∈ [0.75, 1.25]
+// Sweep variants stay in the production operating region instead of the
+// wide v0.17.0 range [0.5, 1.5] that no longer reflects ranker behaviour.
 const VARIANTS = [
-  { name: 'baseline', weightSlope: 0.5, explore: false },
-  { name: 'narrow',   weightSlope: 0.3, explore: false },
-  { name: 'wide',     weightSlope: 0.7, explore: false },
-  { name: 'thompson', weightSlope: 0.5, explore: true },
+  { name: 'prod',        factorRange: 0.5, threshold: 3, explore: true  },
+  { name: 'prod-det',    factorRange: 0.5, threshold: 3, explore: false },
+  { name: 'narrow',      factorRange: 0.3, threshold: 3, explore: true  },
+  { name: 'wide',        factorRange: 0.7, threshold: 3, explore: true  },
+  { name: 'threshold-1', factorRange: 0.5, threshold: 1, explore: true  },
+  { name: 'threshold-5', factorRange: 0.5, threshold: 5, explore: true  },
 ];
 
 if (!existsSync(DB_PATH)) {
@@ -50,13 +56,28 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
 const since = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
-const events = db
+// v0.17.3: read the retrieved/cited relationship from the normalised join
+// table, not the JSON blobs. The join is indexed, supports aggregation,
+// and is the authoritative source going forward.
+const eventsBase = db
   .prepare(
-    `SELECT id, retrieved_ids, cited_ids, outcome
-       FROM retrieval_events
+    `SELECT id, outcome FROM retrieval_events
        WHERE created_at >= ? AND outcome IS NOT NULL`,
   )
   .all(since);
+const memStmt = db.prepare(
+  `SELECT memory_id, was_cited FROM retrieval_event_memories
+     WHERE event_id = ? ORDER BY rank`
+);
+const events = eventsBase.map((ev) => {
+  const rows = memStmt.all(ev.id);
+  return {
+    id: ev.id,
+    outcome: ev.outcome,
+    retrieved_ids: rows.map((r) => r.memory_id),
+    cited_ids: rows.filter((r) => r.was_cited === 1).map((r) => r.memory_id),
+  };
+});
 
 if (events.length < 5) {
   console.log(`Only ${events.length} labelled events in the last 7 days — need at least 5 for a meaningful sweep.`);
@@ -90,17 +111,21 @@ function sampleBeta(a, b) {
 }
 
 function rerank(retrievedIds, variant, usefulnessLookup) {
-  // Under each variant, compute a factor per id and sort.
+  // Mirror production search.ts step 6.6: gate Thompson sampling behind
+  // variant.threshold observations. Below threshold, factor = 1.0 (neutral).
+  // Above threshold, factor ∈ [1 - range/2, 1 + range/2].
   return retrievedIds
     .map((id, originalRank) => {
       const u = usefulnessLookup.get(id) ?? { helpful: 0, harmful: 0, score: 0.5 };
-      const score = variant.explore
-        ? sampleBeta(u.helpful + 1, u.harmful + 1)
-        : u.score;
-      const factor = 0.5 + score * (variant.weightSlope * 2); // slope=0.5 → factor∈[0.5,1.5]
-      // Approximate base rank score as 1/(rank+60) (RRF). Original rank is
-      // the array index, so earlier positions dominate — that's good.
+      const total = u.helpful + u.harmful;
       const base = 1 / (originalRank + 60);
+      let factor = 1.0;
+      if (total >= variant.threshold) {
+        const draw = variant.explore
+          ? sampleBeta(u.helpful + 1, u.harmful + 1)
+          : u.score;
+        factor = 1 - variant.factorRange / 2 + draw * variant.factorRange;
+      }
       return { id, score: base * factor };
     })
     .sort((a, b) => b.score - a.score)
@@ -109,7 +134,7 @@ function rerank(retrievedIds, variant, usefulnessLookup) {
 
 const memoryIds = new Set();
 for (const ev of events) {
-  JSON.parse(ev.retrieved_ids).forEach((id) => memoryIds.add(id));
+  for (const id of ev.retrieved_ids) memoryIds.add(id);
 }
 
 const placeholders = Array.from(memoryIds).map(() => '?').join(',');
@@ -130,8 +155,8 @@ const usefulnessLookup = new Map(
 const results = VARIANTS.map((variant) => {
   const citedRanks = [];
   for (const ev of events) {
-    const retrieved = JSON.parse(ev.retrieved_ids);
-    const cited = new Set(JSON.parse(ev.cited_ids));
+    const retrieved = ev.retrieved_ids;
+    const cited = new Set(ev.cited_ids);
     if (cited.size === 0) continue;
     const reranked = rerank(retrieved, variant, usefulnessLookup);
     // Best rank of any cited memory

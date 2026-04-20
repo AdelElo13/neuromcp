@@ -179,19 +179,22 @@ export async function searchMemory(
   // v0.17.0 sampled even for total=0 (Beta(1,1) = Uniform) which made the
   // factor range [0.5, 1.5] apply to EVERY candidate — tanking MRR by
   // ~3% on oracle splits because rank-1 answers lost coin flips.
-  const EXPLORATION_THRESHOLD = 3;
-  const FACTOR_RANGE = 0.5; // factor ∈ [1 - FACTOR_RANGE/2, 1 + FACTOR_RANGE/2]
+  // Config-driven gate + range. Default threshold 3, range 0.5 (factor
+  // ∈ [0.75, 1.25]). Override via NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD
+  // and NEUROMCP_USEFULNESS_FACTOR_RANGE.
+  const explorationThreshold = config.usefulnessExplorationThreshold;
+  const factorRange = config.usefulnessFactorRange;
   try {
     const counts = getUsefulnessCounts(db, scored.map((s) => s.id));
     for (const s of scored) {
       const c = counts.get(s.id);
       const total = (c?.helpful ?? 0) + (c?.harmful ?? 0);
-      if (!c || total < EXPLORATION_THRESHOLD) {
+      if (!c || total < explorationThreshold) {
         // No signal → neutral factor, no Thompson noise.
         continue;
       }
       const u = sampleUsefulness(c.helpful, c.harmful);
-      const factor = 1 - FACTOR_RANGE / 2 + u * FACTOR_RANGE;
+      const factor = 1 - factorRange / 2 + u * factorRange;
       s.score *= factor;
     }
   } catch {

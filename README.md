@@ -443,7 +443,7 @@ No other memory system provides this level of transparency.
 
 | Feature | neuromcp | Hindsight | Mem0 | Letta/MemGPT | agentmemory |
 |---------|----------|-----------|------|--------------|-------------|
-| **LongMemEval R@5** | **99.9%** | 91.4% | 49% | — | — |
+| **LongMemEval R@5** | **99.8%** | 91.4% | 49% | — | — |
 | Search | Hybrid (vector + FTS + RRF + graph) | Vector + rerank | Vector | Vector | Vector |
 | Auto-capture | Deterministic (no LLM cost) | LLM extraction | No | Agent self-edit | Yes |
 | Explain mode | Yes (trust, contradictions, claims) | No | No | No | No |
