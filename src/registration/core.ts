@@ -66,12 +66,13 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
         {
           query: args.query,
           namespace: args.namespace,
-          retrieved_ids: (results as unknown as Array<{ id: string }>).map((r) => r.id),
+          retrieved_ids: results.map((r) => r.id),
         },
         { db, logger }
       );
       return textResult({ results, retrieval_event_id: event_id });
-    } catch {
+    } catch (err) {
+      logger.warn('search', 'auto-log retrieval failed', { error: err instanceof Error ? err.message : String(err) });
       return textResult(results);
     }
   });

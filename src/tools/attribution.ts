@@ -142,8 +142,8 @@ function applyUsefulnessUpdate(
   const citedSet = new Set(cited_ids);
   const upsert = db.prepare(`
     INSERT INTO memory_usefulness
-      (memory_id, namespace, helpful_count, neutral_count, harmful_count, total_observed, usefulness_score, last_updated)
-    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+      (memory_id, namespace, helpful_count, neutral_count, harmful_count, total_observed, usefulness_score, last_updated, last_critiqued_at)
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
     ON CONFLICT(memory_id) DO UPDATE SET
       helpful_count = helpful_count + excluded.helpful_count,
       neutral_count = neutral_count + excluded.neutral_count,
@@ -152,18 +152,24 @@ function applyUsefulnessUpdate(
       usefulness_score = CAST(helpful_count + excluded.helpful_count + 1 AS REAL)
                        / CAST(helpful_count + excluded.helpful_count
                               + harmful_count + excluded.harmful_count + 2 AS REAL),
-      last_updated = excluded.last_updated
+      last_updated = excluded.last_updated,
+      last_critiqued_at = excluded.last_critiqued_at
   `);
 
   const now = new Date().toISOString();
   let updated = 0;
   for (const id of retrieved_ids) {
     const isCited = citedSet.has(id);
-    const helpful = isCited && outcome === 'helpful' ? 1 : 0;
-    const harmful = isCited && outcome === 'harmful' ? 1 : 0;
-    const neutral = (!isCited || outcome === 'neutral') ? 1 : 0;
+    // Only increment counts based on EXPLICIT critic signal for cited memories.
+    // Not-cited memories are skipped entirely — "not used" is not evidence
+    // for or against. This was a v0.16.0 bug: it conflated absence of signal
+    // with neutral evidence and polluted usefulness scores.
+    if (!isCited) continue;
+    const helpful = outcome === 'helpful' ? 1 : 0;
+    const harmful = outcome === 'harmful' ? 1 : 0;
+    const neutral = outcome === 'neutral' ? 1 : 0;
     const initialScore = helpful === 1 ? 0.67 : harmful === 1 ? 0.33 : 0.5;
-    upsert.run(id, namespace, helpful, neutral, harmful, initialScore, now);
+    upsert.run(id, namespace, helpful, neutral, harmful, initialScore, now, now);
     updated++;
   }
   return updated;
@@ -213,26 +219,35 @@ export function decayUsefulness(
   const { db, logger } = deps;
   const half = opts.half_life_days ?? 14;
   const now = new Date();
+  // Filter in SQL: skip rows already critiqued within the current half-life window.
+  // We track decay age via `last_critiqued_at` (only advances on real critic feedback)
+  // not `last_updated` (which refreshes on every retrieval hit and would never age).
+  const cutoffIso = new Date(now.getTime() - half * 24 * 3600 * 1000).toISOString();
   const rows = db
     .prepare(
-      `SELECT memory_id, usefulness_score, decay_floor, last_updated FROM memory_usefulness`
+      `SELECT memory_id, usefulness_score, decay_floor, COALESCE(last_critiqued_at, last_updated) AS anchor
+         FROM memory_usefulness
+         WHERE COALESCE(last_critiqued_at, last_updated) < ?`
     )
-    .all() as Array<{ memory_id: string; usefulness_score: number; decay_floor: number; last_updated: string }>;
+    .all(cutoffIso) as Array<{ memory_id: string; usefulness_score: number; decay_floor: number; anchor: string }>;
   let decayed = 0;
   const update = db.prepare(
-    `UPDATE memory_usefulness SET usefulness_score = ?, last_updated = ? WHERE memory_id = ?`
+    `UPDATE memory_usefulness SET usefulness_score = ? WHERE memory_id = ?`
   );
+  const applyDecay = db.transaction(() => {
   for (const row of rows) {
-    const ageMs = now.getTime() - new Date(row.last_updated).getTime();
+    const ageMs = now.getTime() - new Date(row.anchor).getTime();
     const halfLifeMs = half * 24 * 3600 * 1000;
     if (ageMs < halfLifeMs) continue;
     const delta = row.usefulness_score - row.decay_floor;
     const fraction = Math.pow(0.5, ageMs / halfLifeMs);
     const next = row.decay_floor + delta * fraction;
     if (Math.abs(next - row.usefulness_score) < 0.001) continue;
-    update.run(next, now.toISOString(), row.memory_id);
+    update.run(next, row.memory_id);
     decayed++;
   }
+  });
+  applyDecay();
   logger.info('attribution', 'usefulness decay applied', { decayed, half_life_days: half });
   return { decayed };
 }

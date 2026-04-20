@@ -178,6 +178,16 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     }
   }
 
+  if (currentVersion < 10) {
+    logger.info('migrations', 'Running v9 to v10 migration: last_critiqued_at column for decay');
+    const v10Statements = [
+      'ALTER TABLE memory_usefulness ADD COLUMN last_critiqued_at TEXT',
+    ];
+    for (const stmt of v10Statements) {
+      try { db.prepare(stmt).run(); } catch { /* column exists */ }
+    }
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

@@ -3,6 +3,64 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.1] — 2026-04-20
+
+Patch release addressing findings from two independent reviewers
+(architect subagent + typescript-reviewer subagent). Verdict on v0.16.0
+was "OVERSTATED" — the primitive was novel but the loop had six
+structural defects. This release fixes all the HIGH-severity issues.
+
+### Fixed
+
+- **Neutral-count pollution** (HIGH). Previously every not-cited memory
+  got `neutral_count++` on each retrieval, conflating "seen but not
+  used" with "seen and judged neutral". Now only explicitly-cited
+  memories accumulate usefulness rows — absence of signal is not
+  evidence.
+- **Decay broken by access-time refresh** (HIGH). The decay function
+  read `last_updated`, but that column was refreshed on every retrieval
+  hit, so actively-retrieved memories never aged past the half-life.
+  Added `last_critiqued_at` column (schema v10); decay now reads that
+  column, which only advances on real critic feedback.
+- **Silent error swallow in `search_memory`** (HIGH). The `try/catch`
+  around auto-log had no logging — attribution failures disappeared in
+  production. Now logs via `logger.warn` with the error message.
+- **Unnecessary `as unknown as Array<{id: string}>` cast** (HIGH).
+  Replaced with a direct `results.map((r) => r.id)` that the existing
+  union type handles without any cast.
+- **Dynamic `import('./attribution.js')` in search hot path** (MEDIUM).
+  Hoisted to a static import at the top of `search.ts`.
+- **Full-table scan + unbatched writes in `decayUsefulness`** (MEDIUM).
+  Added `WHERE last_critiqued_at < ?` predicate so SQLite prunes rows
+  before JS sees them; wrapped the update loop in `db.transaction()`
+  for a single WAL write lock.
+
+### Added
+
+- Regression tests covering each fix: `not-cited` non-pollution,
+  decay-only-on-stale-critic, `cite_memories` throws on unknown event,
+  empty `retrieved_ids` is safe.
+
+### Verified
+
+- 275 / 275 tests pass (was 271; 4 new regression tests)
+- Schema v9 → v10 auto-migrates on startup with backup
+
+### What the reviewers still flag (v0.17.0 work)
+
+- **No actual critic process.** Outcomes come from the caller (self-report).
+  Needs a separate Stop-hook or `post_answer` pass that runs a cheap local
+  model (Haiku/Ollama) against `(query, retrieved, response)` and emits
+  helpful/neutral/harmful per memory.
+- **No exploration term.** Ranking is pure exploitation; Thompson sampling
+  over Beta(helpful+1, harmful+1) would be one line.
+- **`retrieval_events.retrieved_ids` stored as JSON text.** Aggregation by
+  memory ID is O(table-scan). Needs a join table.
+- **`autoresearch.mjs` advertises A/B sweeping it does not do.** Currently
+  a stats dashboard.
+
+These are acknowledged gaps, not fixes. v0.17.0 will address them.
+
 ## [0.16.0] — 2026-04-20
 
 ### Added — Retrieval attribution + critic-scored usefulness

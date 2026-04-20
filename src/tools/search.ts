@@ -12,6 +12,7 @@ import { meetsMinTrust } from '../governance/trust.js';
 import { computePrimingBoosts, getRecentlyAccessed } from '../cognitive/priming.js';
 import { computeAdaptiveImportance } from '../cognitive/importance.js';
 import { computeAttentionScores, computeBlockAttentionScores, recordCoRetrieval } from '../cognitive/attention.js';
+import { getUsefulnessScores } from './attribution.js';
 import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
@@ -174,7 +175,6 @@ export async function searchMemory(
   // centered at 1.0 — a score of 0.75 yields a 25% lift, 0.25 yields a
   // 25% penalty.
   try {
-    const { getUsefulnessScores } = await import('./attribution.js');
     const usefulness = getUsefulnessScores(db, scored.map((s) => s.id));
     for (const s of scored) {
       const u = usefulness.get(s.id) ?? 0.5;

@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -250,7 +250,8 @@ const CREATE_INDEXES = `
     total_observed INTEGER NOT NULL DEFAULT 0,
     usefulness_score REAL NOT NULL DEFAULT 0.5,
     last_updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    decay_floor REAL NOT NULL DEFAULT 0.5
+    decay_floor REAL NOT NULL DEFAULT 0.5,
+    last_critiqued_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_memory_usefulness_namespace ON memory_usefulness(namespace);
   CREATE INDEX IF NOT EXISTS idx_memory_usefulness_score ON memory_usefulness(usefulness_score);
