@@ -182,8 +182,15 @@ function main() {
   const sessionId = crypto.createHash('sha256').update(transcriptPath).digest('hex').slice(0, 16);
   const windowSince = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
   const events = sql(
+    // Session-aware filter with NULL fallback:
+    //   - Events with matching session_id  → strictly this session
+    //   - Events with session_id IS NULL   → fall back to temporal-only
+    //     scoping via turnsAfter(created_at) below (v0.17.3 behaviour)
+    // This prevents cross-session credit stealing when session_id is
+    // plumbed end-to-end, but does not silently no-op when it isn't.
     `SELECT id, namespace, retrieved_ids, created_at, session_id FROM retrieval_events
-      WHERE outcome IS NULL AND created_at >= ? AND session_id = ?
+      WHERE outcome IS NULL AND created_at >= ?
+        AND (session_id = ? OR session_id IS NULL)
       ORDER BY created_at DESC
       LIMIT 200`,
     [windowSince, sessionId],

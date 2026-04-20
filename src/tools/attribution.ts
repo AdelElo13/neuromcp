@@ -62,7 +62,10 @@ export function logRetrieval(
     outcome,
     critic_reason,
     model,
-    session_id = null,
+    // Session key precedence: caller-supplied → env var (for MCP servers
+    // that stamp it at startup) → null. NULL session_id events fall
+    // back to temporal-only critic scoping, preserving v0.17.3 behaviour.
+    session_id = process.env.NEUROMCP_SESSION_ID ?? null,
   } = args;
 
   const event_id = randomBytes(16).toString('hex');

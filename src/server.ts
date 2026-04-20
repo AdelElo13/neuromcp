@@ -28,7 +28,7 @@ export function createServer(deps: ServerDeps): McpServer {
   const { logger } = deps;
 
   const server = new McpServer(
-    { name: 'neuromcp', version: '0.17.4' },
+    { name: 'neuromcp', version: '0.17.5' },
     {
       capabilities: {
         resources: {},

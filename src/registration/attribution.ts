@@ -20,6 +20,7 @@ export function registerAttributionTools(server: McpServer, deps: ServerDeps): v
       outcome: z.enum(['helpful', 'neutral', 'harmful']).optional(),
       critic_reason: z.string().optional().describe('Short reason for the outcome label'),
       model: z.string().optional().describe('Model that produced the answer'),
+      session_id: z.string().optional().describe('Opaque session key so a per-session critic can filter events without cross-session contamination. Falls back to NEUROMCP_SESSION_ID env var.'),
     },
   }, (args) => {
     const result = logRetrieval(args, { db, logger });

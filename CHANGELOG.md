@@ -3,6 +3,46 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.5] — 2026-04-20
+
+Round-12 architect review caught a load-bearing gap in v0.17.4:
+the schema + critic hook both filter on `session_id`, but `search_memory`
+never populates it, so every auto-logged event had `session_id = NULL`
+and the strict `WHERE session_id = ?` filter returned zero events —
+**silently turning the critic hook into a no-op for every real use
+case**. This patch fixes the gap three ways.
+
+### Fixed
+
+- **Critic hook filter relaxed to NULL fallback**.
+  `WHERE session_id = ? OR session_id IS NULL` instead of the strict
+  equality. Events with a session_id benefit from strict filtering
+  (no cross-session contamination); events without still go through
+  the temporal-only `turnsAfter(created_at)` scoping introduced in
+  v0.17.1. Defense-in-depth without silent no-op.
+- **`logRetrieval` reads `NEUROMCP_SESSION_ID` env var** as a
+  default when callers don't supply `session_id`. An MCP server
+  launched with this env set will stamp every event automatically,
+  enabling full session isolation for users who configure it.
+- **`session_id` exposed in the MCP tool schema**. `log_retrieval`'s
+  Zod `inputSchema` now lists it as an optional field so callers can
+  plumb it explicitly; previously it was implicitly accepted but not
+  advertised.
+
+### What this changes in practice
+
+- Users who set `NEUROMCP_SESSION_ID=$CLAUDE_SESSION_ID` in the MCP
+  server env get strict per-session critic isolation.
+- Users who don't get the v0.17.3 behaviour (temporal-only scoping),
+  which is still an improvement over v0.17.0's cross-session blob.
+- No silent no-op in either case.
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+- Critic hook now reliably finds and critiques session-local events
+
 ## [0.17.4] — 2026-04-20
 
 Codex round-11 caught four partial-fix residues in v0.17.2 that
