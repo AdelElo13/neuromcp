@@ -219,22 +219,27 @@ export function decayUsefulness(
   const { db, logger } = deps;
   const half = opts.half_life_days ?? 14;
   const now = new Date();
-  // Filter in SQL: skip rows already critiqued within the current half-life window.
-  // We track decay age via `last_critiqued_at` (only advances on real critic feedback)
-  // not `last_updated` (which refreshes on every retrieval hit and would never age).
+  // Decay tracks age via `last_critiqued_at` — only advances on real critic
+  // feedback, not on every retrieval hit. SELECT + UPDATE live inside the
+  // same transaction so concurrent writers can't invalidate the row set
+  // between the two statements.
   const cutoffIso = new Date(now.getTime() - half * 24 * 3600 * 1000).toISOString();
-  const rows = db
-    .prepare(
-      `SELECT memory_id, usefulness_score, decay_floor, COALESCE(last_critiqued_at, last_updated) AS anchor
-         FROM memory_usefulness
-         WHERE COALESCE(last_critiqued_at, last_updated) < ?`
-    )
-    .all(cutoffIso) as Array<{ memory_id: string; usefulness_score: number; decay_floor: number; anchor: string }>;
-  let decayed = 0;
-  const update = db.prepare(
-    `UPDATE memory_usefulness SET usefulness_score = ? WHERE memory_id = ?`
+  const nowIso = now.toISOString();
+  const selectStale = db.prepare(
+    `SELECT memory_id, usefulness_score, decay_floor, COALESCE(last_critiqued_at, last_updated) AS anchor
+       FROM memory_usefulness
+       WHERE COALESCE(last_critiqued_at, last_updated) < ?`
   );
-  const applyDecay = db.transaction(() => {
+  const update = db.prepare(
+    `UPDATE memory_usefulness SET usefulness_score = ?, last_critiqued_at = ? WHERE memory_id = ?`
+  );
+  // Counter lives inside the transaction closure and gets re-initialised on
+  // every invocation. better-sqlite3 rolls back on throw, so a mid-batch
+  // exception re-runs this function with `localDecayed = 0` and the caller
+  // never sees a partial count.
+  const applyDecay = db.transaction((): number => {
+  let localDecayed = 0;
+  const rows = selectStale.all(cutoffIso) as Array<{ memory_id: string; usefulness_score: number; decay_floor: number; anchor: string }>;
   for (const row of rows) {
     const ageMs = now.getTime() - new Date(row.anchor).getTime();
     const halfLifeMs = half * 24 * 3600 * 1000;
@@ -243,11 +248,12 @@ export function decayUsefulness(
     const fraction = Math.pow(0.5, ageMs / halfLifeMs);
     const next = row.decay_floor + delta * fraction;
     if (Math.abs(next - row.usefulness_score) < 0.001) continue;
-    update.run(next, row.memory_id);
-    decayed++;
+    update.run(next, nowIso, row.memory_id);
+    localDecayed++;
   }
+  return localDecayed;
   });
-  applyDecay();
+  const decayed = applyDecay();
   logger.info('attribution', 'usefulness decay applied', { decayed, half_life_days: half });
   return { decayed };
 }

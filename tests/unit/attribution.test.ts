@@ -97,8 +97,9 @@ describe('attribution tools', () => {
     expect(before).toBeGreaterThan(0.5);
     // v0.16.1: decay reads last_critiqued_at, not last_updated.
     // Mark both as 60 days ago.
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 86400 * 1000).toISOString();
     ctx.db.prepare(`UPDATE memory_usefulness SET last_updated = ?, last_critiqued_at = ? WHERE memory_id = 'x'`)
-      .run('2025-12-01T00:00:00.000Z', '2025-12-01T00:00:00.000Z');
+      .run(sixtyDaysAgo, sixtyDaysAgo);
     decayUsefulness(deps, { half_life_days: 14 });
     const after = getUsefulnessScores(ctx.db, ['x']).get('x') ?? 0.5;
     expect(after).toBeLessThan(before);
@@ -140,8 +141,9 @@ describe('attribution failure modes', () => {
     const deps = { db: ctx.db, logger: ctx.logger };
     logRetrieval({ query: 'q', retrieved_ids: ['m'], cited_ids: ['m'], outcome: 'helpful' }, deps);
     // Simulate retrievals refreshing last_updated but NOT last_critiqued_at
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 86400 * 1000).toISOString();
     ctx.db.prepare(`UPDATE memory_usefulness SET last_updated = ?, last_critiqued_at = ? WHERE memory_id = 'm'`)
-      .run(new Date().toISOString(), '2025-12-01T00:00:00.000Z');
+      .run(new Date().toISOString(), sixtyDaysAgo);
     const before = getUsefulnessScores(ctx.db, ['m']).get('m')!;
     decayUsefulness(deps, { half_life_days: 14 });
     const after = getUsefulnessScores(ctx.db, ['m']).get('m')!;

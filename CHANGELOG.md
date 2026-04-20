@@ -3,6 +3,46 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.2] — 2026-04-20
+
+Round-2 review patch. One reviewer returned a new HIGH finding on the
+v0.16.1 decay transaction wrapper; other reviewer cleared v0.16.1 as
+SOLID PRIMITIVE. This patch addresses the HIGH and the MEDIUMs.
+
+### Fixed
+
+- **Decay transaction consistency** (HIGH, from round-2 review).
+  v0.16.1 put `SELECT` outside `db.transaction()` and incremented the
+  `decayed` counter from the outer scope inside the transaction body.
+  On partial rollback or concurrent writes the returned count was
+  wrong. Fixed: SELECT now executes inside the transaction; counter is
+  local to the transaction closure and returned as its result, so
+  rollback leaves the outer value untouched.
+- **Decay now advances `last_critiqued_at`** (MEDIUM). Previously,
+  once a memory decayed it kept matching the stale-filter and got
+  re-decayed on every subsequent pass until the 0.001 delta guard
+  kicked in. The UPDATE now writes `last_critiqued_at = now`, so a
+  decayed row is skipped on the next run unless it crosses the
+  half-life again.
+- **Clock-relative dates in decay tests** (MEDIUM). Hardcoded
+  `'2025-12-01'` replaced with `Date.now() - 60 * 86400 * 1000` so the
+  tests stay meaningful if the system clock rolls backward in CI.
+
+### Still deferred (v0.17.0)
+
+- No external critic process. Remaining most-important item.
+- No exploration term (Thompson sampling).
+- `retrieved_ids` stored as JSON text, not a join table.
+- `autoresearch.mjs` remains a stats dashboard.
+
+### Verified
+
+- 275 / 275 tests pass (same suite as v0.16.1, now exercising the
+  fixed transaction path)
+- One reviewer's v0.16.1 verdict: SOLID PRIMITIVE
+- Other reviewer's v0.16.1 verdict: BLOCK on decay transaction — now
+  addressed
+
 ## [0.16.1] — 2026-04-20
 
 Patch release addressing findings from two independent reviewers
