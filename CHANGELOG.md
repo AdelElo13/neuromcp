@@ -3,6 +3,42 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.4] — 2026-04-20
+
+Round-4 polish. Both reviewers landed on APPROVE-WITH-NITS / APPROVE-WITH-CAVEAT,
+flagging the same single residue line in the dashboard report plus a
+SQLite-version caveat on the rollback test.
+
+### Fixed
+
+- **Dashboard report residue**. The renamed `usefulness-dashboard.mjs`
+  still wrote "config sweep will run automatically" at the bottom of
+  every generated report — the exact vaporware the rename was meant to
+  retire. Replaced with an accurate "Next scheduled run: 7 days. This
+  dashboard is read-only — no config changes are applied automatically."
+- **SQLite version caveat on rollback test**. Added inline comment
+  noting that `ALTER TABLE RENAME COLUMN` requires SQLite >= 3.25.
+  better-sqlite3 on Node 18+ ships a compatible libsqlite3; the test
+  fails loudly on older runtimes rather than silently passing.
+- **Stale hardcoded version in `src/transport/http.ts` health
+  endpoint**. Had been reporting `0.9.5` for several releases.
+  Bumped to match the package version.
+
+### Verified
+
+- 276 / 276 tests pass (no test changes beyond the comment)
+- No CHANGELOG-vs-behaviour drift remaining — what the file says is
+  what the file does
+
+### Still deferred to v0.17.0
+
+- External critic process (outcomes still come from caller)
+- Exploration term in the ranker
+- retrieved_ids as join table instead of JSON text
+- Real A/B sweep in `usefulness-dashboard.mjs`
+
+These are architectural work, not cleanup.
+
 ## [0.16.3] — 2026-04-20
 
 Round-3 review cleanup. Two reviewers cleared v0.16.2 as SOLID and

@@ -133,7 +133,7 @@ if (helpfulRate !== null) {
 lines.push('');
 lines.push(`## Next run`);
 lines.push('');
-lines.push(`Once ${labelled * 3} labelled events accumulate, config sweep will run automatically.`);
+lines.push(`Next scheduled run: 7 days. This dashboard is read-only — no config changes are applied automatically.`);
 
 if (dryRun) {
   console.log('\n--- DRY RUN ---\n');

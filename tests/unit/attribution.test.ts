@@ -157,6 +157,9 @@ describe('attribution decay rollback', () => {
   afterEach(async () => { await teardownTestDb(ctx); });
 
   it('decayUsefulness rolls back and throws on mid-batch failure', () => {
+    // Requires SQLite >= 3.25 for ALTER TABLE RENAME COLUMN. better-sqlite3
+    // on Node 18+ ships a modern libsqlite3 so this holds on any supported
+    // runtime; fail loudly if not.
     const deps = { db: ctx.db, logger: ctx.logger };
     // Seed 3 stale rows
     for (const id of ['a', 'b', 'c']) {
