@@ -11,7 +11,7 @@ import { registerEpisodeTools } from './registration/episodes.js';
 import { registerAgentTools } from './registration/agents.js';
 import { registerVerbatimTools } from './registration/verbatim.js';
 import { registerWikiTools } from './registration/wiki.js';
-import { registerAttributionTools } from './registration/attribution.js';
+import { registerAttributionTools, registerReflectionTool } from './registration/attribution.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 
@@ -28,7 +28,7 @@ export function createServer(deps: ServerDeps): McpServer {
   const { logger } = deps;
 
   const server = new McpServer(
-    { name: 'neuromcp', version: '0.16.9' },
+    { name: 'neuromcp', version: '0.17.0' },
     {
       capabilities: {
         resources: {},
@@ -45,11 +45,12 @@ export function createServer(deps: ServerDeps): McpServer {
   registerVerbatimTools(server, deps);
   registerWikiTools(server, deps);
   registerAttributionTools(server, deps);
+  registerReflectionTool(server, deps);
   registerResources(server, deps);
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 41,
+    tools: 42,
     resources: 13,
     prompts: 3,
   });

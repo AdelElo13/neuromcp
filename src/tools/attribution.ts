@@ -66,22 +66,35 @@ export function logRetrieval(
   const event_id = randomBytes(16).toString('hex');
   const query_hash = createHash('sha256').update(query).digest('hex');
 
-  db.prepare(
-    `INSERT INTO retrieval_events
-       (id, query, query_hash, namespace, retrieved_ids, cited_ids, outcome, critic_reason, model, critiqued_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    event_id,
-    query,
-    query_hash,
-    namespace,
-    JSON.stringify(retrieved_ids),
-    JSON.stringify(cited_ids),
-    outcome ?? null,
-    critic_reason ?? null,
-    model ?? null,
-    outcome ? new Date().toISOString() : null
-  );
+  const citedSet = new Set(cited_ids);
+  const writeEvent = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO retrieval_events
+         (id, query, query_hash, namespace, retrieved_ids, cited_ids, outcome, critic_reason, model, critiqued_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      event_id,
+      query,
+      query_hash,
+      namespace,
+      JSON.stringify(retrieved_ids),
+      JSON.stringify(cited_ids),
+      outcome ?? null,
+      critic_reason ?? null,
+      model ?? null,
+      outcome ? new Date().toISOString() : null
+    );
+    // v11: mirror the retrieved/cited relationship into the join table so
+    // aggregations by memory_id use an index instead of scanning JSON blobs.
+    const joinInsert = db.prepare(
+      `INSERT OR IGNORE INTO retrieval_event_memories (event_id, memory_id, rank, was_cited)
+       VALUES (?, ?, ?, ?)`
+    );
+    retrieved_ids.forEach((id, idx) => {
+      joinInsert.run(event_id, id, idx, citedSet.has(id) ? 1 : 0);
+    });
+  });
+  writeEvent();
 
   if (outcome) {
     applyUsefulnessUpdate(db, retrieved_ids, cited_ids, outcome, namespace);
@@ -112,17 +125,28 @@ export function citeMemories(
   }
 
   const retrieved_ids = JSON.parse(event.retrieved_ids) as string[];
-  db.prepare(
-    `UPDATE retrieval_events
-        SET cited_ids = ?, outcome = ?, critic_reason = ?, critiqued_at = ?
-      WHERE id = ?`
-  ).run(
-    JSON.stringify(cited_ids),
-    outcome ?? null,
-    critic_reason ?? null,
-    new Date().toISOString(),
-    event_id
-  );
+  const citedSet = new Set(cited_ids);
+  const updateEvent = db.transaction(() => {
+    db.prepare(
+      `UPDATE retrieval_events
+          SET cited_ids = ?, outcome = ?, critic_reason = ?, critiqued_at = ?
+        WHERE id = ?`
+    ).run(
+      JSON.stringify(cited_ids),
+      outcome ?? null,
+      critic_reason ?? null,
+      new Date().toISOString(),
+      event_id
+    );
+    // Update was_cited flags in the join table.
+    const updateJoin = db.prepare(
+      `UPDATE retrieval_event_memories SET was_cited = ? WHERE event_id = ? AND memory_id = ?`
+    );
+    for (const memId of retrieved_ids) {
+      updateJoin.run(citedSet.has(memId) ? 1 : 0, event_id, memId);
+    }
+  });
+  updateEvent();
 
   const updated = outcome
     ? applyUsefulnessUpdate(db, retrieved_ids, cited_ids, outcome, event.namespace)
@@ -193,6 +217,84 @@ export function usefulnessStats(
          LIMIT ?`
     )
     .all(...params) as UsefulnessRow[];
+}
+
+export interface UsefulnessCounts {
+  helpful: number;
+  harmful: number;
+  score: number;
+}
+
+export function getUsefulnessCounts(
+  db: Database,
+  memory_ids: string[]
+): Map<string, UsefulnessCounts> {
+  const out = new Map<string, UsefulnessCounts>();
+  if (memory_ids.length === 0) return out;
+  const placeholders = memory_ids.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `SELECT memory_id, helpful_count, harmful_count, usefulness_score
+         FROM memory_usefulness
+         WHERE memory_id IN (${placeholders})`
+    )
+    .all(...memory_ids) as Array<{ memory_id: string; helpful_count: number; harmful_count: number; usefulness_score: number }>;
+  for (const row of rows) {
+    out.set(row.memory_id, {
+      helpful: row.helpful_count,
+      harmful: row.harmful_count,
+      score: row.usefulness_score,
+    });
+  }
+  for (const id of memory_ids) {
+    if (!out.has(id)) out.set(id, { helpful: 0, harmful: 0, score: 0.5 });
+  }
+  return out;
+}
+
+/**
+ * Draw a Thompson sample from Beta(helpful + 1, harmful + 1). Returns a
+ * single stochastic estimate of usefulness in [0, 1]. Uses the classic
+ * gamma-ratio trick via Marsaglia's method so we don't depend on a math
+ * library.
+ *
+ * The gamma draws use Math.random() which is deterministic-per-process
+ * in Node but not cryptographically strong — fine for ranking jitter.
+ */
+export function sampleUsefulness(helpful: number, harmful: number): number {
+  const a = helpful + 1;
+  const b = harmful + 1;
+  const x = gammaSample(a);
+  const y = gammaSample(b);
+  return x / (x + y);
+}
+
+function gammaSample(shape: number): number {
+  // Marsaglia & Tsang's method for shape >= 1. For shape < 1 boost then scale.
+  if (shape < 1) {
+    const u = Math.random();
+    return gammaSample(shape + 1) * Math.pow(u, 1 / shape);
+  }
+  const d = shape - 1 / 3;
+  const c = 1 / Math.sqrt(9 * d);
+  while (true) {
+    let x: number, v: number;
+    do {
+      x = boxMuller();
+      v = 1 + c * x;
+    } while (v <= 0);
+    v = v * v * v;
+    const u = Math.random();
+    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+  }
+}
+
+function boxMuller(): number {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
 export function getUsefulnessScores(

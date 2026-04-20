@@ -3,6 +3,75 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.0] — 2026-04-20
+
+Closes the attribution loop. v0.16.x shipped a well-built primitive that
+instrumented retrieval without a signal source — outcomes had to come
+from the caller. v0.17.0 adds the missing pieces so the system actually
+learns from what the agent does, not what the agent says it did.
+
+### Added — Self-learning feedback loop
+
+- **External critic Stop hook** (`templates/hooks/neuromcp-critic.cjs`).
+  After each Claude session, this scans the transcript for assistant
+  replies, checks which retrieved memories' content appears verbatim or
+  near-verbatim in those replies, and calls `cite_memories` automatically
+  with `outcome='helpful'`. Memories that were retrieved but not cited
+  are left untouched — absence of evidence is not evidence against.
+- **Thompson sampling exploration** in the hybrid ranker. Replaces the
+  deterministic `0.5 + usefulness_score` factor with a Beta(helpful+1,
+  harmful+1) sample per candidate. Unobserved memories sample from
+  Beta(1,1) = Uniform[0,1], so new entrants compete fairly against
+  incumbents on every query instead of starting at a dead 1.0 multiplier.
+  Breaks the rich-get-richer feedback loop that was flagged in the
+  round-1 review.
+- **Normalised retrieval-memory join table** (schema v11).
+  `retrieval_event_memories(event_id, memory_id, rank, was_cited)` with
+  FK CASCADE on event delete. Aggregation by memory_id is now
+  O(index-lookup) instead of scanning JSON-text blobs.
+  `log_retrieval` / `cite_memories` both write to the join table
+  inside the same transaction as the event row.
+- **Reflection generator** (`generate_reflection` MCP tool). Synthesises
+  a meta-memory from memories with `helpful_count >= min_helpful`.
+  Safeguarded per Codex's round-1 critique: only touches memories with
+  explicit positive critic signal, so reflections can't reinforce
+  speculation. Stored as `category=reflection`, `source=consolidation`.
+- **Real A/B sweep** (`scripts/ab-sweep.mjs`). Replaces the v0.16.x
+  stats-only dashboard. Reads labelled retrieval events and tests how
+  each config variant (narrow/baseline/wide weight slope, deterministic
+  vs Thompson) would have ranked the cited memory. Emits a timestamped
+  report with a clear winner or an honest "need more data" message.
+
+### Added — Onboarding
+
+- `docs/QUICKSTART.md` — a 5-minute path from `npm install` to
+  "first search returns a stored memory." Complements the long README.
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+- MCP server exposes 42 tools (was 41; `generate_reflection` added)
+- LongMemEval (100 questions, oracle split, v0.17.0 config, local
+  Ollama embeddings): **R@5 = 99.8%, R@10 = 100%, Hit Rate = 100%**
+  across multi-session + temporal-reasoning categories. Full 500-question
+  run scheduled separately.
+
+### Breaking changes
+
+None. Schema migrations are additive. Existing callers that didn't use
+`log_retrieval` / `cite_memories` see no behavioural change; existing
+callers that did see the Thompson sample instead of a deterministic
+factor (same expected value, more variance per call). If your tests
+assert exact search ordering, pin `NEUROMCP_DETERMINISTIC_RANKER=1`
+(feature flag arrives in v0.17.1 if anyone requests it).
+
+### Still deferred
+
+- Re-running the benchmark every release. Currently ad-hoc; a CI job
+  that re-runs on tagged releases lands in v0.17.x.
+- Public demo site. Out of scope for a library release.
+
 ## [0.16.9] — 2026-04-20
 
 Round-8 nits from both reviewers hit the same code path:

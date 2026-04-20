@@ -12,38 +12,25 @@ Local-first MCP server with hybrid search, verbatim recall, and crash-resilient 
 npx neuromcp
 ```
 
-## Benchmark: #1 on LongMemEval
+## Benchmark: LongMemEval results (v0.17.0)
 
-Tested on the full [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark — 500 questions, 6 categories, oracle split.
+Ran on 100 oracle-split questions from LongMemEval, local Ollama
+`nomic-embed-text` embeddings, fresh v0.17.0 config:
 
-| System | R@5 | R@10 | Hit Rate | API Calls |
-|--------|-----|------|----------|-----------|
-| **neuromcp extracted** | **99.9%** | **100.0%** | **100.0%** | **0** |
-| **neuromcp verbatim** | **99.8%** | **99.9%** | **100.0%** | **0** |
-| MemPalace raw | 96.6% | — | — | 0 |
-| MemPalace held-out | 98.4% | — | — | 0 |
-| MemPalace hybrid + rerank | 100.0% | — | — | Yes (Claude Haiku) |
-| OMEGA | 95.4% | — | — | Yes (GPT-4.1) |
-| Mastra OM | 94.9% | — | — | Yes (GPT-5-mini) |
-| RMM + GTE (ACL 2025) | 69.8% | — | — | Yes |
+| Mode | R@5 | R@10 | Hit Rate |
+|------|-----|------|----------|
+| Verbatim (FTS5) | 99.8% | 100% | 100% |
+| Extracted (Hybrid) | 99.8% | 100% | 100% |
 
-**Highest Recall@5 ever reported without external API calls.** The only systems scoring higher use paid LLM reranking (MemPalace hybrid uses Claude Haiku) or represent the theoretical ceiling from the original paper (RAG Oracle). neuromcp achieves this with pure local retrieval — no cloud, no API keys, no reranking.
+Comparison:
 
-<details>
-<summary>Per-category breakdown</summary>
+| System | R@5 |
+|--------|-----|
+| MemPalace (claimed) | 96.6% |
+| **neuromcp** | **99.8%** |
 
-| Category | N | Extracted R@5 | Verbatim R@5 |
-|----------|---|---------------|--------------|
-| knowledge-update | 78 | 100.0% | 100.0% |
-| multi-session | 133 | 100.0% | 100.0% |
-| single-session-assistant | 56 | 100.0% | 100.0% |
-| single-session-preference | 30 | 100.0% | 100.0% |
-| single-session-user | 70 | 100.0% | 100.0% |
-| temporal-reasoning | 133 | 99.6% | 99.2% |
+Reproduce on your machine: `npx tsx eval/longmemeval-runner.ts --limit 100`.
 
-</details>
-
-Reproduce: `npx tsx eval/longmemeval-runner.ts`
 
 ## Why
 

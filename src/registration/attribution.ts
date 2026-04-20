@@ -55,3 +55,22 @@ export function registerAttributionTools(server: McpServer, deps: ServerDeps): v
     return textResult(result);
   });
 }
+
+import { generateReflection } from '../tools/reflection.js';
+
+export function registerReflectionTool(server: McpServer, deps: ServerDeps): void {
+  const { db, logger } = deps;
+  server.registerTool('generate_reflection', {
+    description:
+      'Synthesise a meta-reflection memory from memories that have been proven helpful (helpful_count >= min_helpful). Safeguarded: only touches memories with explicit positive critic signal — no speculation on unvalidated content. Stored as category=reflection so downstream searches can include or exclude meta-memories explicitly.',
+    inputSchema: {
+      namespace: z.string().optional(),
+      window_days: z.number().int().min(1).max(365).optional().describe('Lookback window (default 14)'),
+      min_helpful: z.number().int().min(1).optional().describe('Minimum helpful_count required (default 1)'),
+      max_clusters: z.number().int().min(1).max(20).optional().describe('Max category sections in the reflection (default 5)'),
+    },
+  }, (args) => {
+    const result = generateReflection(args, { db, logger });
+    return textResult(result);
+  });
+}

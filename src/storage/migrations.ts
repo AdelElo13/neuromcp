@@ -188,6 +188,25 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     }
   }
 
+  if (currentVersion < 11) {
+    logger.info('migrations', 'Running v10 to v11 migration: retrieval-memory join table');
+    const v11Statements = [
+      `CREATE TABLE IF NOT EXISTS retrieval_event_memories (
+        event_id TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        rank INTEGER NOT NULL DEFAULT 0,
+        was_cited INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (event_id, memory_id),
+        FOREIGN KEY (event_id) REFERENCES retrieval_events(id) ON DELETE CASCADE
+      )`,
+      'CREATE INDEX IF NOT EXISTS idx_rem_memory ON retrieval_event_memories(memory_id)',
+      'CREATE INDEX IF NOT EXISTS idx_rem_cited ON retrieval_event_memories(was_cited)',
+    ];
+    for (const stmt of v11Statements) {
+      try { db.prepare(stmt).run(); } catch { /* table/index exists */ }
+    }
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

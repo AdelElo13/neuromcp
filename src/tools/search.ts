@@ -12,7 +12,7 @@ import { meetsMinTrust } from '../governance/trust.js';
 import { computePrimingBoosts, getRecentlyAccessed } from '../cognitive/priming.js';
 import { computeAdaptiveImportance } from '../cognitive/importance.js';
 import { computeAttentionScores, computeBlockAttentionScores, recordCoRetrieval } from '../cognitive/attention.js';
-import { getUsefulnessScores } from './attribution.js';
+import { getUsefulnessCounts, sampleUsefulness } from './attribution.js';
 import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
@@ -169,16 +169,20 @@ export async function searchMemory(
     logger.warn('search', 'Attention scoring failed, proceeding without');
   }
 
-  // Step 6.6: Usefulness prior (v0.16.0). Multiply score by observed
-  // usefulness from past retrievals. Memories with no signal default to
-  // 0.5 so this is a tiebreaker until critic data accumulates. Factor
-  // centered at 1.0 — a score of 0.75 yields a 25% lift, 0.25 yields a
-  // 25% penalty.
+  // Step 6.6: Usefulness prior (v0.16.0) with Thompson-sampling exploration
+  // (v0.17.0). Draw a Beta(helpful+1, harmful+1) sample per memory instead
+  // of using the deterministic mean. Unobserved memories sample from
+  // Beta(1,1) = Uniform[0,1], so on any given query they get a random
+  // factor in [0.5, 1.5] rather than a flat 1.0 — giving them a real
+  // chance to win against incumbents. Rich-get-richer feedback loops
+  // are broken because a memory with 1 helpful hit can still lose to a
+  // freshly-retrieved peer on a lucky draw.
   try {
-    const usefulness = getUsefulnessScores(db, scored.map((s) => s.id));
+    const counts = getUsefulnessCounts(db, scored.map((s) => s.id));
     for (const s of scored) {
-      const u = usefulness.get(s.id) ?? 0.5;
-      const factor = 0.5 + u; // u=0.5 → 1.0, u=1.0 → 1.5, u=0.0 → 0.5
+      const c = counts.get(s.id);
+      const u = c ? sampleUsefulness(c.helpful, c.harmful) : sampleUsefulness(0, 0);
+      const factor = 0.5 + u;
       s.score *= factor;
     }
   } catch {
