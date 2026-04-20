@@ -10,8 +10,9 @@
  *
  * Usage:
  *   npx neuromcp-backfill-embeddings            # all unembedded memories
- *   npx neuromcp-backfill-embeddings --where "category='wiki'"
+ *   npx neuromcp-backfill-embeddings --category wiki
  *   npx neuromcp-backfill-embeddings --limit 100
+ *   npx neuromcp-backfill-embeddings --rebuild-vec
  *   npx neuromcp-backfill-embeddings --dry-run
  */
 
@@ -28,10 +29,32 @@ const DB_PATH = process.env.NEUROMCP_DB || join(HOME, '.neuromcp', 'memory.db');
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
+const REBUILD_VEC = args.includes('--rebuild-vec');
 const limitIdx = args.indexOf('--limit');
-const LIMIT = limitIdx !== -1 ? parseInt(args[limitIdx + 1], 10) : null;
-const whereIdx = args.indexOf('--where');
-const EXTRA_WHERE = whereIdx !== -1 ? args[whereIdx + 1] : null;
+
+function parseLimit(raw) {
+  if (raw === undefined) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > 100000) {
+    console.error(`  ✗ --limit must be integer in [1, 100000] (got ${raw})`);
+    process.exit(2);
+  }
+  return n;
+}
+const LIMIT = limitIdx !== -1 ? parseLimit(args[limitIdx + 1]) : null;
+
+// Category filter — typed, no raw SQL.
+const CATEGORY_WHITELIST = new Set(['wiki', 'fact', 'general', 'system', 'infrastructure', 'product', 'person', 'project', 'meta']);
+const catIdx = args.indexOf('--category');
+let CATEGORY_FILTER = null;
+if (catIdx !== -1) {
+  const raw = args[catIdx + 1];
+  if (!CATEGORY_WHITELIST.has(raw)) {
+    console.error(`  ✗ --category must be one of: ${[...CATEGORY_WHITELIST].join(', ')} (got ${raw})`);
+    process.exit(2);
+  }
+  CATEGORY_FILTER = raw;
+}
 
 function ok(msg) { console.log(`  ✓ ${msg}`); }
 function info(msg) { console.log(`  · ${msg}`); }
@@ -58,23 +81,25 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 try { sqliteVec.load(db); } catch (err) { fail(`sqlite-vec load failed: ${err.message}`); }
 
-// Build query. We respect any extra filter the caller passed via --where.
-const whereClauses = ['is_deleted = 0', '(embedding_dim = 0 OR embedding_dim IS NULL)'];
-if (EXTRA_WHERE) whereClauses.push(`(${EXTRA_WHERE})`);
+// Typed WHERE — no user SQL interpolated. Category is already whitelist-
+// checked above; LIMIT is integer-validated. No injection surface.
+const params = [];
+const whereClauses = ['is_deleted = 0'];
+if (!REBUILD_VEC) whereClauses.push('(embedding_dim = 0 OR embedding_dim IS NULL)');
+if (CATEGORY_FILTER) {
+  whereClauses.push('category = ?');
+  params.push(CATEGORY_FILTER);
+}
 const where = whereClauses.join(' AND ');
-const countSql = `SELECT COUNT(*) AS n FROM memories WHERE ${where}`;
-const total = db.prepare(countSql).get().n;
-info(`${total} memories need embedding`);
+const total = db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE ${where}`).get(...params).n;
+info(`${total} memories need embedding${REBUILD_VEC ? ' (rebuild-vec mode: re-embedding all)' : ''}`);
 if (total === 0) { db.close(); process.exit(0); }
 if (DRY_RUN) { db.close(); process.exit(0); }
 
-const selectSql = `
-  SELECT id, content FROM memories
-  WHERE ${where}
-  ORDER BY created_at DESC
-  ${LIMIT ? `LIMIT ${LIMIT}` : ''}
-`;
-const rows = db.prepare(selectSql).all();
+const limitClause = LIMIT ? ` LIMIT ${LIMIT}` : '';
+const rows = db.prepare(
+  `SELECT id, content FROM memories WHERE ${where} ORDER BY created_at DESC${limitClause}`,
+).all(...params);
 
 const updateMem = db.prepare(`
   UPDATE memories SET embedding_model = ?, embedding_dim = ? WHERE id = ?

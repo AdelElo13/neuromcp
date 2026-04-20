@@ -35,7 +35,20 @@ const PLIST_TARGET = join(HOME, 'Library', 'LaunchAgents', 'com.neuromcp.consoli
 const args = process.argv.slice(2);
 const uninstall = args.includes('--uninstall');
 const intervalIdx = args.indexOf('--interval');
-const intervalSeconds = intervalIdx !== -1 ? parseInt(args[intervalIdx + 1], 10) : 14400;
+const DEFAULT_INTERVAL = 14400;   // 4h
+const MIN_INTERVAL = 300;         // 5 min — below this the audit cost stops being sensible
+const MAX_INTERVAL = 86400;       // 24h
+
+function parseInterval(raw) {
+  if (raw === undefined) return DEFAULT_INTERVAL;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < MIN_INTERVAL || n > MAX_INTERVAL) {
+    console.error(`  ✗ --interval must be an integer in [${MIN_INTERVAL}, ${MAX_INTERVAL}] seconds (got: ${raw})`);
+    process.exit(2);
+  }
+  return n;
+}
+const intervalSeconds = intervalIdx !== -1 ? parseInterval(args[intervalIdx + 1]) : DEFAULT_INTERVAL;
 
 function ok(msg) { console.log(`  ✓ ${msg}`); }
 function warn(msg) { console.log(`  ⚠ ${msg}`); }
@@ -124,8 +137,14 @@ if (platform() === 'darwin') {
   }
 } else if (platform() === 'linux') {
   const hours = Math.max(1, Math.floor(intervalSeconds / 3600));
-  info('Linux detected — no launchd. Add this to your crontab (example):');
-  console.log(`    0 */${hours} * * * ${join(SCRIPTS_DIR, 'run-consolidation.sh')}`);
+  const script = join(SCRIPTS_DIR, 'run-consolidation.sh');
+  // cron runs with a bare environment; bake in PATH + HOME so python3,
+  // node, claude, and npx resolve the same way they do in the user's shell.
+  const pathEnv = process.env.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+  info('Linux detected — no launchd. Add this to your crontab (env vars + script):');
+  console.log(`    PATH=${pathEnv}`);
+  console.log(`    HOME=${HOME}`);
+  console.log(`    0 */${hours} * * * ${script}`);
 } else {
   warn(`platform ${platform()} not supported for auto-scheduling; run the script manually.`);
 }

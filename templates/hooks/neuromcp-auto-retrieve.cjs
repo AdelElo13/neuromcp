@@ -84,23 +84,28 @@ function extractKeywords(prompt) {
 }
 
 // ─── Resolve the neuromcp-query bin, if installed ───────────────────────
+// Uses `npm root -g` (cross-platform — works identically on macOS/Linux/Windows)
+// instead of `which`, which doesn't exist on Windows and requires PATH
+// assumptions we can't guarantee from inside Claude Code hook subprocesses.
 function resolveQueryBin() {
-  // 1. Explicit override
   if (process.env.NEUROMCP_QUERY_BIN && fs.existsSync(process.env.NEUROMCP_QUERY_BIN)) {
     return process.env.NEUROMCP_QUERY_BIN;
   }
-  // 2. Package install — global bin on PATH
-  try {
-    const p = execFileSync('/usr/bin/env', ['which', 'neuromcp-query'], { encoding: 'utf8' }).trim();
-    if (p && fs.existsSync(p)) return p;
-  } catch { /* fall through */ }
-  // 3. Common install locations
   const candidates = [
-    path.join(HOME, '.neuromcp', 'scripts', 'query.mjs'),
+    path.join(HOME, 'projects', 'neuromcp', 'bin', 'query.mjs'),   // maintainer dev
+  ];
+  // Query npm for its global prefix; cache-friendly and portable.
+  try {
+    const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 5000 }).trim();
+    if (root) candidates.push(path.join(root, 'neuromcp', 'bin', 'query.mjs'));
+  } catch { /* npm not on PATH — fine, try static paths next */ }
+  // Common user-level install paths (volta, pnpm, nvm, homebrew).
+  candidates.push(
+    path.join(HOME, '.npm-global', 'lib', 'node_modules', 'neuromcp', 'bin', 'query.mjs'),
+    path.join(HOME, '.volta', 'tools', 'image', 'packages', 'neuromcp', 'bin', 'query.mjs'),
     '/usr/local/lib/node_modules/neuromcp/bin/query.mjs',
     '/opt/homebrew/lib/node_modules/neuromcp/bin/query.mjs',
-    path.join(HOME, 'projects', 'neuromcp', 'bin', 'query.mjs'),  // dev
-  ];
+  );
   for (const c of candidates) if (fs.existsSync(c)) return c;
   return null;
 }
@@ -191,14 +196,31 @@ function smartTrim(text, cap) {
   return window + '…';
 }
 
+// Escape characters that would otherwise break out of the <memory> tag
+// structure. Stored payloads can contain '<' / '&' from earlier sessions
+// (code snippets, HTML, angle-brackets in paths) — without escaping, a
+// memory content with '</memory>' would terminate our own wrapper and let
+// subsequent text be interpreted as fresh prompt by the model.
+function xmlEscape(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeAttr(s) {
+  return xmlEscape(s).replace(/"/g, '&quot;');
+}
+
 function formatMemories(rows) {
   if (!rows || !rows.length) return '';
   const tags = rows.map(r => {
-    const category = (r.category || 'memory').replace(/[<>"]/g, '');
-    const date = r.date || (r.created_at || '').slice(0, 10);
+    const category = escapeAttr((r.category || 'memory').slice(0, 40));
+    const date = escapeAttr((r.date || (r.created_at || '').slice(0, 10)).slice(0, 10));
     const raw = (r.content || '').trim();
     if (!raw) return null;
-    const content = smartTrim(raw, MAX_CONTENT_CHARS);
+    const trimmed = smartTrim(raw, MAX_CONTENT_CHARS);
+    const content = xmlEscape(trimmed);
     return `<memory category="${category}" date="${date}">\n${content}\n</memory>`;
   }).filter(Boolean);
   return tags.length ? `<neuromcp-recall>\n${tags.join('\n')}\n</neuromcp-recall>` : '';

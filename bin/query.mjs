@@ -40,19 +40,43 @@ let input = {};
 if (!process.stdin.isTTY) {
   try { input = JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { input = {}; }
 }
-const text = input.text || argVal('--text', '');
-const LIMIT = parseInt(input.limit ?? argVal('--limit', '3'), 10);
-const BM25_MAX = parseFloat(input.bm25_max ?? argVal('--bm25-max', '-1.0'));
-const POOL = parseInt(input.pool ?? argVal('--pool', '15'), 10);  // candidates per branch before fusion
+
+function parseIntBounded(value, { min, max, name, fallback }) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) {
+    fail({ reason: `invalid ${name}: expected integer in [${min}, ${max}], got ${JSON.stringify(value)}`, _exit: 2 });
+  }
+  return n;
+}
+function parseFloatBounded(value, { min, max, name, fallback }) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) {
+    fail({ reason: `invalid ${name}: expected finite number in [${min}, ${max}], got ${JSON.stringify(value)}`, _exit: 2 });
+  }
+  return n;
+}
+
+const text = typeof (input.text ?? argVal('--text', '')) === 'string'
+  ? (input.text ?? argVal('--text', ''))
+  : '';
+const LIMIT = parseIntBounded(input.limit ?? argVal('--limit', undefined),
+  { min: 1, max: 50, name: 'limit', fallback: 3 });
+const POOL = parseIntBounded(input.pool ?? argVal('--pool', undefined),
+  { min: 1, max: 200, name: 'pool', fallback: 15 });
+const BM25_MAX = parseFloatBounded(input.bm25_max ?? argVal('--bm25-max', undefined),
+  { min: -1000, max: 0, name: 'bm25_max', fallback: -1.0 });
 const RRF_K = 60;  // canonical RRF constant; tame top-rank dominance
 
 function fail(obj) {
-  process.stdout.write(JSON.stringify({ results: [], ...obj }));
-  process.exit(0);
+  const { _exit = 0, ...payload } = obj;
+  try { process.stdout.write(JSON.stringify({ results: [], ...payload })); } catch { /* broken pipe */ }
+  process.exit(_exit);
 }
 
-if (!text || text.length < 3) fail({ reason: 'empty text' });
-if (!existsSync(DB_PATH)) fail({ reason: 'db not found' });
+if (!text || text.length < 3) fail({ reason: 'empty text', _exit: 2 });
+if (!existsSync(DB_PATH)) fail({ reason: 'db not found', _exit: 2 });
 
 // ─── embedding: reuse neuromcp's provider factory ──────────────────────
 // Imported lazily so the bin still prints a sensible error if dist/ is missing.
@@ -142,8 +166,29 @@ function ftsBranch(query) {
 }
 
 // ─── Vector branch ─────────────────────────────────────────────────────
+// Detect the dim of the existing memories_vec column. If the current query
+// embedder returns a different dim, the vec0 query will throw. Better to
+// detect and skip cleanly than to spam stderr on every call.
+let detectedVecDim = null;
+function detectVecDim() {
+  if (!vecLoaded) return null;
+  try {
+    const row = db.prepare(`SELECT embedding FROM memories_vec LIMIT 1`).get();
+    if (row && row.embedding) return row.embedding.length / 4;   // float32
+  } catch { /* table missing or empty */ }
+  return null;
+}
+detectedVecDim = detectVecDim();
+
 function vecBranch(vector) {
   if (!vecLoaded || !vector) return [];
+  if (detectedVecDim !== null && detectedVecDim !== vector.length) {
+    process.stderr.write(
+      `[query] skipping vec branch: stored dim=${detectedVecDim} but embedder returns ${vector.length} ` +
+      `(run: neuromcp-backfill-embeddings --rebuild-vec)\n`,
+    );
+    return [];
+  }
   try {
     const buf = Buffer.from(Float32Array.from(vector).buffer);
     const hits = db.prepare(`

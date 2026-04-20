@@ -92,7 +92,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     if (!existsSync(claudeHooksDir)) {
       mkdirSync(claudeHooksDir, { recursive: true });
     }
-    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.js']) {
+    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs']) {
       const src = join(hooksDir, hook);
       const dest = join(claudeHooksDir, hook);
       if (!existsSync(dest) && existsSync(src)) {
@@ -145,7 +145,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
       matcher: '*',
       hooks: [{
         type: 'command',
-        command: `node "${claudeHooksDir}/neuromcp-auto-retrieve.js"`,
+        command: `node "${claudeHooksDir}/neuromcp-auto-retrieve.cjs"`,
         timeout: 2,
       }],
     },

@@ -142,29 +142,53 @@ async function loadEmbedder() {
   }
 }
 
+// Always try to load sqlite-vec: even without an embedder we need vec
+// access so --rebuild can clean orphan vector rows left by previous runs.
+let vecEnabled = false;
+try { sqliteVec.load(db); vecEnabled = true; }
+catch (err) { warn(`sqlite-vec load failed — vec cleanup + indexing disabled: ${err.message}`); }
+
 const embedder = await loadEmbedder();
 if (embedder) {
-  try { sqliteVec.load(db); }
-  catch (err) { warn(`sqlite-vec load failed: ${err.message}`); }
-  ok(`embedder ready: ${embedder.name} (dim=${embedder.dimensions})`);
+  ok(`embedder ready: ${embedder.name} (dim=${embedder.dimensions})${vecEnabled ? '' : ' (vec disabled)'}`);
+}
+
+// Stable chunk identity = `<wiki_path>#<heading>` so re-indexing after a
+// section edit or rename can diff current-on-disk against what is stored
+// and remove anything that no longer exists. Without this, stale rows
+// accumulate forever and retrieval serves outdated sections.
+function chunkKey(wikiPath, heading) {
+  return `wiki::${wikiPath}::${heading}`;
 }
 
 if (REBUILD && !DRY_RUN) {
-  // Delete (hard) all wiki-source rows to start clean.
   const before = db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE source = 'wiki'`).get().n;
+  // Vec rows live in an independent vec0 virtual table — must clean them
+  // FIRST, before the FK-less memories rows disappear and we lose the ids.
+  if (vecEnabled) {
+    db.prepare(`DELETE FROM memories_vec WHERE id IN (SELECT id FROM memories WHERE source = 'wiki')`).run();
+  }
   db.prepare(`DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE source = 'wiki')`).run();
   db.prepare(`DELETE FROM memories WHERE source = 'wiki'`).run();
-  ok(`rebuild: wiped ${before} previous wiki memories`);
+  ok(`rebuild: wiped ${before} previous wiki memories + vectors`);
 }
 
 const files = walk(WIKI_DIR).sort();
 info(`found ${files.length} wiki files`);
 
-const existingHashes = new Set(
-  db.prepare(`SELECT content_hash FROM memories WHERE source = 'wiki' AND is_deleted = 0`)
-    .all()
-    .map(r => r.content_hash),
-);
+// We key on chunk identity (wiki_path + heading). Content_hash is a
+// separate dedup — same identity + same content = no-op re-insert.
+const existingByKey = new Map();  // chunkKey → { id, rowid, content_hash }
+for (const row of db.prepare(
+  `SELECT id, rowid, content_hash, metadata FROM memories
+   WHERE source = 'wiki' AND is_deleted = 0`,
+).all()) {
+  try {
+    const meta = JSON.parse(row.metadata || '{}');
+    const key = chunkKey(meta.wiki_path, meta.heading);
+    existingByKey.set(key, { id: row.id, rowid: row.rowid, hash: row.content_hash });
+  } catch { /* ignore malformed rows */ }
+}
 
 const insertMem = db.prepare(`
   INSERT INTO memories (
@@ -176,8 +200,14 @@ const insertFts = db.prepare(`
   INSERT INTO memories_fts (rowid, content, summary, tags, category)
   VALUES (?, ?, NULL, ?, ?)
 `);
-const deleteVec = db.prepare(`DELETE FROM memories_vec WHERE id = ?`);
-const insertVec = db.prepare(`INSERT INTO memories_vec (id, embedding) VALUES (?, ?)`);
+const deleteMemById = db.prepare(`DELETE FROM memories WHERE id = ?`);
+const deleteFtsByRowid = db.prepare(`DELETE FROM memories_fts WHERE rowid = ?`);
+const deleteVec = vecEnabled
+  ? db.prepare(`DELETE FROM memories_vec WHERE id = ?`)
+  : null;
+const insertVec = vecEnabled
+  ? db.prepare(`INSERT INTO memories_vec (id, embedding) VALUES (?, ?)`)
+  : null;
 const getRowid = db.prepare(`SELECT rowid FROM memories WHERE id = ?`);
 
 // Embedding happens BEFORE the transaction (provider calls are async + I/O).
@@ -197,26 +227,42 @@ async function embedAll(rows) {
   return out;
 }
 
-const txn = db.transaction((rows) => {
-  let added = 0, skipped = 0;
+function pruneRowInTxn(id, rowid) {
+  if (vecEnabled) deleteVec.run(id);
+  deleteFtsByRowid.run(rowid);
+  deleteMemById.run(id);
+}
+
+const txn = db.transaction(({ rows, stale }) => {
+  let added = 0, skipped = 0, removed = 0, replaced = 0;
+  for (const prev of stale) {
+    pruneRowInTxn(prev.id, prev.rowid);
+    removed++;
+  }
   for (const r of rows) {
-    if (existingHashes.has(r.hash)) { skipped++; continue; }
+    const prev = existingByKey.get(r.key);
+    if (prev && prev.hash === r.hash) { skipped++; continue; }
+    if (prev) {
+      pruneRowInTxn(prev.id, prev.rowid);
+      replaced++;
+    }
     insertMem.run(r.id, r.hash, r.content, r.project, r.metadata, r.model || '', r.dim || 0);
     const { rowid } = getRowid.get(r.id);
     insertFts.run(rowid, r.content, '[]', 'wiki');
-    if (r.vector) {
+    if (vecEnabled && r.vector) {
       const buf = Buffer.from(Float32Array.from(r.vector).buffer);
       deleteVec.run(r.id);
       insertVec.run(r.id, buf);
     }
-    existingHashes.add(r.hash);
+    existingByKey.set(r.key, { id: r.id, rowid, hash: r.hash });
     added++;
   }
-  return { added, skipped };
+  return { added, skipped, removed, replaced };
 });
 
 let totalChunks = 0;
 const toInsert = [];
+const currentKeys = new Set();
 for (const file of files) {
   const relPath = file.slice(WIKI_DIR.length + 1);
   const text = readFileSync(file, 'utf8');
@@ -227,8 +273,11 @@ for (const file of files) {
   totalChunks += chunks.length;
   for (const { heading, body: chunkBody } of chunks) {
     const content = makeContent(pageTitle, heading, chunkBody);
+    const key = chunkKey(relPath, heading);
+    currentKeys.add(key);
     toInsert.push({
       id: generateId(),
+      key,
       hash: contentHash(content),
       content,
       project: projectId,
@@ -237,22 +286,40 @@ for (const file of files) {
   }
 }
 
+// Rows in the DB whose key no longer appears on disk → prune.
+const stale = [];
+for (const [key, prev] of existingByKey) {
+  if (!currentKeys.has(key)) stale.push(prev);
+}
+
 info(`${totalChunks} chunks across ${files.length} files`);
 
 if (DRY_RUN) {
-  const newCount = toInsert.filter(r => !existingHashes.has(r.hash)).length;
-  info(`[DRY RUN] would insert ${newCount}, skip ${toInsert.length - newCount} (dedup)`);
+  const fresh = toInsert.filter(r => {
+    const prev = existingByKey.get(r.key);
+    return !prev || prev.hash !== r.hash;
+  });
+  info(`[DRY RUN] ${fresh.length} to insert/replace, ${stale.length} to prune, ${toInsert.length - fresh.length} unchanged`);
   process.exit(0);
 }
 
-// Only embed rows that will actually be inserted (dedup-aware) — saves
-// both time and Ollama load when re-running after small edits.
-const fresh = toInsert.filter(r => !existingHashes.has(r.hash));
-const preExistingCount = toInsert.length - fresh.length;
+// Only embed rows that will actually be inserted or changed — dedup by key+hash.
+const fresh = toInsert.filter(r => {
+  const prev = existingByKey.get(r.key);
+  return !prev || prev.hash !== r.hash;
+});
 const withVectors = await embedAll(fresh);
-// Include pre-existing rows so the txn count reports accurate skipped total.
-const combined = [...withVectors, ...toInsert.filter(r => existingHashes.has(r.hash))];
-const { added, skipped } = txn(combined);
+const unchanged = toInsert.filter(r => {
+  const prev = existingByKey.get(r.key);
+  return prev && prev.hash === r.hash;
+});
+const { added, skipped, removed, replaced } = txn({
+  rows: [...withVectors, ...unchanged],
+  stale,
+});
 const vectorised = withVectors.filter(r => r.vector).length;
-ok(`inserted ${added} new chunks (${vectorised} with embeddings), skipped ${skipped} unchanged`);
+ok(
+  `inserted ${added} new chunks (${replaced} replaced, ${vectorised} with embeddings), ` +
+  `pruned ${removed} stale, skipped ${skipped} unchanged`,
+);
 db.close();
