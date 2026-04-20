@@ -26,7 +26,8 @@ const SQLITE_BIN = process.env.NEUROMCP_SQLITE || 'sqlite3';
 const MIN_PROMPT_LEN = 20;          // skip very short prompts ("thanks", "ok")
 const MAX_KEYWORDS = 8;             // cap FTS query size
 const MAX_RESULTS = 3;              // top-k memories to inject
-const MAX_CONTENT_CHARS = 400;      // truncate each memory preview
+const MAX_CONTENT_CHARS = 1500;     // per-memory cap — trimmed at structural boundary
+const TRIM_SEARCH_WINDOW = 0.4;     // look back up to 40% of cap for a clean break
 const SQLITE_TIMEOUT_MS = 500;      // hard budget for the whole query
 
 // English + Dutch stopwords — tiny on purpose, we want rare-terms to survive.
@@ -87,13 +88,15 @@ function buildFtsMatch(keywords) {
 
 function runSqlite(match) {
   // Use SQLite's .param set so the MATCH value never touches the shell.
-  // JSON output → easy to parse, robust against odd content chars.
+  // Over-fetch 2x the char cap so smartTrim() has room to find a clean break
+  // without another round-trip. JSON output → robust against odd content chars.
+  const fetchChars = MAX_CONTENT_CHARS * 2;
   const sqlScript = `
 .timeout ${SQLITE_TIMEOUT_MS}
 .mode json
 .param set :q '${match.replace(/'/g, "''")}'
 SELECT
-  substr(m.content, 1, ${MAX_CONTENT_CHARS}) AS content,
+  substr(m.content, 1, ${fetchChars}) AS content,
   m.category AS category,
   m.created_at AS created_at,
   m.source AS source
@@ -117,14 +120,61 @@ LIMIT ${MAX_RESULTS};
   } catch { return []; }
 }
 
+/**
+ * Trim long content at a structural boundary instead of a hard char cut.
+ * Priority: complete bullet (`\n- `) > sentence end > newline > word boundary.
+ * Never mid-word. Looks back up to TRIM_SEARCH_WINDOW into the text so we
+ * always land within [cap * (1 - window), cap] chars.
+ *
+ * Rationale: wiki sections often encode the conclusion ("Beslissing: X")
+ * in the last bullet. A hard char cut drops the tail = drops the point.
+ * Research (Bennani & Moslonka 2026, Stanford 2025) converges on
+ * structure-aware chunking boundaries beating fixed-size cuts.
+ */
+function smartTrim(text, cap) {
+  if (text.length <= cap) return text;
+  const window = text.slice(0, cap);
+  const minBoundary = Math.floor(cap * (1 - TRIM_SEARCH_WINDOW));
+
+  // 1. End of a bullet: look for the newline that terminates a `- ` item.
+  //    Find the last `\n- ` in window, then the newline that ends that bullet.
+  const lastBulletStart = window.lastIndexOf('\n- ');
+  if (lastBulletStart >= minBoundary) {
+    const bulletEnd = text.indexOf('\n', lastBulletStart + 3);
+    if (bulletEnd !== -1 && bulletEnd <= cap * 1.15) {
+      return text.slice(0, bulletEnd) + '\n…';
+    }
+    // Bullet runs past our stretch budget — drop from its start.
+    return text.slice(0, lastBulletStart) + '\n…';
+  }
+
+  // 2. End of a sentence (period/!/? followed by space or newline).
+  const sentenceMatch = window.match(/[.!?](\s)(?=[^\s.!?]|$)(?!.*[.!?](\s))/s);
+  if (sentenceMatch && sentenceMatch.index >= minBoundary) {
+    return window.slice(0, sentenceMatch.index + 1) + ' …';
+  }
+
+  // 3. Newline (for table rows, plain lines).
+  const lastNl = window.lastIndexOf('\n');
+  if (lastNl >= minBoundary) return window.slice(0, lastNl) + '\n…';
+
+  // 4. Word boundary fallback — never mid-word.
+  const lastSpace = window.lastIndexOf(' ');
+  if (lastSpace >= minBoundary) return window.slice(0, lastSpace) + ' …';
+
+  // 5. Give up gracefully with the full window.
+  return window + '…';
+}
+
 function formatMemories(rows) {
   if (!rows.length) return '';
   const tags = rows
     .map(r => {
       const category = (r.category || 'memory').replace(/[<>"]/g, '');
       const date = (r.created_at || '').slice(0, 10);
-      const content = (r.content || '').trim();
-      if (!content) return null;
+      const raw = (r.content || '').trim();
+      if (!raw) return null;
+      const content = smartTrim(raw, MAX_CONTENT_CHARS);
       return `<memory category="${category}" date="${date}">\n${content}\n</memory>`;
     })
     .filter(Boolean);
