@@ -11,13 +11,22 @@ import { searchMemory } from '../tools/search.js';
 import { storeMemory } from '../tools/store.js';
 import { eventBus } from './events.js';
 
-// Resolved once at startup from the module's runtime location, not the
-// source path. tsup bundles http.ts into dist/chunk-*.js so `../package.json`
-// from import.meta.url resolves to the package root regardless of whether we
-// are running from source (tsx) or from compiled dist/.
-const pkg = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-) as { version: string };
+// Resolved once at startup from the module's runtime location. The source
+// tree lives in src/transport/ so `../../package.json` is correct for tsx
+// runs; the tsup build flattens everything into dist/chunk-*.js so
+// `../package.json` is correct for compiled runs. We try both and keep
+// whichever resolves. This keeps /health accurate in both modes without
+// a separate bundler plugin.
+function readPackageVersion(): string {
+  for (const rel of ['../package.json', '../../package.json']) {
+    try {
+      const raw = readFileSync(new URL(rel, import.meta.url), 'utf8');
+      return (JSON.parse(raw) as { version: string }).version;
+    } catch { /* try next candidate */ }
+  }
+  return '0.0.0-unknown';
+}
+const pkg = { version: readPackageVersion() };
 
 export interface HttpTransportOptions {
   readonly port: number;

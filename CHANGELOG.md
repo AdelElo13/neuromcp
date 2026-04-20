@@ -3,6 +3,25 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.8] — 2026-04-20
+
+Follow-up to v0.16.7: the path fix worked for compiled `dist/` but
+broke vitest runs against source. Source lives in `src/transport/`
+so `../package.json` resolves to a non-existent `src/package.json`.
+v0.16.7 shipped with a failing http-e2e integration test.
+
+### Fixed
+
+- `src/transport/http.ts` now tries `../package.json` first (compiled
+  layout) then `../../package.json` (source layout) and uses whichever
+  resolves. Covers vitest, tsx, and tsup builds without a bundler
+  plugin.
+
+### Verified
+
+- 276 / 276 tests pass (was 275/276 on v0.16.7)
+- Server starts; `/health` returns `{"status":"ok","version":"0.16.8"}`
+
 ## [0.16.7] — 2026-04-20
 
 **Critical regression fix.** Round-7 reviewer spotted a latent
