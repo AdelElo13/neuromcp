@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -228,6 +228,7 @@ const CREATE_INDEXES = `
     query TEXT NOT NULL,
     query_hash TEXT NOT NULL,
     namespace TEXT NOT NULL DEFAULT 'default',
+    session_id TEXT,
     retrieved_ids TEXT NOT NULL DEFAULT '[]',
     cited_ids TEXT NOT NULL DEFAULT '[]',
     outcome TEXT,
@@ -236,6 +237,7 @@ const CREATE_INDEXES = `
     critiqued_at TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   );
+  CREATE INDEX IF NOT EXISTS idx_retrieval_events_session ON retrieval_events(session_id);
   CREATE INDEX IF NOT EXISTS idx_retrieval_events_namespace ON retrieval_events(namespace);
   CREATE INDEX IF NOT EXISTS idx_retrieval_events_created ON retrieval_events(created_at);
   CREATE INDEX IF NOT EXISTS idx_retrieval_events_outcome ON retrieval_events(outcome);

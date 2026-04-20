@@ -173,17 +173,20 @@ function main() {
     return;
   }
 
-  // Fetch events from this session that have no outcome yet. Per codex P0:
-  // each event is scored ONLY against assistant turns that occurred AFTER
-  // the event's created_at timestamp — not a blob of all turns in the
-  // 4-hour window.
+  // v0.17.4: filter events by session_id so cross-session credit stealing
+  // is impossible. We derive a session key from the transcript path (which
+  // is unique per Claude session). Events without a session_id are either
+  // pre-v0.17.4 data or non-Claude callers — skip them here rather than
+  // blanket-attribute across sessions.
+  const crypto = require('node:crypto');
+  const sessionId = crypto.createHash('sha256').update(transcriptPath).digest('hex').slice(0, 16);
   const windowSince = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
   const events = sql(
-    `SELECT id, namespace, retrieved_ids, created_at FROM retrieval_events
-      WHERE outcome IS NULL AND created_at >= ?
+    `SELECT id, namespace, retrieved_ids, created_at, session_id FROM retrieval_events
+      WHERE outcome IS NULL AND created_at >= ? AND session_id = ?
       ORDER BY created_at DESC
       LIMIT 200`,
-    [windowSince],
+    [windowSince, sessionId],
   );
   if (!events || events.length === 0) {
     log('no uncritiqued events in window');
@@ -201,7 +204,7 @@ function main() {
     // Load memory content for the retrieved ids
     const placeholders = ids.map(() => '?').join(',');
     const memories = sql(
-      `SELECT id, substr(content, 1, 600) AS content FROM memories WHERE id IN (${placeholders})`,
+      `SELECT id, substr(content, 1, 8000) AS content FROM memories WHERE id IN (${placeholders})`,
       ids,
     );
     if (!memories) continue;

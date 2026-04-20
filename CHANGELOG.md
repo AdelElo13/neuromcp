@@ -3,6 +3,57 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.4] — 2026-04-20
+
+Codex round-11 caught four partial-fix residues in v0.17.2 that
+v0.17.3 didn't address. This patch closes three of them. The fourth
+(lexical-only critic) is acknowledged as v0.18.0 work — it needs a
+local LLM judge, not more patching of the substring matcher.
+
+### Fixed
+
+- **Critic hook session isolation** (Codex P0 residue). v0.17.2/3
+  pulled uncritiqued events from the last 4 hours with no session
+  key, so events from a different Claude session could steal credit
+  from the current transcript. v0.17.4 adds a `session_id` column to
+  `retrieval_events` (schema v12) derived from a SHA-256 of the
+  transcript path. The critic hook now filters on this session key —
+  an event from session A can no longer be attributed to text
+  produced in session B.
+- **Memory content truncation** (Codex finding: only first 600
+  chars loaded for match). Raised to 8000 chars so citations past
+  the first paragraph of a long memory can actually be detected.
+- **v11 join table backfill**. v11's migration created the empty
+  `retrieval_event_memories` table but never populated it from the
+  JSON blobs of pre-existing events. v12 migration exhaustively
+  back-fills every historical event inside a single transaction.
+- **`citeMemories` reads the authoritative source**. Previously it
+  parsed the JSON blob of `retrieved_ids`. Now it reads from
+  `retrieval_event_memories` ordered by `rank`. One step closer to
+  being able to drop the JSON blob entirely.
+
+### Schema v12
+
+Adds:
+- `retrieval_events.session_id TEXT` (nullable, indexed)
+- Historical backfill of `retrieval_event_memories`
+
+Pre-v0.17.4 events have `session_id = NULL`. The critic hook skips
+these rather than blanket-attribute — correct-over-lossy tradeoff.
+
+### Acknowledged not fixed (v0.18.0)
+
+- **Lexical-only critic**. The substring matcher still can't detect
+  paraphrased citations or semantic reuse. v0.18.0 will add an
+  optional Ollama-based judge behind a config flag; until then the
+  critic only rewards verbatim/near-verbatim citations.
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+- Migration tested end-to-end against my own DB
+
 ## [0.17.3] — 2026-04-20
 
 Round-11 review (architect subagent + Codex CLI) downgraded v0.17.2

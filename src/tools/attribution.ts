@@ -22,6 +22,7 @@ export interface LogRetrievalArgs {
   outcome?: 'helpful' | 'neutral' | 'harmful';
   critic_reason?: string;
   model?: string;
+  session_id?: string;
 }
 
 export interface CiteMemoriesArgs {
@@ -61,6 +62,7 @@ export function logRetrieval(
     outcome,
     critic_reason,
     model,
+    session_id = null,
   } = args;
 
   const event_id = randomBytes(16).toString('hex');
@@ -70,13 +72,14 @@ export function logRetrieval(
   const writeEvent = db.transaction(() => {
     db.prepare(
       `INSERT INTO retrieval_events
-         (id, query, query_hash, namespace, retrieved_ids, cited_ids, outcome, critic_reason, model, critiqued_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, query, query_hash, namespace, session_id, retrieved_ids, cited_ids, outcome, critic_reason, model, critiqued_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       event_id,
       query,
       query_hash,
       namespace,
+      session_id,
       JSON.stringify(retrieved_ids),
       JSON.stringify(cited_ids),
       outcome ?? null,
@@ -117,14 +120,20 @@ export function citeMemories(
   const { event_id, cited_ids, outcome, critic_reason } = args;
 
   const event = db
-    .prepare(`SELECT namespace, retrieved_ids FROM retrieval_events WHERE id = ?`)
-    .get(event_id) as { namespace: string; retrieved_ids: string } | undefined;
+    .prepare(`SELECT namespace FROM retrieval_events WHERE id = ?`)
+    .get(event_id) as { namespace: string } | undefined;
 
   if (!event) {
     throw new Error(`retrieval event ${event_id} not found`);
   }
 
-  const retrieved_ids = JSON.parse(event.retrieved_ids) as string[];
+  // v0.17.4: read retrieved_ids from the authoritative join table, not the JSON blob.
+  const retrievedRows = db
+    .prepare(
+      `SELECT memory_id FROM retrieval_event_memories WHERE event_id = ? ORDER BY rank`
+    )
+    .all(event_id) as Array<{ memory_id: string }>;
+  const retrieved_ids = retrievedRows.map((r) => r.memory_id);
   const citedSet = new Set(cited_ids);
   const updateEvent = db.transaction(() => {
     db.prepare(

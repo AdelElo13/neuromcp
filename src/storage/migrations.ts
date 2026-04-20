@@ -207,6 +207,42 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     }
   }
 
+  if (currentVersion < 12) {
+    logger.info('migrations', 'Running v11 to v12 migration: session_id on retrieval_events + backfill historical join rows');
+    // Add session_id column (nullable for backwards compat)
+    try { db.prepare('ALTER TABLE retrieval_events ADD COLUMN session_id TEXT').run(); } catch { /* exists */ }
+    try { db.prepare('CREATE INDEX IF NOT EXISTS idx_retrieval_events_session ON retrieval_events(session_id)').run(); } catch { /* exists */ }
+    // Backfill: for every historical event, explode retrieved_ids/cited_ids
+    // JSON into the retrieval_event_memories join table. Previously
+    // v11 migration only created the empty table; historical data
+    // stayed in JSON blobs only.
+    try {
+      const events = db.prepare('SELECT id, retrieved_ids, cited_ids FROM retrieval_events').all() as Array<{ id: string; retrieved_ids: string; cited_ids: string }>;
+      const insert = db.prepare(
+        'INSERT OR IGNORE INTO retrieval_event_memories (event_id, memory_id, rank, was_cited) VALUES (?, ?, ?, ?)'
+      );
+      const backfillTx = db.transaction(() => {
+        let backfilled = 0;
+        for (const ev of events) {
+          let retrieved: string[] = [];
+          let cited: string[] = [];
+          try { retrieved = JSON.parse(ev.retrieved_ids); } catch { /* skip malformed */ }
+          try { cited = JSON.parse(ev.cited_ids); } catch { /* skip malformed */ }
+          const citedSet = new Set(cited);
+          retrieved.forEach((mid, idx) => {
+            insert.run(ev.id, mid, idx, citedSet.has(mid) ? 1 : 0);
+            backfilled++;
+          });
+        }
+        return backfilled;
+      });
+      const count = backfillTx();
+      logger.info('migrations', 'v12 backfill complete', { rows: count });
+    } catch (err) {
+      logger.warn('migrations', 'v12 backfill skipped', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

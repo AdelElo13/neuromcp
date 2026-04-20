@@ -99,7 +99,7 @@ export function registerResources(server: McpServer, deps: ServerDeps): void {
 
     const health = {
       status: 'ok',
-      version: '0.17.3',
+      version: '0.17.4',
       memory_count: totalRow.count,
       embedding_model: embedder.name,
       embedding_dimensions: embedder.dimensions,
