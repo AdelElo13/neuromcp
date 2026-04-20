@@ -20,8 +20,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import sqlite3
 import subprocess
 import sys
 from collections import Counter
@@ -33,6 +36,12 @@ NEUROMCP_DIR = HOME / ".neuromcp"
 SESSIONS_DIR = NEUROMCP_DIR / "raw" / "sessions"
 WIKI_DIR = NEUROMCP_DIR / "wiki"
 LEDGER_FILE = NEUROMCP_DIR / "consolidation-ledger.json"
+REVIEW_QUEUE = NEUROMCP_DIR / "review-queue"
+MEMORY_DB = NEUROMCP_DIR / "memory.db"
+AUDIT_MODEL = "haiku"           # fast + cheap for audit + fact passes
+AUDIT_TIMEOUT_SEC = 120
+FACT_TIMEOUT_SEC = 120
+CONTRADICTION_CHECK = os.environ.get("NEUROMCP_CONTRADICTION_CHECK", "1") != "0"
 
 # Project detection: only paths under <HOME>/projects/<NAME> count as project signal.
 PROJECT_PATH_RE = re.compile(
@@ -107,6 +116,297 @@ def extract_markdown(raw: str) -> str | None:
     return content
 
 
+def audit_summary(summary: str, batch: list[Path]) -> tuple[bool, str]:
+    """Verify every factual claim in `summary` is traceable to the raw sessions.
+
+    Runs a second `claude -p` call with a strict verifier prompt. Returns
+    (approved, reason). If the audit cannot run (CLI missing, JSON parse
+    fail, timeout) we default to *approved* with a note — conservative
+    fail-open is safer than losing legit updates to a flaky auditor.
+    """
+    session_text = "\n\n".join(
+        f"=== {s.name} ===\n{s.read_text(errors='replace')[:3000]}"
+        for s in batch
+    )
+    prompt = f"""You are a strict fact-checker. Verify every factual claim in the SUMMARY
+is supported by the SOURCE sessions below. Treat rephrasings as fine, but
+flag anything that appears in SUMMARY but not in SOURCE.
+
+SOURCE:
+{session_text}
+
+SUMMARY:
+{summary}
+
+Output ONLY a single JSON object, no prose. Schema:
+{{"approved": true|false, "unsupported": ["<exact claim 1>", ...], "note": "<one-line reason>"}}
+
+Rules:
+- approved=true only if zero unsupported factual claims.
+- "Beslissing: X vs Y. Waarom: Z" style = one atomic claim, verify the decision + reason.
+- Paraphrases of source sentences are OK. Invented causes, versions, names, numbers are NOT.
+- If SUMMARY is essentially empty ("no technical substance" etc.), approved=true.
+"""
+    try:
+        r = subprocess.run(
+            ["claude", "-p", "--tools", "", "--no-session-persistence",
+             "--model", AUDIT_MODEL, prompt],
+            capture_output=True,
+            text=True,
+            timeout=AUDIT_TIMEOUT_SEC,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return True, f"audit skipped: {type(exc).__name__}"
+
+    if r.returncode != 0 or not r.stdout.strip():
+        return True, "audit skipped: empty response"
+
+    # Try to find JSON in the response (auditor may still add stray text).
+    match = re.search(r"\{.*\}", r.stdout, re.S)
+    if not match:
+        return True, "audit skipped: no JSON in response"
+    try:
+        verdict = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return True, "audit skipped: malformed JSON"
+
+    approved = bool(verdict.get("approved", True))
+    unsupported = verdict.get("unsupported") or []
+    note = verdict.get("note") or ""
+    if approved:
+        return True, note or "approved"
+    reason = f"REJECTED — {note or 'unsupported claims'}"
+    if unsupported:
+        reason += " | " + " ; ".join(str(u)[:200] for u in unsupported[:5])
+    return False, reason
+
+
+def queue_for_review(project: str, batch_idx: int, summary: str, reason: str) -> Path:
+    """Park a rejected summary under review-queue/ for human inspection."""
+    REVIEW_QUEUE.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    path = REVIEW_QUEUE / f"{stamp}_{project}_batch{batch_idx}.md"
+    path.write_text(
+        f"# Rejected consolidation — {project} batch {batch_idx}\n"
+        f"\n> {reason}\n\n---\n\n{summary}\n"
+    )
+    return path
+
+
+# ─── Tier 2 C+D+F: atomic fact extraction + temporal supersession ───────
+
+def _run_claude(prompt: str, timeout: int) -> str | None:
+    try:
+        r = subprocess.run(
+            ["claude", "-p", "--tools", "", "--no-session-persistence",
+             "--model", AUDIT_MODEL, prompt],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def extract_facts(summary: str, batch: list[Path], project: str) -> list[dict]:
+    """Ask the model to distill the consolidated summary into atomic facts.
+
+    Returns a list of {subject, content, confidence} dicts. Empty on failure.
+    Facts are intentionally natural-language single sentences rather than strict
+    SPO triples — strict schemas lose nuance in decision-with-rationale claims.
+    """
+    prompt = f"""Extract at most 8 atomic facts from the SUMMARY below.
+Each fact must be:
+- A single standalone sentence that is true as-of today, without needing surrounding context.
+- Traceable to the SUMMARY — do not invent.
+- Short (< 200 chars).
+
+Project: {project}
+
+SUMMARY:
+{summary}
+
+Output ONLY a JSON array, no prose. Schema per item:
+{{"subject": "<short noun phrase anchor>", "content": "<full fact sentence>", "confidence": "high"|"medium"|"low"}}
+
+Rules:
+- "Beslissing: launchd boven SessionEnd omdat X" → one fact with subject="consolidation trigger", content="launchd agent is chosen over SessionEnd hook because X".
+- Versions, paths, numbers, decisions, bug fixes = good fact material.
+- Phrasing questions, open todos, or "next steps" = NOT facts, skip them."""
+    raw = _run_claude(prompt, FACT_TIMEOUT_SEC)
+    if not raw:
+        return []
+    match = re.search(r"\[.*\]", raw, re.S)
+    if not match:
+        return []
+    try:
+        facts = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    cleaned = []
+    for f in facts if isinstance(facts, list) else []:
+        if not isinstance(f, dict):
+            continue
+        content = (f.get("content") or "").strip()
+        subject = (f.get("subject") or "").strip()
+        if not content or len(content) > 400:
+            continue
+        cleaned.append({
+            "subject": subject[:120],
+            "content": content,
+            "confidence": f.get("confidence", "medium"),
+        })
+    return cleaned[:8]
+
+
+def _memory_id(content: str) -> str:
+    return hashlib.sha256(f"{content}-{datetime.now().isoformat()}-{os.urandom(4).hex()}".encode()).hexdigest()[:32]
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_\-.]{2,}", re.I)
+_SKIP_TERMS = {"the", "is", "are", "was", "were", "van", "een", "met", "elke", "voor", "and", "or",
+               "de", "het", "runs", "run", "has", "have", "will", "this", "that"}
+
+def _keywords(text: str) -> set[str]:
+    return {t.lower() for t in _WORD_RE.findall(text or "") if t.lower() not in _SKIP_TERMS and len(t) > 2}
+
+
+def find_contradicting_fact(
+    db: sqlite3.Connection,
+    project: str,
+    subject: str,
+    new_content: str,
+) -> str | None:
+    """Return id of a prior fact this one likely supersedes, or None.
+
+    Strategy: pull recent facts in the same project, score each on keyword-
+    overlap (Jaccard) with the new fact's (subject + content). Above a
+    similarity floor, ask Haiku if NEW truly supersedes OLD. This avoids
+    false supersessions on parallel-but-unrelated facts while still catching
+    cases where the model phrased the subject differently.
+    """
+    new_kw = _keywords(subject) | _keywords(new_content)
+    if len(new_kw) < 2:
+        return None
+    cur = db.execute(
+        """
+        SELECT id, content, metadata FROM memories
+        WHERE category = 'fact' AND project_id = ? AND is_deleted = 0
+          AND superseded_by_id IS NULL
+        ORDER BY created_at DESC
+        LIMIT 30
+        """,
+        (project,),
+    )
+    scored: list[tuple[float, str, str]] = []
+    for row_id, content, meta_json in cur.fetchall():
+        if content == new_content:
+            continue
+        try:
+            meta = json.loads(meta_json or "{}")
+        except json.JSONDecodeError:
+            meta = {}
+        old_kw = _keywords(meta.get("subject", "")) | _keywords(content or "")
+        if not old_kw:
+            continue
+        overlap = len(new_kw & old_kw)
+        union = len(new_kw | old_kw)
+        jaccard = overlap / union if union else 0.0
+        # Need enough shared terms AND high ratio — either alone gives false positives
+        if overlap >= 3 and jaccard >= 0.35:
+            scored.append((jaccard, row_id, content))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    if not CONTRADICTION_CHECK:
+        return None
+    _, old_id, old_content = scored[0]
+    prompt = f"""Two facts about the same topic. Does the NEW fact supersede the OLD one?
+
+OLD: {old_content}
+NEW: {new_content}
+
+Answer ONLY "yes" if NEW replaces OLD (the number/value/state changed, or it contradicts it),
+or "no" if they are compatible parallel observations. One word."""
+    verdict = (_run_claude(prompt, 30) or "").strip().lower()
+    return old_id if verdict.startswith("yes") else None
+
+
+def store_fact(
+    db: sqlite3.Connection,
+    fact: dict,
+    project: str,
+    source_session: str,
+) -> bool:
+    """Insert a fact as a memory row and its FTS mirror. Returns True if stored."""
+    content = fact["content"]
+    chash = _content_hash(content)
+    # Dedup: skip if the exact content is already a non-deleted memory.
+    exists = db.execute(
+        "SELECT 1 FROM memories WHERE content_hash = ? AND is_deleted = 0 LIMIT 1",
+        (chash,),
+    ).fetchone()
+    if exists:
+        return False
+    memory_id = _memory_id(content)
+    trust = {"high": "high", "medium": "medium", "low": "low"}.get(fact.get("confidence"), "medium")
+    today = datetime.now().strftime("%Y-%m-%d")
+    metadata = json.dumps({
+        "subject": fact.get("subject", ""),
+        "source_session": source_session,
+        "extracted_at": datetime.now().isoformat(),
+    })
+    db.execute(
+        """
+        INSERT INTO memories (
+            id, content_hash, content, namespace, category, source, source_trust,
+            project_id, tags, importance, metadata, valid_from
+        ) VALUES (?, ?, ?, 'default', 'fact', 'consolidator', ?, ?, '[]', 0.7, ?, ?)
+        """,
+        (memory_id, chash, content, trust, project, metadata, today),
+    )
+    rowid = db.execute("SELECT rowid FROM memories WHERE id = ?", (memory_id,)).fetchone()[0]
+    db.execute(
+        "INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, '[]', 'fact')",
+        (rowid, content),
+    )
+    # Mark any predecessor as superseded by this one.
+    predecessor = find_contradicting_fact(db, project, fact.get("subject", ""), content)
+    if predecessor:
+        db.execute(
+            "UPDATE memories SET superseded_by_id = ?, valid_to = ? WHERE id = ?",
+            (memory_id, today, predecessor),
+        )
+    return True
+
+
+def persist_facts(facts: list[dict], project: str, batch: list[Path]) -> int:
+    """Write facts to memory.db. Returns number of new inserts."""
+    if not facts or not MEMORY_DB.exists():
+        return 0
+    source = batch[-1].name if batch else ""
+    try:
+        db = sqlite3.connect(str(MEMORY_DB))
+    except sqlite3.Error:
+        return 0
+    inserted = 0
+    try:
+        db.execute("BEGIN")
+        for fact in facts:
+            if store_fact(db, fact, project, source):
+                inserted += 1
+        db.execute("COMMIT")
+    except sqlite3.Error as exc:
+        db.execute("ROLLBACK")
+        print(f"    WARN: fact persist failed: {exc}")
+    finally:
+        db.close()
+    return inserted
+
+
 def consolidate_batch(
     project: str,
     batch: list[Path],
@@ -156,6 +456,13 @@ STRICT INSTRUCTIONS:
         if not extracted:
             print(f"  WARN: fence missing or contaminated for {project} batch {batch_idx}/{batch_total}")
             return False, []
+        # Eval-loop: verify every claim traces to a source session before writing.
+        approved, reason = audit_summary(extracted, batch)
+        if not approved:
+            path = queue_for_review(project, batch_idx, extracted, reason)
+            print(f"  ⚠ {project} batch {batch_idx}/{batch_total} rejected — queued: {path.name}")
+            print(f"    {reason}")
+            return False, []
         projects_dir = WIKI_DIR / "projects"
         systems_dir = WIKI_DIR / "systems"
         target = projects_dir / f"{project}.md"
@@ -171,6 +478,12 @@ STRICT INSTRUCTIONS:
                 f"---\ntitle: {project}\ntype: project\ncreated: {today}\n---\n\n{extracted}\n"
             )
             print(f"  ✓ {target.name} created batch {batch_idx}/{batch_total} ({len(batch)} sessions)")
+        # Tier 2 C+D: distill atomic facts and persist with supersession edges.
+        facts = extract_facts(extracted, batch, project)
+        if facts:
+            added = persist_facts(facts, project, batch)
+            if added:
+                print(f"    + {added} fact(s) stored")
         return True, list(batch)
     except subprocess.TimeoutExpired:
         print(f"  ERROR: timeout on {project} batch {batch_idx}/{batch_total}")
@@ -256,8 +569,35 @@ def main() -> None:
                     f"- {len(sessions)} sessions seen, "
                     f"{ok_count}/{len(groups)} projects updated\n"
                 )
+        # Fire-and-forget wiki re-index so auto-retrieve sees fresh chunks.
+        # The indexer dedups by content_hash so re-running is cheap.
+        trigger_wiki_index()
 
     print(f"\nDone: {ok_count}/{len(groups)} projects processed")
+
+
+def trigger_wiki_index() -> None:
+    """Best-effort: refresh the FTS5 index so auto-retrieve finds today's edits.
+
+    Falls back silently if node / the indexer isn't available — consolidation
+    itself already succeeded and we don't want to raise a second error path.
+    """
+    candidates = [
+        HOME / ".neuromcp" / "scripts" / "index-wiki.mjs",  # installed by enable-consolidation
+    ]
+    script = next((p for p in candidates if p.exists()), None)
+    if script is None:
+        return
+    try:
+        subprocess.run(
+            ["node", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # node not on PATH or indexer hung — ignore
 
 
 if __name__ == "__main__":

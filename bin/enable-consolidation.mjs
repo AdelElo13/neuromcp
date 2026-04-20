@@ -86,7 +86,10 @@ ok(`claude CLI: ${claude}`);
 
 // --- copy scripts into $HOME/.neuromcp/scripts/ ---
 mkdirSync(SCRIPTS_DIR, { recursive: true });
-for (const name of ['consolidate-sessions.py', 'run-consolidation.sh']) {
+// index-wiki.mjs is copied alongside so consolidate-sessions.py can auto-
+// refresh the FTS index after each run. Without it consolidation would
+// still work but auto-retrieve would lag until the next manual reindex.
+for (const name of ['consolidate-sessions.py', 'run-consolidation.sh', 'index-wiki.mjs']) {
   const src = join(REPO_SCRIPTS, name);
   const dst = join(SCRIPTS_DIR, name);
   if (!existsSync(src)) fail(`missing source: ${src}`);

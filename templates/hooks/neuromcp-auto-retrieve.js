@@ -24,14 +24,20 @@ const DB_PATH = process.env.NEUROMCP_DB || path.join(HOME, '.neuromcp', 'memory.
 const SQLITE_BIN = process.env.NEUROMCP_SQLITE || 'sqlite3';
 
 const MIN_PROMPT_LEN = 20;          // skip very short prompts ("thanks", "ok")
+const MIN_KEYWORDS = 2;             // require >=2 distinct non-stopword terms
 const MAX_KEYWORDS = 8;             // cap FTS query size
 const MAX_RESULTS = 3;              // top-k memories to inject
 const MAX_CONTENT_CHARS = 1500;     // per-memory cap — trimmed at structural boundary
 const TRIM_SEARCH_WINDOW = 0.4;     // look back up to 40% of cap for a clean break
 const SQLITE_TIMEOUT_MS = 500;      // hard budget for the whole query
+// BM25 in SQLite FTS5 returns more-negative = better-match. Threshold is an empirical
+// "this is actually relevant" floor. Env override: NEUROMCP_BM25_THRESHOLD=-0.5 (stricter).
+const BM25_THRESHOLD = parseFloat(process.env.NEUROMCP_BM25_THRESHOLD || '-1.0');
 
-// English + Dutch stopwords — tiny on purpose, we want rare-terms to survive.
+// English + Dutch stopwords — includes conversational filler ("even", "tussendoor",
+// "oke", "zelf") that otherwise leaks through and triggers noise injections.
 const STOPWORDS = new Set([
+  // English
   'the', 'a', 'an', 'and', 'or', 'but', 'of', 'in', 'on', 'at', 'to', 'for',
   'with', 'from', 'this', 'that', 'is', 'are', 'was', 'were', 'be', 'been',
   'being', 'have', 'has', 'had', 'do', 'does', 'did', 'i', 'you', 'he', 'she',
@@ -39,12 +45,20 @@ const STOPWORDS = new Set([
   'its', 'our', 'their', 'what', 'how', 'when', 'where', 'why', 'who', 'can',
   'could', 'would', 'should', 'will', 'not', 'no', 'yes', 'also', 'just',
   'only', 'then', 'than', 'so', 'as', 'if', 'up', 'out', 'about', 'over',
-  'de', 'het', 'een', 'en', 'of', 'als', 'dan', 'is', 'was', 'waren', 'zijn',
-  'hebben', 'heeft', 'had', 'doe', 'doet', 'deed', 'ik', 'jij', 'hij', 'we',
+  'some', 'any', 'all', 'one', 'two', 'here', 'there', 'really', 'actually',
+  'kind', 'sort', 'way', 'thing', 'stuff', 'got', 'get', 'make', 'made',
+  // Dutch
+  'de', 'het', 'een', 'en', 'of', 'als', 'dan', 'was', 'waren', 'zijn',
+  'hebben', 'heeft', 'had', 'doe', 'doet', 'deed', 'ik', 'jij', 'hij',
   'wij', 'zij', 'mij', 'hem', 'haar', 'ons', 'hen', 'hun', 'mijn', 'jouw',
   'wat', 'hoe', 'wanneer', 'waar', 'wie', 'niet', 'geen', 'ja', 'ook', 'maar',
   'dus', 'toch', 'nog', 'even', 'heel', 'om', 'voor', 'met', 'op', 'aan',
   'naar', 'te', 'er', 'wel', 'daar', 'dit', 'deze', 'die', 'dat',
+  // Conversational filler — these triggered bad retrievals in testing
+  'oke', 'okee', 'zelf', 'tussendoor', 'korte', 'vraag', 'eens', 'even',
+  'goed', 'zien', 'zal', 'zou', 'mag', 'kan', 'moet', 'gaat', 'gaan', 'doen',
+  'nou', 'wel', 'werk', 'werken', 'maken', 'gemaakt', 'hebben', 'iets',
+  'sluit', 'resume', 'gesprek', 'checken', 'bericht', 'berichten',
 ]);
 
 function emptyOutput() {
@@ -99,12 +113,14 @@ SELECT
   substr(m.content, 1, ${fetchChars}) AS content,
   m.category AS category,
   m.created_at AS created_at,
-  m.source AS source
+  m.source AS source,
+  bm25(memories_fts) AS score
 FROM memories_fts
 JOIN memories m ON memories_fts.rowid = m.rowid
 WHERE memories_fts MATCH :q
   AND m.is_deleted = 0
   AND m.superseded_by_id IS NULL
+  AND bm25(memories_fts) < ${BM25_THRESHOLD}
 ORDER BY bm25(memories_fts)
 LIMIT ${MAX_RESULTS};
 `;
@@ -198,6 +214,8 @@ function formatMemories(rows) {
   if (!fs.existsSync(DB_PATH)) { process.stdout.write(emptyOutput()); return; }
 
   const keywords = extractKeywords(prompt);
+  // Weak-query guard: a single keyword is too fuzzy — injects noise.
+  if (keywords.length < MIN_KEYWORDS) { process.stdout.write(emptyOutput()); return; }
   const match = buildFtsMatch(keywords);
   if (!match) { process.stdout.write(emptyOutput()); return; }
 
