@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const logger = createLogger({ level: config.logLevel, format: config.logFormat });
   const metrics = createMetrics();
 
-  logger.info('startup', 'Loading neuromcp v0.16.6', {
+  logger.info('startup', 'Loading neuromcp v0.16.7', {
     dbPath: config.dbPath,
     embeddingProvider: config.embeddingProvider,
     defaultNamespace: config.defaultNamespace,

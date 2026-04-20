@@ -1,5 +1,5 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
-import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type Database from 'better-sqlite3';
 import type { VectorStore } from '../vectors/types.js';
@@ -11,8 +11,13 @@ import { searchMemory } from '../tools/search.js';
 import { storeMemory } from '../tools/store.js';
 import { eventBus } from './events.js';
 
-// Resolved once at startup, cached for the lifetime of the process.
-const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+// Resolved once at startup from the module's runtime location, not the
+// source path. tsup bundles http.ts into dist/chunk-*.js so `../package.json`
+// from import.meta.url resolves to the package root regardless of whether we
+// are running from source (tsx) or from compiled dist/.
+const pkg = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { version: string };
 
 export interface HttpTransportOptions {
   readonly port: number;

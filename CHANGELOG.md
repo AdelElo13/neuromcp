@@ -3,6 +3,39 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.7] — 2026-04-20
+
+**Critical regression fix.** Round-7 reviewer spotted a latent
+path-resolution bug that v0.16.5's `createRequire(…, '../../package.json')`
+was harbouring — tsup bundles `src/transport/http.ts` into a top-level
+`dist/chunk-*.js`, and `../../` from there walks above the project
+root. v0.16.6's hoist to module scope converted that from "lazy error
+on first /health hit" into "server refuses to start." Empirically
+confirmed by running `node dist/index.js`: the server crashed on
+startup with `Cannot find module '../../package.json'`.
+
+### Fixed
+
+- Switched from `createRequire(import.meta.url)('../../package.json')`
+  to `readFileSync(new URL('../package.json', import.meta.url), 'utf8')`.
+  The `new URL(..., import.meta.url)` approach resolves against the
+  runtime file location (tsup-compiled chunk under `dist/`), not the
+  source tree. Works from both `tsx` (source) and compiled `dist/`.
+- Server now starts cleanly with `NEUROMCP_HTTP_ENABLED=1`, and
+  `/health` returns the correct current version.
+
+### Reviewer credit
+
+- The round-7 typescript-reviewer called out exactly this latent path
+  bug, predicted the failure mode, and recommended the fix pattern.
+  Acknowledged in-file via code comment.
+
+### Verified
+
+- 276 / 276 tests pass
+- Server starts (previously failed on module resolution)
+- `/health` returns `{"status":"ok","version":"0.16.7"}` at runtime
+
 ## [0.16.6] — 2026-04-20
 
 Round-6 cleanup: hoist `createRequire` call out of the request handler.
