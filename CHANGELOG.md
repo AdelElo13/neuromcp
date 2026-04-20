@@ -3,6 +3,31 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.9] — 2026-04-20
+
+Round-8 nits from both reviewers hit the same code path:
+`readPackageVersion()` silently fell back to `'0.0.0-unknown'` on
+resolution failure, and the parsed version cast assumed a shape
+without narrowing. Both are fixed.
+
+### Fixed
+
+- **Loud fallback**. If neither `../package.json` nor `../../package.json`
+  resolves — or if the parsed file lacks a `version` field — the fallback
+  path now writes a warning to stderr listing each attempt and why it
+  failed. Mystery versions can no longer ship unnoticed.
+- **Type narrowing**. The parsed JSON is now typed `PackageShape` with
+  `version?: unknown` and narrowed at runtime (`typeof parsed.version ===
+  'string' && parsed.version.length > 0`) before being returned. A
+  malformed package.json returns the sentinel instead of propagating
+  `undefined` stringified.
+
+### Verified
+
+- 276 / 276 tests pass
+- Server starts, `/health` returns correct version, no stderr noise
+  under normal operation
+
 ## [0.16.8] — 2026-04-20
 
 Follow-up to v0.16.7: the path fix worked for compiled `dist/` but

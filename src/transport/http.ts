@@ -17,13 +17,27 @@ import { eventBus } from './events.js';
 // `../package.json` is correct for compiled runs. We try both and keep
 // whichever resolves. This keeps /health accurate in both modes without
 // a separate bundler plugin.
+interface PackageShape { version?: unknown }
+
 function readPackageVersion(): string {
+  const attempts: string[] = [];
   for (const rel of ['../package.json', '../../package.json']) {
     try {
       const raw = readFileSync(new URL(rel, import.meta.url), 'utf8');
-      return (JSON.parse(raw) as { version: string }).version;
-    } catch { /* try next candidate */ }
+      const parsed = JSON.parse(raw) as PackageShape;
+      if (typeof parsed.version === 'string' && parsed.version.length > 0) {
+        return parsed.version;
+      }
+      attempts.push(`${rel}: parsed but version field missing or empty`);
+    } catch (err) {
+      attempts.push(`${rel}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
+  // Loud fallback — something is wrong with the install layout. Stderr
+  // rather than silent so the mystery version cannot ship unnoticed.
+  process.stderr.write(
+    `[neuromcp] WARNING: could not resolve package.json version. Attempts: ${attempts.join('; ')}\n`,
+  );
   return '0.0.0-unknown';
 }
 const pkg = { version: readPackageVersion() };
