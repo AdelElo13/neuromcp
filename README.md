@@ -316,19 +316,37 @@ npx neuromcp-enable-consolidation
 
 **Change interval:** `npx neuromcp-enable-consolidation --interval 7200` (every 2 hours)
 
-### Auto-retrieve + wiki indexing
+**Hallucination guard (eval-loop).** Every consolidator output goes through a second Haiku audit before the wiki is touched. If any factual claim in the generated summary is not traceable to the raw sessions, the chunk goes to `~/.neuromcp/review-queue/` instead of the wiki. No hallucinated claims leak through.
+
+**Atomic facts with temporal supersession.** After a summary is approved, it is also distilled into short standalone facts and stored as `category='fact'` rows with `valid_from=today`. When a new fact is Jaccard-similar to an existing one in the same project, Haiku decides whether NEW supersedes OLD — if yes, the old row gets `superseded_by_id` and `valid_to` set. Retrieval defaults to current facts only (`superseded_by_id IS NULL`), so outdated conclusions never resurface.
+
+### Auto-retrieve + hybrid indexing
 
 Once the wiki has content, make it *searchable* so the `UserPromptSubmit` hook can surface relevant pages automatically (no more "LLM must remember to call `search`"):
 
 ```bash
-npx neuromcp-index-wiki            # index all wiki pages into memories_fts
-npx neuromcp-index-wiki --rebuild  # wipe wiki entries first, then reindex
-npx neuromcp-index-wiki --dry-run  # preview what would change
+npx neuromcp-index-wiki              # index wiki pages into memories_fts + memories_vec
+npx neuromcp-index-wiki --rebuild    # wipe wiki entries first, then reindex
+npx neuromcp-index-wiki --dry-run    # preview what would change
+npx neuromcp-index-wiki --no-embed   # FTS-only mode (no embedding provider needed)
+
+npx neuromcp-backfill-embeddings     # embed any memory still missing a vector
 ```
 
-The indexer splits each page on `##` section headers and stores every section as a deduplicated memory (`source='wiki'`, `category='wiki'`). The auto-retrieve hook then finds relevant sections at prompt time via FTS5 BM25 and injects them as `<neuromcp-recall>` context.
+The indexer splits each page on `##` section headers and stores every section as a deduplicated memory (`source='wiki'`, `category='wiki'`). Each section is both written to the FTS5 index *and* embedded via the configured provider (Ollama → OpenAI → ONNX) so vector search works too.
 
-The `neuromcp-auto-retrieve.js` hook is installed automatically by `neuromcp-init-wiki` and registered under `UserPromptSubmit` in Claude Code's `settings.json`. Re-run the indexer after large wiki updates (or schedule it — it's idempotent).
+At prompt time the `neuromcp-auto-retrieve.js` hook calls `neuromcp-query`, which runs FTS5 BM25 and sqlite-vec cosine search in parallel and fuses the rankings via **Reciprocal Rank Fusion** (k=60). The top-3 merged results are injected as `<neuromcp-recall>` context.
+
+The hook is installed automatically by `neuromcp-init-wiki` and registered under `UserPromptSubmit` in Claude Code's `settings.json`. Re-run the indexer after large wiki updates (or schedule it — it's idempotent).
+
+**Tuning:**
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `NEUROMCP_BM25_THRESHOLD` | `-1.0` | Stricter (more negative) = fewer weak keyword matches |
+| `NEUROMCP_QUERY_BIN` | auto-detect | Override the `neuromcp-query` binary path |
+| `NEUROMCP_NO_EMBED` | `0` | Set to `1` to force FTS-only indexing |
+| `NEUROMCP_CONTRADICTION_CHECK` | `1` | Set to `0` to skip Haiku supersession judgments |
 
 ## Memory Governance
 

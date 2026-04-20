@@ -43,7 +43,10 @@
     "neuromcp": "bin/neuromcp.mjs",
     "neuromcp-init-wiki": "bin/init-wiki.mjs",
     "neuromcp-enable-consolidation": "bin/enable-consolidation.mjs",
-    "neuromcp-index-wiki": "scripts/index-wiki.mjs"
+    "neuromcp-index-wiki": "scripts/index-wiki.mjs",
+    "neuromcp-backfill-embeddings": "scripts/backfill-embeddings.mjs",
+    "neuromcp-query": "bin/query.mjs",
+    "neuromcp-embed": "bin/embed.mjs"
   },
   "files": [
     "dist",

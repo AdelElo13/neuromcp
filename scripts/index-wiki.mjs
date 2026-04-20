@@ -19,10 +19,14 @@
  */
 
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const HOME = homedir();
 const DB_PATH = process.env.NEUROMCP_DB || join(HOME, '.neuromcp', 'memory.db');
@@ -31,6 +35,7 @@ const WIKI_DIR = process.env.NEUROMCP_WIKI || join(HOME, '.neuromcp', 'wiki');
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
 const REBUILD = args.includes('--rebuild');
+const NO_EMBED = args.includes('--no-embed') || process.env.NEUROMCP_NO_EMBED === '1';
 
 const MIN_CHUNK_CHARS = 40;     // skip trivial chunks
 const MAX_CHUNK_CHARS = 4000;   // hard cap; FTS doesn't care but memories.content gets long
@@ -112,6 +117,38 @@ if (!existsSync(WIKI_DIR)) {
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
+// Optionally load the embedding provider. If unavailable, we still index
+// (FTS-only), but we warn so the user knows vector retrieval won't cover
+// what this run writes.
+async function loadEmbedder() {
+  if (NO_EMBED) return null;
+  const distRoot = join(__dirname, '..', 'dist');
+  if (!existsSync(distRoot)) {
+    warn('dist/ not found — FTS-only indexing (vector search will miss new chunks)');
+    return null;
+  }
+  try {
+    const [{ createEmbeddingProvider }, { loadConfig }, { createLogger }] = await Promise.all([
+      import(join(distRoot, 'embeddings', 'factory.js')),
+      import(join(distRoot, 'config.js')),
+      import(join(distRoot, 'observability', 'logger.js')),
+    ]);
+    const config = loadConfig();
+    const logger = createLogger(config);
+    return await createEmbeddingProvider(config, logger);
+  } catch (err) {
+    warn(`embedder init failed: ${err?.message || err}`);
+    return null;
+  }
+}
+
+const embedder = await loadEmbedder();
+if (embedder) {
+  try { sqliteVec.load(db); }
+  catch (err) { warn(`sqlite-vec load failed: ${err.message}`); }
+  ok(`embedder ready: ${embedder.name} (dim=${embedder.dimensions})`);
+}
+
 if (REBUILD && !DRY_RUN) {
   // Delete (hard) all wiki-source rows to start clean.
   const before = db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE source = 'wiki'`).get().n;
@@ -132,22 +169,46 @@ const existingHashes = new Set(
 const insertMem = db.prepare(`
   INSERT INTO memories (
     id, content_hash, content, namespace, category, source, source_trust,
-    project_id, tags, importance, metadata
-  ) VALUES (?, ?, ?, 'default', 'wiki', 'wiki', 'high', ?, '[]', 0.6, ?)
+    project_id, tags, importance, metadata, embedding_model, embedding_dim
+  ) VALUES (?, ?, ?, 'default', 'wiki', 'wiki', 'high', ?, '[]', 0.6, ?, ?, ?)
 `);
 const insertFts = db.prepare(`
   INSERT INTO memories_fts (rowid, content, summary, tags, category)
   VALUES (?, ?, NULL, ?, ?)
 `);
+const deleteVec = db.prepare(`DELETE FROM memories_vec WHERE id = ?`);
+const insertVec = db.prepare(`INSERT INTO memories_vec (id, embedding) VALUES (?, ?)`);
 const getRowid = db.prepare(`SELECT rowid FROM memories WHERE id = ?`);
+
+// Embedding happens BEFORE the transaction (provider calls are async + I/O).
+// We then run the writes in a single sync transaction for durability.
+async function embedAll(rows) {
+  if (!embedder) return rows.map(r => ({ ...r, vector: null, dim: 0, model: '' }));
+  const out = [];
+  for (const r of rows) {
+    try {
+      const vec = await embedder.embed(r.content);
+      out.push({ ...r, vector: vec, dim: vec.length, model: embedder.name });
+    } catch (err) {
+      warn(`embed failed for ${r.project || 'home'}: ${err?.message || err}`);
+      out.push({ ...r, vector: null, dim: 0, model: '' });
+    }
+  }
+  return out;
+}
 
 const txn = db.transaction((rows) => {
   let added = 0, skipped = 0;
   for (const r of rows) {
     if (existingHashes.has(r.hash)) { skipped++; continue; }
-    insertMem.run(r.id, r.hash, r.content, r.project, r.metadata);
+    insertMem.run(r.id, r.hash, r.content, r.project, r.metadata, r.model || '', r.dim || 0);
     const { rowid } = getRowid.get(r.id);
     insertFts.run(rowid, r.content, '[]', 'wiki');
+    if (r.vector) {
+      const buf = Buffer.from(Float32Array.from(r.vector).buffer);
+      deleteVec.run(r.id);
+      insertVec.run(r.id, buf);
+    }
     existingHashes.add(r.hash);
     added++;
   }
@@ -184,6 +245,14 @@ if (DRY_RUN) {
   process.exit(0);
 }
 
-const { added, skipped } = txn(toInsert);
-ok(`inserted ${added} new chunks, skipped ${skipped} unchanged`);
+// Only embed rows that will actually be inserted (dedup-aware) — saves
+// both time and Ollama load when re-running after small edits.
+const fresh = toInsert.filter(r => !existingHashes.has(r.hash));
+const preExistingCount = toInsert.length - fresh.length;
+const withVectors = await embedAll(fresh);
+// Include pre-existing rows so the txn count reports accurate skipped total.
+const combined = [...withVectors, ...toInsert.filter(r => existingHashes.has(r.hash))];
+const { added, skipped } = txn(combined);
+const vectorised = withVectors.filter(r => r.vector).length;
+ok(`inserted ${added} new chunks (${vectorised} with embeddings), skipped ${skipped} unchanged`);
 db.close();

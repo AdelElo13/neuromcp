@@ -335,6 +335,27 @@ or "no" if they are compatible parallel observations. One word."""
     return old_id if verdict.startswith("yes") else None
 
 
+def _embed_fact(memory_id: str, content: str) -> None:
+    """Best-effort: call `neuromcp-embed` so the fact is also vector-searchable.
+
+    Tries the maintainer's dev path first, then falls back to `npx`. Any
+    failure is swallowed — FTS5 still works without the embedding.
+    """
+    dev_script = HOME / "projects" / "neuromcp" / "bin" / "embed.mjs"
+    payload = json.dumps({"id": memory_id, "text": content})
+    attempts: list[list[str]] = []
+    if dev_script.exists():
+        attempts.append(["node", str(dev_script)])
+    attempts.append(["npx", "--yes", "-p", "neuromcp", "neuromcp-embed"])
+    for cmd in attempts:
+        try:
+            r = subprocess.run(cmd, input=payload, capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+
 def store_fact(
     db: sqlite3.Connection,
     fact: dict,
@@ -384,7 +405,7 @@ def store_fact(
 
 
 def persist_facts(facts: list[dict], project: str, batch: list[Path]) -> int:
-    """Write facts to memory.db. Returns number of new inserts."""
+    """Write facts to memory.db + embed them for hybrid retrieval. Returns insert count."""
     if not facts or not MEMORY_DB.exists():
         return 0
     source = batch[-1].name if batch else ""
@@ -392,19 +413,31 @@ def persist_facts(facts: list[dict], project: str, batch: list[Path]) -> int:
         db = sqlite3.connect(str(MEMORY_DB))
     except sqlite3.Error:
         return 0
-    inserted = 0
+    inserted: list[tuple[str, str]] = []
     try:
         db.execute("BEGIN")
         for fact in facts:
             if store_fact(db, fact, project, source):
-                inserted += 1
+                # Look up the row we just inserted to get its id for embedding.
+                cur = db.execute(
+                    "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
+                    (_content_hash(fact["content"]),),
+                )
+                row = cur.fetchone()
+                if row:
+                    inserted.append((row[0], fact["content"]))
         db.execute("COMMIT")
     except sqlite3.Error as exc:
         db.execute("ROLLBACK")
         print(f"    WARN: fact persist failed: {exc}")
     finally:
         db.close()
-    return inserted
+    # Embeddings happen outside the transaction — they hit a separate DB
+    # connection (the bin tool opens its own) and we don't want the txn
+    # held open during async Ollama calls.
+    for memory_id, content in inserted:
+        _embed_fact(memory_id, content)
+    return len(inserted)
 
 
 def consolidate_batch(
@@ -577,27 +610,28 @@ def main() -> None:
 
 
 def trigger_wiki_index() -> None:
-    """Best-effort: refresh the FTS5 index so auto-retrieve finds today's edits.
+    """Best-effort: refresh the FTS5 + vector index so auto-retrieve finds today's edits.
 
-    Falls back silently if node / the indexer isn't available — consolidation
-    itself already succeeded and we don't want to raise a second error path.
+    Resolution order:
+      1. `npx -p neuromcp neuromcp-index-wiki` — works for any install method
+      2. Direct dev path `~/projects/neuromcp/scripts/index-wiki.mjs` — for the
+         maintainer's own setup where the package is run from source
+
+    Either way we only shell out — failures are silent, consolidation already
+    succeeded and the indexer is an optimisation, not a correctness gate.
     """
-    candidates = [
-        HOME / ".neuromcp" / "scripts" / "index-wiki.mjs",  # installed by enable-consolidation
-    ]
-    script = next((p for p in candidates if p.exists()), None)
-    if script is None:
-        return
-    try:
-        subprocess.run(
-            ["node", str(script)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass  # node not on PATH or indexer hung — ignore
+    dev_script = HOME / "projects" / "neuromcp" / "scripts" / "index-wiki.mjs"
+    attempts: list[list[str]] = []
+    if dev_script.exists():
+        attempts.append(["node", str(dev_script)])
+    attempts.append(["npx", "--yes", "-p", "neuromcp", "neuromcp-index-wiki"])
+    for cmd in attempts:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+            if r.returncode == 0:
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
 
 
 if __name__ == "__main__":

@@ -85,11 +85,11 @@ if (!claude) fail('`claude` CLI not found. Install Claude Code: https://claude.c
 ok(`claude CLI: ${claude}`);
 
 // --- copy scripts into $HOME/.neuromcp/scripts/ ---
+// index-wiki.mjs is NOT copied here — it needs its sibling node_modules
+// (better-sqlite3, sqlite-vec) which only exist inside the neuromcp package.
+// The consolidator triggers it via `npx neuromcp-index-wiki` instead.
 mkdirSync(SCRIPTS_DIR, { recursive: true });
-// index-wiki.mjs is copied alongside so consolidate-sessions.py can auto-
-// refresh the FTS index after each run. Without it consolidation would
-// still work but auto-retrieve would lag until the next manual reindex.
-for (const name of ['consolidate-sessions.py', 'run-consolidation.sh', 'index-wiki.mjs']) {
+for (const name of ['consolidate-sessions.py', 'run-consolidation.sh']) {
   const src = join(REPO_SCRIPTS, name);
   const dst = join(SCRIPTS_DIR, name);
   if (!existsSync(src)) fail(`missing source: ${src}`);
