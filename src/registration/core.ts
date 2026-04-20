@@ -11,6 +11,7 @@ import { consolidate } from '../tools/consolidate.js';
 import { memoryStats } from '../tools/stats.js';
 import { exportMemories, importMemories } from '../tools/admin.js';
 import { backfillEmbeddings } from '../tools/backfill.js';
+import { logRetrieval, citeMemories, usefulnessStats } from '../tools/attribution.js';
 
 export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
   const { db, vecStore, embedder, config, logger, metrics } = deps;
@@ -58,7 +59,21 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
     },
   }, async (args) => {
     const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });
-    return textResult(results);
+    // v0.16.0: auto-log retrieval so future searches can learn from critic feedback.
+    // Attach event_id to response so the agent can later call cite_memories without tracking the mapping.
+    try {
+      const { event_id } = logRetrieval(
+        {
+          query: args.query,
+          namespace: args.namespace,
+          retrieved_ids: (results as Array<{ id: string }>).map((r) => r.id),
+        },
+        { db, logger }
+      );
+      return textResult({ results, retrieval_event_id: event_id });
+    } catch {
+      return textResult(results);
+    }
   });
 
   server.registerTool('recall_memory', {

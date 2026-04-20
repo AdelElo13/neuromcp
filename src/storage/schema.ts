@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -221,6 +221,39 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_verbatim_agent_id ON verbatim(agent_id);
   CREATE INDEX IF NOT EXISTS idx_verbatim_created_at ON verbatim(created_at);
   CREATE INDEX IF NOT EXISTS idx_verbatim_content_hash ON verbatim(content_hash);
+
+  -- v9: retrieval attribution + usefulness prior
+  CREATE TABLE IF NOT EXISTS retrieval_events (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    query_hash TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    retrieved_ids TEXT NOT NULL DEFAULT '[]',
+    cited_ids TEXT NOT NULL DEFAULT '[]',
+    outcome TEXT,
+    critic_reason TEXT,
+    model TEXT,
+    critiqued_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_retrieval_events_namespace ON retrieval_events(namespace);
+  CREATE INDEX IF NOT EXISTS idx_retrieval_events_created ON retrieval_events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_retrieval_events_outcome ON retrieval_events(outcome);
+  CREATE INDEX IF NOT EXISTS idx_retrieval_events_query_hash ON retrieval_events(query_hash);
+
+  CREATE TABLE IF NOT EXISTS memory_usefulness (
+    memory_id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    helpful_count INTEGER NOT NULL DEFAULT 0,
+    neutral_count INTEGER NOT NULL DEFAULT 0,
+    harmful_count INTEGER NOT NULL DEFAULT 0,
+    total_observed INTEGER NOT NULL DEFAULT 0,
+    usefulness_score REAL NOT NULL DEFAULT 0.5,
+    last_updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    decay_floor REAL NOT NULL DEFAULT 0.5
+  );
+  CREATE INDEX IF NOT EXISTS idx_memory_usefulness_namespace ON memory_usefulness(namespace);
+  CREATE INDEX IF NOT EXISTS idx_memory_usefulness_score ON memory_usefulness(usefulness_score);
 `;
 
 function ftsTableExists(db: Database): boolean {

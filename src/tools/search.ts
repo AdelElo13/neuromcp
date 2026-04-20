@@ -168,6 +168,23 @@ export async function searchMemory(
     logger.warn('search', 'Attention scoring failed, proceeding without');
   }
 
+  // Step 6.6: Usefulness prior (v0.16.0). Multiply score by observed
+  // usefulness from past retrievals. Memories with no signal default to
+  // 0.5 so this is a tiebreaker until critic data accumulates. Factor
+  // centered at 1.0 — a score of 0.75 yields a 25% lift, 0.25 yields a
+  // 25% penalty.
+  try {
+    const { getUsefulnessScores } = await import('./attribution.js');
+    const usefulness = getUsefulnessScores(db, scored.map((s) => s.id));
+    for (const s of scored) {
+      const u = usefulness.get(s.id) ?? 0.5;
+      const factor = 0.5 + u; // u=0.5 → 1.0, u=1.0 → 1.5, u=0.0 → 0.5
+      s.score *= factor;
+    }
+  } catch {
+    logger.warn('search', 'Usefulness prior failed, proceeding without');
+  }
+
   scored.sort((a, b) => b.score - a.score);
 
   // Step 7: Fetch full rows, apply post-filters

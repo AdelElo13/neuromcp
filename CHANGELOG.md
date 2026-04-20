@@ -3,6 +3,59 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.0] — 2026-04-20
+
+### Added — Retrieval attribution + critic-scored usefulness
+
+Codex's brutal critique of speculative reflection: before synthesizing
+insights, learn which memories actually help. v0.16.0 implements the
+foundation.
+
+- **New table `retrieval_events`** — every `search_memory` call logs the
+  query + retrieved IDs + optional cited IDs + outcome label
+  (helpful/neutral/harmful). Timestamped, queryable, auditable.
+- **New table `memory_usefulness`** — per-memory running counts of
+  helpful vs harmful citations, with a Laplace-smoothed `usefulness_score`
+  in [0, 1]. Default 0.5 at zero observations so brand-new memories
+  participate neutrally.
+- **`log_retrieval` tool** — MCP tool for recording a retrieval event
+  manually. Usually called implicitly (see auto-log below).
+- **`cite_memories` tool** — attach a late verdict to a previously-logged
+  event. Use when the agent answers first and a critic pass scores the
+  answer afterward.
+- **`usefulness_stats` tool** — list memories ranked by observed
+  usefulness. Inspect what the agent actually leans on.
+- **Auto-log in `search_memory`** — every hybrid search now records a
+  `retrieval_event` automatically and returns `retrieval_event_id`
+  alongside the results. Zero-config integration for agent loops.
+- **Usefulness prior in search ranker** — the hybrid score is multiplied
+  by `0.5 + usefulness_score`. A memory with score 1.0 gets a 50% lift;
+  one with 0.0 takes a 50% penalty. Unobserved memories are unchanged.
+- **`decayUsefulness` helper** — linear half-life decay toward
+  `decay_floor` (0.5 by default). Prevents permanent lock-in from
+  ancient verdicts.
+
+### Added — Verbatim session archive backfill
+
+- **`scripts/backfill-verbatim.mjs`** — imports all raw session
+  transcripts from `~/.neuromcp/raw/sessions/` into the `verbatim`
+  FTS5 table. Idempotent via SHA-256 content hash. Enables literal
+  recall across the entire session history.
+
+### Migration
+
+- Schema v8 → v9: adds `retrieval_events` + `memory_usefulness`
+  tables. Existing DBs auto-migrate on startup with pre-migration
+  backup at `memory.db.backup-v8`.
+
+### Verified
+
+- 271 / 271 tests pass (was 265; 6 new attribution tests)
+- MCP server reports `v0.16.0` on startup; exposes 41 tools (was 38)
+- Real-world smoke test: `search_memory` on user's 932-session corpus
+  returns results + `retrieval_event_id`, event persisted to DB
+- Auto-log latency: <1 ms overhead per search call
+
 ## [0.15.0] — 2026-04-20
 
 ### Added

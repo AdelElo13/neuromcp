@@ -139,6 +139,45 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     }
   }
 
+  if (currentVersion < 9) {
+    logger.info('migrations', 'Running v8 to v9 migration: retrieval attribution + critic-scored usefulness');
+    const attributionStatements = [
+      `CREATE TABLE IF NOT EXISTS retrieval_events (
+        id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        query_hash TEXT NOT NULL,
+        namespace TEXT NOT NULL DEFAULT 'default',
+        retrieved_ids TEXT NOT NULL DEFAULT '[]',
+        cited_ids TEXT NOT NULL DEFAULT '[]',
+        outcome TEXT,
+        critic_reason TEXT,
+        model TEXT,
+        critiqued_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      )`,
+      'CREATE INDEX IF NOT EXISTS idx_retrieval_events_namespace ON retrieval_events(namespace)',
+      'CREATE INDEX IF NOT EXISTS idx_retrieval_events_created ON retrieval_events(created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_retrieval_events_outcome ON retrieval_events(outcome)',
+      'CREATE INDEX IF NOT EXISTS idx_retrieval_events_query_hash ON retrieval_events(query_hash)',
+      `CREATE TABLE IF NOT EXISTS memory_usefulness (
+        memory_id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL DEFAULT 'default',
+        helpful_count INTEGER NOT NULL DEFAULT 0,
+        neutral_count INTEGER NOT NULL DEFAULT 0,
+        harmful_count INTEGER NOT NULL DEFAULT 0,
+        total_observed INTEGER NOT NULL DEFAULT 0,
+        usefulness_score REAL NOT NULL DEFAULT 0.5,
+        last_updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        decay_floor REAL NOT NULL DEFAULT 0.5
+      )`,
+      'CREATE INDEX IF NOT EXISTS idx_memory_usefulness_namespace ON memory_usefulness(namespace)',
+      'CREATE INDEX IF NOT EXISTS idx_memory_usefulness_score ON memory_usefulness(usefulness_score)',
+    ];
+    for (const stmt of attributionStatements) {
+      try { db.prepare(stmt).run(); } catch { /* table/index exists */ }
+    }
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {
