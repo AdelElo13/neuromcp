@@ -387,22 +387,30 @@ function logMsg(msg) {
 // ─── Main ──────────────────────────────────────────────────────────
 
 function main() {
-  const hookEvent = process.env.CLAUDE_HOOK_EVENT || '';
-  if (hookEvent !== 'Stop' && hookEvent !== 'SessionEnd') {
-    return;
-  }
-
   // Pass through stdin for hook chain
   let raw = '';
   try { raw = fs.readFileSync(0, 'utf8'); } catch {}
   process.stdout.write(raw);
 
-  // Parse stdin to get transcript_path
+  // Parse stdin to get transcript_path + hook_event_name.
+  // Claude Code passes the event via stdin JSON (hook_event_name),
+  // not via CLAUDE_HOOK_EVENT env var. We accept either to stay
+  // compatible with older hook runtimes.
   let transcriptPath = null;
+  let hookEvent = process.env.CLAUDE_HOOK_EVENT || '';
   try {
     const parsed = JSON.parse(raw);
     transcriptPath = parsed.transcript_path || null;
+    hookEvent = hookEvent || parsed.hook_event_name || parsed.hookEventName || '';
   } catch {}
+
+  // Only react to session-terminating events. If we cannot tell (no env,
+  // no field), fall back to transcript presence as a proxy — the hook is
+  // wired to Stop in settings.json, so this is safe.
+  const isStopEvent = hookEvent === 'Stop' || hookEvent === 'SessionEnd' || (!hookEvent && !!transcriptPath);
+  if (!isStopEvent) {
+    return;
+  }
 
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
     logMsg('No transcript found');

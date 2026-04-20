@@ -84,6 +84,29 @@ Inspired by [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914
 | **Session end** | Hook writes raw session log + git auto-commits all wiki changes |
 | **Crash** | Checkpoint every 5 tool calls to file. Git history for rollback. |
 
+### Self-healing consolidation pipeline (v0.15.0+)
+
+Every ~4h the launchd agent runs `run-consolidation.sh`, which
+orchestrates four steps end-to-end:
+
+1. **`consolidate-sessions.py`** — batches raw sessions per project,
+   asks Claude for a factual summary, and fact-checks it against the
+   raw sources. When the auditor flags specific unsupported claims the
+   consolidator now **auto-strips those lines and re-audits once** — so
+   one speculative sentence no longer kills a whole batch.
+2. **`rescue-rejected.py`** — any batch that still fails is parsed,
+   the unsupported claims are removed, and the cleaned summary is
+   appended to its wiki page. Pure text surgery, no LLM calls.
+3. **`entity-linker.py`** — cross-links every page: a bare-word mention
+   of another registered entity (people/, projects/, systems/) is added
+   to the page's `related:` frontmatter. Makes the wiki act like a
+   graph without a separate graph database.
+4. **`rebuild-index.py`** — regenerates `index.md` and per-category
+   `-index.md` files. Categories over 10 pages are auto-split so the
+   session-start router stays compact as the wiki scales.
+
+The pipeline is idempotent — safe to re-run at any time.
+
 ### What the LLM knows at session start
 
 ```
