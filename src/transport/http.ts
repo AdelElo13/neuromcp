@@ -11,6 +11,9 @@ import { searchMemory } from '../tools/search.js';
 import { storeMemory } from '../tools/store.js';
 import { eventBus } from './events.js';
 
+// Resolved once at startup, cached for the lifetime of the process.
+const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+
 export interface HttpTransportOptions {
   readonly port: number;
   readonly host: string;
@@ -48,7 +51,6 @@ export async function startHttpTransport(
     // Health endpoint
     if (url.pathname === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
       res.end(JSON.stringify({ status: 'ok', version: pkg.version }));
       return;
     }

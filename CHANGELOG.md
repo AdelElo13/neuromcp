@@ -3,6 +3,30 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.16.6] — 2026-04-20
+
+Round-6 cleanup: hoist `createRequire` call out of the request handler.
+
+### Changed
+
+- `src/transport/http.ts` resolves the package version once at module
+  load time instead of on every `/health` request. Correctness was
+  unchanged (Node caches require results), but the intent is clearer
+  and there's no theoretical overhead under high-frequency probes.
+
+### Verified
+
+- 276 / 276 tests pass
+- Lint + typecheck clean
+
+### Round-6 review verdicts
+
+- architect: APPROVE
+- typescript-reviewer: APPROVE-WITH-NIT (hoist createRequire) — now fixed
+
+This puts the v0.16.x line at full APPROVE from both reviewers
+pending the next round.
+
 ## [0.16.5] — 2026-04-20
 
 Round-5 cleanup: dynamic version lookup for the HTTP health endpoint.
