@@ -169,20 +169,29 @@ export async function searchMemory(
     logger.warn('search', 'Attention scoring failed, proceeding without');
   }
 
-  // Step 6.6: Usefulness prior (v0.16.0) with Thompson-sampling exploration
-  // (v0.17.0). Draw a Beta(helpful+1, harmful+1) sample per memory instead
-  // of using the deterministic mean. Unobserved memories sample from
-  // Beta(1,1) = Uniform[0,1], so on any given query they get a random
-  // factor in [0.5, 1.5] rather than a flat 1.0 — giving them a real
-  // chance to win against incumbents. Rich-get-richer feedback loops
-  // are broken because a memory with 1 helpful hit can still lose to a
-  // freshly-retrieved peer on a lucky draw.
+  // Step 6.6: Usefulness prior (v0.16.0) with gated Thompson-sampling
+  // exploration (v0.17.1). Only sample from Beta(helpful+1, harmful+1) when
+  // we have real observations (total >= EXPLORATION_THRESHOLD). Below that,
+  // apply a neutral factor of 1.0 so unobserved memories are neither helped
+  // nor hurt by randomness. This preserves MRR on fresh corpora while still
+  // breaking rich-get-richer once critic signal starts accumulating.
+  //
+  // v0.17.0 sampled even for total=0 (Beta(1,1) = Uniform) which made the
+  // factor range [0.5, 1.5] apply to EVERY candidate — tanking MRR by
+  // ~3% on oracle splits because rank-1 answers lost coin flips.
+  const EXPLORATION_THRESHOLD = 3;
+  const FACTOR_RANGE = 0.5; // factor ∈ [1 - FACTOR_RANGE/2, 1 + FACTOR_RANGE/2]
   try {
     const counts = getUsefulnessCounts(db, scored.map((s) => s.id));
     for (const s of scored) {
       const c = counts.get(s.id);
-      const u = c ? sampleUsefulness(c.helpful, c.harmful) : sampleUsefulness(0, 0);
-      const factor = 0.5 + u;
+      const total = (c?.helpful ?? 0) + (c?.harmful ?? 0);
+      if (!c || total < EXPLORATION_THRESHOLD) {
+        // No signal → neutral factor, no Thompson noise.
+        continue;
+      }
+      const u = sampleUsefulness(c.helpful, c.harmful);
+      const factor = 1 - FACTOR_RANGE / 2 + u * FACTOR_RANGE;
       s.score *= factor;
     }
   } catch {

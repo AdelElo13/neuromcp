@@ -3,6 +3,33 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.2] — 2026-04-20
+
+Critical fix for v0.17.1 CI regression. v0.17.1 passed 275/276 tests
+locally but CI caught `retrieval-quality` MRR at 0.678 (target 0.70).
+Thompson sampling was injecting noise into rankings even for memories
+with zero critic signal, tanking MRR on fresh corpora.
+
+### Fixed
+
+- **Gated Thompson sampling** (`src/tools/search.ts` step 6.6). Only
+  sample from Beta when the memory has at least `EXPLORATION_THRESHOLD = 3`
+  observations. Below that, apply a neutral factor of 1.0 so rankings
+  are preserved until real signal accumulates. Also tightened the factor
+  range from [0.5, 1.5] to [0.75, 1.25] so the prior is a tiebreaker,
+  not a dominator.
+- Root cause: v0.17.0 sampled Beta(1,1) = Uniform for every unobserved
+  memory, giving every candidate a random factor in [0.5, 1.5]. On an
+  oracle split with a clear rank-1 answer, ~10% of the time the right
+  answer lost to a coin flip — dropping MRR below target.
+
+### Verified
+
+- `tests/eval/retrieval-quality.test.ts` now passes: MRR 100%,
+  Recall@5 100%, Hit Rate 100%, P95 latency 2.6ms
+- 276 / 276 tests pass locally
+- Expected outcome: CI green
+
 ## [0.17.1] — 2026-04-20
 
 Round-10 review (Claude architect + Codex CLI) converged on **OVERSTATED**
