@@ -15,6 +15,7 @@
  * Usage:
  *   npx neuromcp-enable-consolidation                     # default 4h interval
  *   npx neuromcp-enable-consolidation --interval 14400    # custom seconds
+ *   npx neuromcp-enable-consolidation --dry-run           # preview, no side effects
  *   npx neuromcp-enable-consolidation --uninstall         # remove launchd agent
  */
 
@@ -34,6 +35,7 @@ const PLIST_TARGET = join(HOME, 'Library', 'LaunchAgents', 'com.neuromcp.consoli
 
 const args = process.argv.slice(2);
 const uninstall = args.includes('--uninstall');
+const dryRun = args.includes('--dry-run');
 const intervalIdx = args.indexOf('--interval');
 const DEFAULT_INTERVAL = 14400;   // 4h
 const MIN_INTERVAL = 300;         // 5 min — below this the audit cost stops being sensible
@@ -101,6 +103,13 @@ ok(`claude CLI: ${claude}`);
 // index-wiki.mjs is NOT copied here — it needs its sibling node_modules
 // (better-sqlite3, sqlite-vec) which only exist inside the neuromcp package.
 // The consolidator triggers it via `npx neuromcp-index-wiki` instead.
+if (dryRun) {
+  info('[DRY RUN] would copy scripts + render plist + launchctl bootstrap — no changes made.');
+  info(`        SCRIPTS_DIR = ${SCRIPTS_DIR}`);
+  info(`        PLIST_TARGET = ${PLIST_TARGET}`);
+  info(`        interval = ${intervalSeconds}s (~${Math.round(intervalSeconds / 3600)}h)`);
+  process.exit(0);
+}
 mkdirSync(SCRIPTS_DIR, { recursive: true });
 for (const name of ['consolidate-sessions.py', 'run-consolidation.sh']) {
   const src = join(REPO_SCRIPTS, name);

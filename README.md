@@ -347,6 +347,13 @@ The hook is installed automatically by `neuromcp-init-wiki` and registered under
 | `NEUROMCP_QUERY_BIN` | auto-detect | Override the `neuromcp-query` binary path |
 | `NEUROMCP_NO_EMBED` | `0` | Set to `1` to force FTS-only indexing |
 | `NEUROMCP_CONTRADICTION_CHECK` | `1` | Set to `0` to skip Haiku supersession judgments |
+| `NEUROMCP_AUDIT_FAIL_OPEN` | `0` | Set to `1` to bypass the consolidator audit on infrastructure failure (default is fail-CLOSED) |
+
+### Known upstream issues
+
+**`memories_vec` does not reclaim space after DELETE** — [sqlite-vec #54](https://github.com/asg017/sqlite-vec/issues/54) / [#265](https://github.com/asg017/sqlite-vec/issues/265). When you re-index after editing wiki sections, the old vector rows are marked deleted but their storage stays. The database file grows monotonically until you run `npx neuromcp-index-wiki --rebuild`, which drops and re-creates the vector rows. Run a rebuild every few weeks if you edit the wiki heavily.
+
+**`claude` CLI streaming hangs from non-TTY subprocesses on macOS** — if you script interactions with `claude -p` from another process (e.g. scheduled jobs), pipe it through `script -q /dev/null` to allocate a pseudo-TTY. Without that the stdout buffer never flushes. We work around this inside the consolidator where needed.
 
 ## Memory Governance
 
