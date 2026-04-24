@@ -9,6 +9,7 @@ import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import { searchMemory } from '../tools/search.js';
 import { storeMemory } from '../tools/store.js';
+import { storeMemoryBatch } from '../tools/store-batch.js';
 import { eventBus } from './events.js';
 
 // Resolved once at startup from the module's runtime location. The source
@@ -83,11 +84,49 @@ export async function startHttpTransport(
       return;
     }
 
-    // Search API — lightweight endpoint for hooks / auto-context injection
+    // Search API — lightweight endpoint for hooks / auto-context injection.
+    // chrono=1 bypasses hybrid ranking and returns the namespace's memories in
+    // chronological order (oldest first). Used by RetainDB-style full-dump
+    // strategies on benchmarks like LongMemEval where the LLM does the
+    // reasoning over the whole memory rather than over a top-k slice.
     if (url.pathname === '/api/search' && req.method === 'GET' && deps) {
       const query = url.searchParams.get('q') ?? '';
       const namespace = url.searchParams.get('namespace') ?? deps.config.defaultNamespace;
-      const limit = Math.min(20, parseInt(url.searchParams.get('limit') ?? '5', 10));
+      // Cap raised from 20 → 500 so chronological-dump callers can pull a full
+      // user history. Hybrid callers still default to 5 if unspecified.
+      const limit = Math.min(500, parseInt(url.searchParams.get('limit') ?? '5', 10));
+      const chrono = url.searchParams.get('chrono') === '1';
+
+      if (chrono) {
+        try {
+          const rows = deps.db
+            .prepare(
+              `SELECT id, content, category, importance
+                 FROM memories
+                WHERE namespace = ?
+                  AND is_deleted = 0
+                ORDER BY created_at ASC
+                LIMIT ?`,
+            )
+            .all(namespace, limit) as Array<{
+              id: string;
+              content: string;
+              category: string | null;
+              importance: number | null;
+            }>;
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({
+            results: rows.map(r => ({ ...r, score: 1 })),
+            count: rows.length,
+            mode: 'chrono',
+          }));
+        } catch (err: unknown) {
+          logger.warn('http', 'Chrono search failed', { error: err instanceof Error ? err.message : String(err) });
+          res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ error: 'chrono search failed' }));
+        }
+        return;
+      }
 
       if (!query) {
         res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -95,9 +134,16 @@ export async function startHttpTransport(
         return;
       }
 
+      // Temporal filters — forward optional after/before/valid_at if present.
+      // These are the time-scoping filters searchMemory already supports on
+      // the library side; /api/search just wasn't plumbing them through.
+      const after = url.searchParams.get('after') ?? undefined;
+      const before = url.searchParams.get('before') ?? undefined;
+      const validAt = url.searchParams.get('valid_at') ?? undefined;
+
       try {
         const results = await searchMemory(
-          { query, namespace, limit, hybrid: true },
+          { query, namespace, limit, hybrid: true, after, before, valid_at: validAt },
           deps,
         );
 
@@ -140,6 +186,34 @@ export async function startHttpTransport(
           logger.warn('http', 'Store API failed', { error: err instanceof Error ? err.message : String(err) });
           res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
           res.end(JSON.stringify({ error: 'store failed' }));
+        }
+      });
+      return;
+    }
+
+    // Batch store API — fast-path for bulk ingest (benchmarks, migrations).
+    // Skips dedup, contradiction, claim extraction. Use /api/store for
+    // production single-doc writes with all safety machinery.
+    if (url.pathname === '/api/store-batch' && req.method === 'POST' && deps) {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', async () => {
+        try {
+          const input = JSON.parse(body);
+          if (!Array.isArray(input.items)) {
+            res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({ error: 'items (array) required' }));
+            return;
+          }
+          const result = await storeMemoryBatch(input.items, deps);
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify(result));
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const stack = err instanceof Error ? err.stack : undefined;
+          logger.warn('http', 'Batch store API failed', { error: msg, stack });
+          res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify({ error: 'batch store failed', detail: msg }));
         }
       });
       return;

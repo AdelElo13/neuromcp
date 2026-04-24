@@ -99,6 +99,29 @@ export function searchEntities(
   namespace: string,
   limit: number = 20,
 ): readonly Entity[] {
+  // First try: token-wise lookup. Extract capitalized candidates from the
+  // query and look up each exactly. This is how LongMemEval-style queries
+  // hit entities — "What did Rachel tell me about Denver?" should match
+  // entities named "Rachel" and "Denver", not the whole query string.
+  // Falls back to the old LIKE-match if no capitalized tokens found (for
+  // queries like "what's my favorite color").
+  const tokens = extractQueryCandidateTokens(query);
+  if (tokens.length > 0) {
+    const placeholders = tokens.map(() => '?').join(', ');
+    const rows = db
+      .prepare(
+        `SELECT * FROM entities
+         WHERE is_deleted = 0
+           AND (namespace = ? OR ? = '*')
+           AND LOWER(name) IN (${placeholders})
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(namespace, namespace, ...tokens.map(t => t.toLowerCase()), limit) as Entity[];
+    if (rows.length > 0) return rows;
+  }
+
+  // Fallback: legacy LIKE match.
   return db
     .prepare(
       `SELECT * FROM entities
@@ -109,4 +132,22 @@ export function searchEntities(
        LIMIT ?`,
     )
     .all(namespace, namespace, `%${query.toLowerCase()}%`, `%${query.toLowerCase()}%`, limit) as Entity[];
+}
+
+/** Extract capitalized multi-word or single-word proper-noun candidates from
+ * a natural-language query. Includes multi-word phrases so "Museum of Modern
+ * Art" is one lookup, not three. */
+function extractQueryCandidateTokens(query: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  // Multi-word capitalized spans (1-5 words)
+  const re = /\b([A-Z][a-zA-Z]{1,20})(?:\s+(?:of\s+|the\s+|and\s+|& )?[A-Z][a-zA-Z]{1,20}){0,4}\b/g;
+  for (const m of query.matchAll(re)) {
+    const phrase = m[0].trim();
+    const lower = phrase.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(phrase);
+  }
+  return out;
 }

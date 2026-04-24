@@ -56,15 +56,61 @@ export class SqliteVecStore implements VectorStore {
     runBatch();
   }
 
-  search(query: Float32Array, k: number): VectorSearchResult[] {
+  search(query: Float32Array, k: number, namespace?: string): VectorSearchResult[] {
+    // sprint1 Q1 fix: guard against k <= 0 — sqlite-vec behaviour is
+    // unspecified for non-positive k and silently returns 0 rows in some
+    // builds, which masquerades as a recall miss to the caller.
+    if (!Number.isFinite(k) || k <= 0) {
+      throw new Error(`SqliteVecStore.search: k must be a positive integer, got ${k}`);
+    }
     const db = this.getDb();
     const buf = Buffer.from(query.buffer, query.byteOffset, query.byteLength);
 
-    const rows = db
-      .prepare(
-        'SELECT id, distance FROM memories_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?',
-      )
-      .all(buf, k) as Array<{ id: string; distance: number }>;
+    // Without a namespace, search the whole index. With a namespace, push
+    // the filter into the vec query by over-fetching then joining on
+    // `memories`. This prevents a catastrophic recall collapse in
+    // multi-tenant deployments: the raw top-k by embedding is dominated by
+    // whichever namespace has the most chunks, and the namespace filter
+    // later in searchMemory throws most candidates away. Measured on the
+    // LongMemEval-S benchmark (500 tenants, 124K total chunks): callers
+    // asking for k=100 were receiving ~8 candidates after filtering.
+    // sqlite-vec constraint: a vec0 MATCH query can specify EITHER `k = ?`
+    // OR `LIMIT ?`, not both. Violating this throws
+    // "SqliteError: Only LIMIT or 'k =?' can be provided, not both".
+    // We use `k = ?` as the KNN bound and skip LIMIT. Over-fetch on the
+    // namespace branch is still needed because the JOIN can't be pushed
+    // into the MATCH.
+    let rows: Array<{ id: string; distance: number }>;
+    if (namespace === undefined) {
+      rows = db
+        .prepare(
+          'SELECT id, distance FROM memories_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance',
+        )
+        .all(buf, k) as Array<{ id: string; distance: number }>;
+    } else {
+      // Over-fetch by 10× to cushion the namespace filter. sqlite-vec can't
+      // push the join predicate into the KNN query, so anything dropped by
+      // the join is lost. sqlite-vec hard-caps k at 4096 — clamp to stay
+      // below that or the query throws "k too large". We still LIMIT k
+      // after the JOIN — that's an outer SQL LIMIT, not a vec0 one, so
+      // it doesn't hit the constraint above.
+      const overfetch = Math.min(k * 10, 4000);
+      rows = db
+        .prepare(
+          `SELECT v.id AS id, v.distance AS distance
+             FROM (
+               SELECT id, distance FROM memories_vec
+                WHERE embedding MATCH ? AND k = ?
+                ORDER BY distance
+             ) v
+             JOIN memories m ON m.id = v.id
+            WHERE m.namespace = ?
+              AND m.is_deleted = 0
+            ORDER BY v.distance
+            LIMIT ?`,
+        )
+        .all(buf, overfetch, namespace, k) as Array<{ id: string; distance: number }>;
+    }
 
     // sqlite-vec returns L2 (Euclidean) distance.
     // For L2-normalized vectors: cosine_similarity = 1 - L2²/2

@@ -206,6 +206,9 @@ export interface GraphQueryResult {
   readonly nodes: readonly GraphNode[];
   readonly edges: readonly GraphEdge[];
   readonly traversal_depth: number;
+  // sprint4 reviewer fix: 'overview' is returned when query_graph is called
+  // without a start node — lists top entities by degree rather than traversing.
+  readonly mode?: 'overview' | 'traversal';
 }
 
 // ─── Episodes (Laag 1: Episodisch Geheugen) ────────────────────────

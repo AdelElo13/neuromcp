@@ -3,6 +3,114 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.0] — 2026-04-24
+
+Sprint 1–4 consolidation. Major reviewer-report remediations, new
+Sovereign Memory positioning, license switch to AGPL-3.0 (engine) + MIT
+carve-out (bin/templates/scripts/docs).
+
+### Added
+
+- **Compact output mode** for `search_memory` — opt-in via `compact: true`
+  returns a 7-field projection (id, content, similarity_score, category,
+  tags, importance, created_at) instead of all 37 DB fields. Measured
+  4× payload reduction per row. **Default remains `false` in 0.19** to
+  preserve semver compatibility with `^0.18` callers; 1.0 will flip the
+  default to `true`.
+- **`query_graph` overview mode** — calling without `entity_id`/
+  `entity_name` now returns the top-N entities by edge degree instead
+  of an empty response. Adds `mode: 'overview' | 'traversal'` to the
+  result shape.
+- **Cross-row entity merge** (`src/consolidation/entity-merge.ts`) —
+  prefix-extension ("Emily" ⊂ "Emily Williams") and bounded
+  Levenshtein typo dedup. Runs in the auto-consolidation scheduler
+  when `NEUROMCP_ENTITY_MERGE=1`. Namespace-isolated, type-isolated,
+  dry-run mode supported.
+- **LLM-based entity extraction** (`src/graph/llm-entities.ts`) —
+  opt-in via `NEUROMCP_LLM_ENTITIES=1`. Shell-out to Haiku for
+  semantic extraction with within-chunk alias dedup. Async with
+  bounded concurrency (`NEUROMCP_LLM_ENTITY_CONCURRENCY=4` default).
+  Falls back to regex on failure; documented cost envelope in COST.md.
+- **`neuromcp-doctor` CLI** — `check` subcommand validates env + dist +
+  DB writability; `audit-network` proves zero outbound connections for
+  30s via a `net.Socket` + `dgram` shim.
+- **AMB benchmark harness submodule** — vitest-style eval-gate under
+  `/tmp/agent-memory-benchmark/eval-gate/` with 17 canonical queries
+  for <5min regression checks.
+
+### Changed
+
+- **License**: MIT → AGPL-3.0 for `src/` engine. MIT carve-out for
+  `bin/`, `templates/`, `scripts/`, `docs/`, `examples/` via
+  `LICENSE-EXAMPLES`. Old license preserved as
+  `LICENSE.MIT.pre-relicense` for audit trail.
+- **Positioning**: "Sovereign Memory" coined as category anchor —
+  adopted in README hero, comparison table, and all outreach drafts.
+  Tagline: *Any model. Your memory. Stays local.*
+- **better-sqlite3 ABI** rebuilt for Node v22 (NODE_MODULE_VERSION 127).
+- **Startup timeout** bumped from 60s → 180s (env-overridable via
+  `NEUROMCP_STARTUP_TIMEOUT`) to survive cold-start BGE + sqlite-vec
+  + port-rebinding cycles.
+
+### Fixed
+
+- **sqlite-vec SQL bug**: the namespace push-down added in v0.18.x
+  mixed vec0's `k = ?` bound with an outer `LIMIT` clause, which
+  sqlite-vec rejects as "Only LIMIT or 'k =?' can be provided, not
+  both." Thirty unit tests failed silently on this path because the
+  benchmark always went through the namespace branch. Fixed by moving
+  the KNN match into a subquery so the outer LIMIT is SQL-level.
+- **Runner error isolation**: a single terminal query failure
+  (e.g. claude CLI exit 1) no longer tears down the entire run —
+  returns a stub `correct=False` result marked `errored=True`. Errored
+  rows are excluded from both numerator AND denominator of the
+  accuracy metric.
+- **Claude CLI resilience**: retry count 3 → 6, explicit backoff
+  schedule `[2, 5, 15, 30, 60]`, empty-stdout handling, opt-in
+  self-consistency majority-vote via `CLAUDE_CLI_SC=N` with a
+  canonicalising bucketer ("Three" / "3" / "I attended 3" all vote
+  as "#3").
+- **Test coverage in CI**: `@vitest/coverage-v8` with thresholds
+  lines 55 / functions 75 / statements 55 / branches 70 — all PASS.
+  Coverage report uploaded as GH artifact on Node 22.
+
+### Benchmark
+
+- **LongMemEval-S v7**: 98/102 = **96.08%** on the 102q sample with
+  Claude Opus generator + Opus judge. Wilson 95% CI ≈ 90.5–98.7%.
+- Full 500q run pending; see `docs/submission-amb.md` for the
+  reproduction command and submission plan.
+
+### Deprecated / Breaking
+
+- `package.json` `"license"` is now `"AGPL-3.0-only"`. Users
+  distributing modified versions or hosting neuromcp as a network
+  service are subject to AGPL obligations. Drop-in `npm install`
+  usage is unaffected.
+- `engines.node` bumped from `>=18` to `>=20`. `better-sqlite3` native
+  bindings targeted Node 20 ABI in this cut; Node 18 remains usable if
+  you rebuild locally, but is no longer guaranteed.
+- **`query_graph` result shape** now includes an optional `mode: 'overview' | 'traversal'` field. Old callers that pattern-match on
+  exact result shape should treat the field as present. The
+  not-found path (entity_name with no match) still returns the
+  original 3-field shape; the new overview branch adds `mode: 'overview'`.
+- **`search_memory` `compact` parameter** added (default `false` in
+  0.19 → will be `true` in 1.0). Callers relying on the 37-field full
+  payload are unaffected today; plan to pass `compact: true` before
+  1.0 to avoid surprise on upgrade.
+
+### Known limitations
+
+- `NEUROMCP_LLM_ENTITIES=1` + `NEUROMCP_ENTITY_MERGE=1` combination:
+  entities extracted with different `entity_type` values (e.g. `person`
+  vs the `name` fallback) do NOT merge across rows. Track in
+  <https://github.com/AdelElo13/neuromcp/issues> if affected.
+- `neuromcp-doctor audit-network` covers only TCP and UDP outbound via
+  `net.Socket` and `dgram` shims. It does NOT observe `undici`/`fetch`,
+  `node:http2`, or DNS prefetch paths. Treat its clean output as
+  necessary-but-not-sufficient; pair with `tcpdump` / `strace` for
+  audit-grade verification.
+
 ## [0.18.3] — 2026-04-20
 
 Round-18 final convergence. Architect APPROVE. Codex APPROVE-WITH-NIT

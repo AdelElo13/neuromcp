@@ -36,5 +36,24 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Run tests
+      # sprint1 Q6: only run coverage on the latest Node — instrumentation
+      # adds overhead and varies between v8 versions. Other matrix entries
+      # run plain tests for compatibility checking.
+      - name: Run tests (Node 18, 20)
+        if: matrix.node-version != 22
         run: npm test
+
+      - name: Run tests with coverage (Node 22)
+        if: matrix.node-version == 22
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        # if: always() — capture coverage even when tests fail; that's exactly
+        # the moment you want the report for debugging.
+        if: always() && matrix.node-version == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+

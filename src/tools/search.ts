@@ -33,6 +33,44 @@ export interface SearchInput {
   readonly graph_boost?: boolean;
   readonly episode_id?: string;
   readonly explain?: boolean;
+  // sprint4 reviewer-remediation: output verbosity was 14.8× too high
+  // (37 fields per result, most of them DB internals). `compact` trims the
+  // payload to the 7 fields an agent actually needs.
+  readonly compact?: boolean;
+}
+
+/** The 7 fields a consuming agent typically needs. Reduces payload ~10×. */
+export interface CompactMemory {
+  readonly id: string;
+  readonly content: string;
+  readonly similarity_score: number;
+  readonly category: string | null;
+  readonly tags: string;
+  readonly importance: number;
+  readonly created_at: string;
+}
+
+/**
+ * Strip a MemoryWithScore / MemoryWithExplanation down to the compact
+ * projection. Keeps `explain` intact when present (it was explicitly
+ * requested by the caller).
+ */
+export function toCompact(
+  m: MemoryWithScore | MemoryWithExplanation,
+): CompactMemory | (CompactMemory & { explain: unknown }) {
+  const base: CompactMemory = {
+    id: m.id,
+    content: m.content,
+    similarity_score: m.similarity_score,
+    category: m.category ?? null,
+    tags: m.tags,
+    importance: m.importance,
+    created_at: m.created_at,
+  };
+  if ('explain' in m) {
+    return { ...base, explain: (m as { explain: unknown }).explain };
+  }
+  return base;
 }
 
 export interface SearchDeps {
@@ -67,8 +105,10 @@ export async function searchMemory(
   // Step 1: Generate query embedding
   const embedding = await embedder.embed(input.query);
 
-  // Step 2: Vector search — over-fetch for post-filtering
-  const vecResults = vecStore.search(embedding, limit * 3);
+  // Step 2: Vector search — push namespace into the vec query so we don't
+  // waste the top-k budget on other tenants' data (see sqlite-vec.ts for
+  // the recall-collapse story).
+  const vecResults = vecStore.search(embedding, limit * 3, namespace);
 
   const vecRanks = new Map<string, number>();
   vecResults.forEach((r, i) => {

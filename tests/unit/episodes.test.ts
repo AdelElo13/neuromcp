@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, teardownTestDb, insertTestMemory, type TestContext } from '../helpers/index.js';
-import { startEpisode, endEpisode, listEpisodes, getEpisode } from '../../src/tools/episode.js';
+import { startEpisode, endEpisode, listEpisodes, getEpisode, ensureAmbientEpisode } from '../../src/tools/episode.js';
 
 describe('episodes', () => {
   let ctx: TestContext;
@@ -58,5 +58,41 @@ describe('episodes', () => {
     const found = getEpisode(ctx.db, ep.id);
     expect(found).not.toBeNull();
     expect(found!.title).toBe('Find me');
+  });
+
+  describe('ensureAmbientEpisode', () => {
+    it('creates a new ambient episode when none exists', () => {
+      const id = ensureAmbientEpisode(ctx.db, 'default');
+      expect(id).toBeDefined();
+      const ep = getEpisode(ctx.db, id);
+      expect(ep).not.toBeNull();
+      expect(ep!.title.startsWith('ambient-')).toBe(true);
+      expect(ep!.ended_at).toBeNull();
+    });
+
+    it('reuses an existing ambient episode within the window', () => {
+      const first = ensureAmbientEpisode(ctx.db, 'default');
+      const second = ensureAmbientEpisode(ctx.db, 'default');
+      expect(second).toBe(first);
+    });
+
+    it('does not reuse an ended episode', () => {
+      const first = ensureAmbientEpisode(ctx.db, 'default');
+      endEpisode(ctx.db, { episode_id: first });
+      const second = ensureAmbientEpisode(ctx.db, 'default');
+      expect(second).not.toBe(first);
+    });
+
+    it('isolates ambient episodes per namespace', () => {
+      const a = ensureAmbientEpisode(ctx.db, 'alpha');
+      const b = ensureAmbientEpisode(ctx.db, 'beta');
+      expect(a).not.toBe(b);
+    });
+
+    it('does not reuse a non-ambient episode', () => {
+      const explicit = startEpisode(ctx.db, { title: 'Manual work' }, 'default');
+      const ambient = ensureAmbientEpisode(ctx.db, 'default');
+      expect(ambient).not.toBe(explicit.id);
+    });
   });
 });

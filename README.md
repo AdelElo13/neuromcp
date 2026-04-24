@@ -1,16 +1,44 @@
-# neuromcp
+# neuromcp — Sovereign Memory for AI agents
 
-**Local-first MCP memory server with closed-loop attribution critic. Oracle-split and distractor-split benchmark numbers both published, with sample-size caveats.**
+**Any model. Your memory. Stays local.**
 
-Local-first MCP server with hybrid search, verbatim recall, and crash-resilient session persistence.
+neuromcp is the first **Sovereign Memory** layer for AI: an open-source MCP server that gives Claude, GPT, Gemini, and Ollama persistent, searchable memory — stored entirely on your machine. No API keys. No cloud sync. No subscription required to remember who you are.
+
+> **Sovereign Memory** = data that you own outright, lives on hardware you control, and is portable across every model you use. Cloud memory products own your data; Sovereign Memory means *you* do.
 
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![npm downloads](https://img.shields.io/npm/dw/neuromcp)](https://www.npmjs.com/package/neuromcp)
-[![license](https://img.shields.io/npm/l/neuromcp)](./LICENSE)
+[![license: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
+[![tests](https://img.shields.io/badge/tests-297%20passing-brightgreen)](./tests)
 
 ```bash
 npx neuromcp
 ```
+
+## Why neuromcp
+
+**The LLM is a commodity. Your memory is the moat.**
+GPT-5, Claude 4, Gemini — they all converge. The model you use next year will differ. The memory of every conversation, decision, and preference you build is yours. neuromcp keeps that layer on your machine and makes it portable across any MCP-compatible client.
+
+**Local-first is a design choice, not a limitation.**
+No telemetry. No data leaves your laptop. No vendor has a copy of your conversations. Audit every line of code that touches your memory. SQLite + local embeddings; everything fits on one disk.
+
+**One install. Every client.**
+Claude Desktop, Cursor, Windsurf, Codex CLI, Continue, LibreChat, Open WebUI — neuromcp speaks MCP, so it works wherever MCP is supported. Switch models tomorrow; your memory follows.
+
+**Real recall, not keyword matching.**
+Hybrid retrieval combines vector search (nomic-embed-text, 768-dim), BM25 full-text, graph links, and a learned usefulness prior. At 500 distractors on LongMemEval, R@5 holds at 93.3%. Your context window gets the right memory, not just the most recent.
+
+## LongMemEval-S accuracy
+
+| Run | Score | Sample | Config |
+|-----|-------|--------|--------|
+| **v7 (current)** | **96.08%** (98/102) | n=102 | Opus generator + Opus judge, single-model |
+| v6 | 95.10% (97/102) | n=102 | Same as v7, prior hint set |
+
+Repro: `OMB_ANSWER_LLM=claude OMB_ANSWER_MODEL=opus OMB_JUDGE_LLM=claude OMB_JUDGE_MODEL=opus uv run omb run --dataset longmemeval -s s -m neuromcp -c "single-session-user,single-session-assistant,multi-session,temporal-reasoning,knowledge-update,single-session-preference" --query-limit 17`
+
+> **Sample size honesty.** n=102 (17 per category × 6 categories). Wilson 95% CI for 98/102 ≈ 90.5–98.7%. Full 500q run with the same config is the next milestone before any "top-tier" claim.
 
 ## Benchmarks (v0.18.0)
 
@@ -483,8 +511,32 @@ We publish all of this — schema versions, consolidation math, critic output, b
 | Embeddings | Built-in ONNX (zero config) + Ollama | External | External API | External | External |
 | Governance | Namespaces, trust levels, soft delete | Namespaces | API keys | Agent-scoped | Cross-agent |
 | Infrastructure | Zero | Zero | Cloud account | Server | Zero |
-| Pricing | Free (MIT) | Free (MIT) | Freemium ($23.9M funded) | Free ($10M funded) | Free (Apache-2.0) |
+| Pricing | Free (AGPL-3.0) | Free (MIT) | Freemium ($23.9M funded) | Free ($10M funded) | Free (Apache-2.0) |
 
 ## License
 
-MIT
+**AGPL-3.0** for the engine in `src/`. **MIT** for `bin/`, `templates/`,
+`scripts/`, `docs/`, and `examples/` (carve-out — see `LICENSE-EXAMPLES`).
+
+### License FAQ
+
+**Can I use neuromcp commercially?** Yes. Running neuromcp as part of your
+own application, on your own infrastructure, is unrestricted. AGPL only
+imposes obligations if you **modify** the engine code AND **distribute** or
+**host** it as a network service.
+
+**Can I install neuromcp from npm in my closed-source product?** Yes. Using
+the published binary as a dependency does not trigger AGPL contagion.
+
+**What if I host neuromcp as a SaaS?** Then AGPL §13 applies: you must make
+the source code (including your modifications) available to your users.
+This is the explicit anti-fork clause we chose for the engine — it stops
+well-funded competitors from taking the code, putting it behind a login,
+and shipping it as their own product.
+
+**Can I copy a CLI script or template?** Yes. Everything in `bin/`,
+`templates/`, `scripts/`, `docs/`, and `examples/` is dual-licensed
+AGPL-3.0 OR MIT. Pick MIT in your downstream project.
+
+**Need different terms for the engine?** Commercial dual-license is
+available — contact the maintainer.

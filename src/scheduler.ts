@@ -6,6 +6,7 @@ import type { Logger } from './observability/logger.js';
 import type { Metrics } from './observability/metrics.js';
 import { consolidate } from './tools/consolidate.js';
 import { compressMemories } from './consolidation/compress.js';
+import { mergeEntitiesInNamespace } from './consolidation/entity-merge.js';
 import { purgeTombstones } from './governance/tombstone.js';
 
 export interface SchedulerDeps {
@@ -75,6 +76,33 @@ export function startScheduler(deps: SchedulerDeps): () => void {
       const purged = purgeTombstones(db, config.tombstoneTtlDays, logger);
       if (purged > 0) {
         logger.info('scheduler', 'Tombstone purge complete', { purged });
+      }
+
+      // sprint4: cross-row entity dedup. Walks every namespace that has
+      // entities and merges aliases within each. Opt-in via env to keep
+      // existing deployments side-effect free until reviewed.
+      if (process.env.NEUROMCP_ENTITY_MERGE === '1') {
+        try {
+          const namespaces = (
+            db.prepare(
+              'SELECT DISTINCT namespace FROM entities WHERE is_deleted = 0',
+            ).all() as Array<{ namespace: string }>
+          ).map((r) => r.namespace);
+          let totalMerged = 0;
+          for (const ns of namespaces) {
+            const r = mergeEntitiesInNamespace(db, ns);
+            totalMerged += r.merged;
+          }
+          if (totalMerged > 0) {
+            logger.info('scheduler', 'Entity merge complete', {
+              merged: totalMerged,
+              namespaces: namespaces.length,
+            });
+          }
+        } catch (mergeErr: unknown) {
+          const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
+          logger.warn('scheduler', 'Entity merge failed', { error: msg });
+        }
       }
 
       metrics.increment('scheduler.cycles');

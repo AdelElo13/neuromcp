@@ -2,6 +2,38 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { Episode, EpisodeWithStats } from '../types.js';
 
+const AMBIENT_TITLE_PREFIX = 'ambient-';
+const AMBIENT_WINDOW_MS = Number.parseInt(process.env.NEUROMCP_AMBIENT_EPISODE_WINDOW_MS ?? '', 10) || 4 * 60 * 60 * 1000;
+
+export function ensureAmbientEpisode(
+  db: Database.Database,
+  namespace: string,
+): string {
+  const cutoff = new Date(Date.now() - AMBIENT_WINDOW_MS).toISOString();
+  const row = db
+    .prepare(
+      `SELECT id FROM episodes
+       WHERE namespace = ?
+         AND ended_at IS NULL
+         AND title LIKE ?
+         AND started_at >= ?
+       ORDER BY started_at DESC
+       LIMIT 1`,
+    )
+    .get(namespace, `${AMBIENT_TITLE_PREFIX}%`, cutoff) as { id: string } | undefined;
+
+  if (row) return row.id;
+
+  const id = randomUUID().replace(/-/g, '').slice(0, 32);
+  const now = new Date().toISOString();
+  const title = `${AMBIENT_TITLE_PREFIX}${now.slice(0, 13)}-${process.pid}`;
+  db.prepare(
+    `INSERT INTO episodes (id, title, namespace, started_at, metadata)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, title, namespace, now, JSON.stringify({ ambient: true, pid: process.pid }));
+  return id;
+}
+
 export function startEpisode(
   db: Database.Database,
   input: { title: string; namespace?: string; metadata?: Record<string, unknown> },

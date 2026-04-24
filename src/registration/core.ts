@@ -3,7 +3,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ServerDeps } from '../server.js';
 import { textResult } from './types.js';
 import { storeMemory } from '../tools/store.js';
-import { searchMemory } from '../tools/search.js';
+import { ensureAmbientEpisode } from '../tools/episode.js';
+import { searchMemory, toCompact } from '../tools/search.js';
 import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
 import { forgetMemory } from '../tools/forget.js';
@@ -35,7 +36,20 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       episode_id: z.string().optional().describe('Episode ID to associate this memory with (from start_episode)'),
     },
   }, async (args) => {
-    const result = await storeMemory(args, { db, vecStore, embedder, logger, metrics, config });
+    // v0.19.1: auto-attach ambient episode when caller did not pass episode_id,
+    // so list_episodes is no longer perpetually empty. Opt-out: set env
+    // NEUROMCP_DISABLE_AMBIENT_EPISODE=1. Explicit episode_id always wins.
+    let effectiveArgs = args;
+    if (!args.episode_id && process.env.NEUROMCP_DISABLE_AMBIENT_EPISODE !== '1') {
+      try {
+        const namespace = args.namespace ?? config.defaultNamespace;
+        const ambientId = ensureAmbientEpisode(db, namespace);
+        effectiveArgs = { ...args, episode_id: ambientId };
+      } catch (err) {
+        logger.warn('store', 'ambient episode attach failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const result = await storeMemory(effectiveArgs, { db, vecStore, embedder, logger, metrics, config });
     return textResult(result);
   });
 
@@ -56,11 +70,16 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       graph_boost: z.boolean().optional().describe('Boost results connected via knowledge graph (default: true)'),
       episode_id: z.string().optional().describe('Filter by episode ID — only return memories from this episode'),
       explain: z.boolean().optional().describe('Include explanation metadata: trust reason, contradictions, temporal validity, claims, confidence breakdown (default: true)'),
+      compact: z.boolean().optional().describe('Return a reduced 7-field projection per result (id, content, similarity_score, category, tags, importance, created_at) instead of all 37 DB fields. Default FALSE in 0.19 for semver-safe upgrade; will default TRUE in 1.0. Pass `compact: true` to opt in now.'),
     },
   }, async (args) => {
     const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });
+    // sprint4 Codex Q2 fix: compact defaults to FALSE in 0.19 to honour
+    // semver for existing users on ^0.18 ranges. Opt-in via compact:true.
+    // 1.0 will flip the default to true (documented in CHANGELOG).
+    const shouldCompact = args.compact === true;
+    const projected = shouldCompact ? results.map(toCompact) : results;
     // v0.16.0: auto-log retrieval so future searches can learn from critic feedback.
-    // Attach event_id to response so the agent can later call cite_memories without tracking the mapping.
     try {
       const { event_id } = logRetrieval(
         {
@@ -70,10 +89,10 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
         },
         { db, logger }
       );
-      return textResult({ results, retrieval_event_id: event_id });
+      return textResult({ results: projected, retrieval_event_id: event_id });
     } catch (err) {
       logger.warn('search', 'auto-log retrieval failed', { error: err instanceof Error ? err.message : String(err) });
-      return textResult(results);
+      return textResult(projected);
     }
   });
 
