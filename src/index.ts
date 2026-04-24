@@ -10,13 +10,14 @@ import { createEmbeddingProvider } from './embeddings/factory.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
 import { startHttpTransport } from './transport/http.js';
+import { NEUROMCP_VERSION } from './version.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger({ level: config.logLevel, format: config.logFormat });
   const metrics = createMetrics();
 
-  logger.info('startup', 'Loading neuromcp v0.18.3', {
+  logger.info('startup', `Loading neuromcp v${NEUROMCP_VERSION}`, {
     dbPath: config.dbPath,
     embeddingProvider: config.embeddingProvider,
     defaultNamespace: config.defaultNamespace,

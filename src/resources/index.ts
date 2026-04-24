@@ -3,6 +3,7 @@ import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ServerDeps } from '../server.js';
 import type { Memory, OperationRecord } from '../types.js';
 import { memoryStats } from '../tools/stats.js';
+import { NEUROMCP_VERSION } from '../version.js';
 
 export function registerResources(server: McpServer, deps: ServerDeps): void {
   const { db, embedder, config, metrics } = deps;
@@ -99,7 +100,7 @@ export function registerResources(server: McpServer, deps: ServerDeps): void {
 
     const health = {
       status: 'ok',
-      version: '0.18.3',
+      version: NEUROMCP_VERSION,
       memory_count: totalRow.count,
       embedding_model: embedder.name,
       embedding_dimensions: embedder.dimensions,

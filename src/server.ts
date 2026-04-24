@@ -13,6 +13,7 @@ import { registerVerbatimTools } from './registration/verbatim.js';
 import { registerWikiTools } from './registration/wiki.js';
 import { registerAttributionTools, registerReflectionTool } from './registration/attribution.js';
 import { registerResources } from './resources/index.js';
+import { NEUROMCP_VERSION } from './version.js';
 import { registerPrompts } from './prompts/index.js';
 
 export interface ServerDeps {
@@ -28,7 +29,7 @@ export function createServer(deps: ServerDeps): McpServer {
   const { logger } = deps;
 
   const server = new McpServer(
-    { name: 'neuromcp', version: '0.19.0' },
+    { name: 'neuromcp', version: NEUROMCP_VERSION },
     {
       capabilities: {
         resources: {},

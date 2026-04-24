@@ -3,6 +3,28 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.19.1] — 2026-04-24
+
+Patch for reviewer round-3 finding: hardcoded version strings across
+src/ drifted out of sync with package.json across the 0.18 → 0.19 cycle
+(startup log said v0.18.3 while package.json and server handshake said
+0.19.0). Root-caused and fixed permanently.
+
+### Fixed
+
+- **Version drift (root-cause fix)**: added `src/version.ts` that reads
+  the single source of truth (`package.json#version`) at module load.
+  `src/index.ts` startup log, `src/server.ts` MCP handshake, and
+  `src/resources/index.ts` `memory://health` now all derive from
+  `NEUROMCP_VERSION`. New `tests/unit/version.test.ts` pins the
+  invariant so future bumps never drift again.
+
+### Notes
+
+- Behavioural change: none beyond the three log/metadata fields now
+  reflecting the installed version.
+- Test count: 312 → 315 (added 3 version invariant tests).
+
 ## [0.19.0] — 2026-04-24
 
 Sprint 1–4 consolidation. Major reviewer-report remediations, new
