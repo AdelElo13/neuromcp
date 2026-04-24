@@ -27,7 +27,7 @@
     "type": "node",
     "entry_point": "dist/index.js",
     "mcp_config": {
-      "command": "node",
+      "command": "/opt/homebrew/bin/node",
       "args": [
         "${__dirname}/dist/index.js"
       ]

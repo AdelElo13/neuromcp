@@ -63,8 +63,21 @@ rsync -a --delete \
 #      etc.). Omitting optional drops them and the server fails with
 #      ERR_MODULE_NOT_FOUND 'sqlite-vec-darwin-arm64'. (ref 19:14:56)
 echo "[build-mcpb] installing runtime deps (omit dev only, scripts ON)..."
-( cd "${STAGING}" && ( npm ci --omit=dev 2>&1 || \
-  npm install --omit=dev 2>&1 ) | tail -3 )
+# CRITICAL: use the Homebrew Node so prebuild-install downloads the
+# matching ABI. Claude Desktop's built-in Node is signed with Anthropic's
+# Team ID and Hardened Runtime rejects differently-signed native modules,
+# so the mcp_config spawns the consumer's Homebrew Node instead; the
+# shipped better-sqlite3.node must therefore match that Node's ABI.
+TARGET_NODE="${TARGET_NODE:-/opt/homebrew/bin/node}"
+TARGET_NPM="${TARGET_NPM:-/opt/homebrew/bin/npm}"
+echo "[build-mcpb] target node: $($TARGET_NODE --version) (modules=$($TARGET_NODE -p 'process.versions.modules'))"
+(
+  cd "${STAGING}"
+  PATH="/opt/homebrew/bin:$PATH"
+  export PATH
+  "$TARGET_NPM" ci --omit=dev 2>&1 | tail -5 || \
+    "$TARGET_NPM" install --omit=dev 2>&1 | tail -5
+)
 
 # 3b. Sanity check: both native deps must be present after install.
 BS_BIN="${STAGING}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
