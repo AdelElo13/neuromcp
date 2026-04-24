@@ -11,3 +11,5 @@ models/*.onnx
 # Claude Code local worktrees and ephemeral state
 .claude/
 coverage/
+release-artifacts/
+.mcpb-staging/
