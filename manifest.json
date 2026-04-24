@@ -24,13 +24,11 @@
     "ollama"
   ],
   "server": {
-    "type": "node",
-    "entry_point": "dist/index.js",
+    "type": "binary",
+    "entry_point": "scripts/launcher.sh",
     "mcp_config": {
-      "command": "/opt/homebrew/bin/node",
-      "args": [
-        "${__dirname}/dist/index.js"
-      ]
+      "command": "${__dirname}/scripts/launcher.sh",
+      "args": []
     }
   },
   "compatibility": {
