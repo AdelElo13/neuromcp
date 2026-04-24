@@ -52,13 +52,32 @@ rsync -a --delete \
   --exclude='*' \
   "${PROJECT_ROOT}/" "${STAGING}/"
 
-# 3. Install runtime deps only inside the staging dir. This rebuilds
-#    better-sqlite3 for the host Node ABI. Consumers with the same major
-#    Node version (>=20) will use these binaries; mismatched hosts will
-#    npm-rebuild at install-time via the postinstall hook in package.json.
-echo "[build-mcpb] installing runtime deps (omit dev+optional)..."
-( cd "${STAGING}" && npm ci --omit=dev --omit=optional --ignore-scripts >/dev/null 2>&1 || \
-  npm install --omit=dev --omit=optional --ignore-scripts >/dev/null 2>&1 )
+# 3. Install runtime deps inside the staging dir. CRITICAL decisions:
+#    - do NOT pass --ignore-scripts — better-sqlite3 relies on a
+#      prebuild-install postinstall hook to download the native binary
+#      matching the target Node ABI. Without that hook the .node file
+#      is absent and Claude Desktop's bundled Node fails with
+#      "Could not locate the bindings file". (ref 2026-04-24T19:13:11)
+#    - do NOT pass --omit=optional — sqlite-vec distributes its native
+#      binary via optionalDependencies pattern (sqlite-vec-darwin-arm64
+#      etc.). Omitting optional drops them and the server fails with
+#      ERR_MODULE_NOT_FOUND 'sqlite-vec-darwin-arm64'. (ref 19:14:56)
+echo "[build-mcpb] installing runtime deps (omit dev only, scripts ON)..."
+( cd "${STAGING}" && ( npm ci --omit=dev 2>&1 || \
+  npm install --omit=dev 2>&1 ) | tail -3 )
+
+# 3b. Sanity check: both native deps must be present after install.
+BS_BIN="${STAGING}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+VEC_PKG="${STAGING}/node_modules/sqlite-vec-darwin-arm64/package.json"
+if [ ! -f "$BS_BIN" ]; then
+    echo "[build-mcpb] FATAL: better-sqlite3 native binary missing at $BS_BIN" >&2
+    exit 1
+fi
+if [ ! -f "$VEC_PKG" ]; then
+    echo "[build-mcpb] WARNING: sqlite-vec-darwin-arm64 optional dep missing (non-arm64 host?)" >&2
+fi
+echo "[build-mcpb] better-sqlite3 binary OK ($(file "$BS_BIN" | cut -d: -f2 | xargs))"
+[ -f "$VEC_PKG" ] && echo "[build-mcpb] sqlite-vec-darwin-arm64 OK"
 
 # 4. Pack via the official Anthropic mcpb CLI
 echo "[build-mcpb] packing..."
