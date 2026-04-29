@@ -20,6 +20,11 @@ export function traverseGraph(
   const limit = options?.limit ?? 50;
 
   const visited = new Set<string>();
+  // Bug #5 fix (v0.21.0):
+  //   Track edges we've already added so a single relation isn't added
+  //   twice when both endpoints get visited via direction='both' BFS
+  //   expansion. Keyed on relation.id (deterministic SHA-256 hash).
+  const seenEdges = new Set<string>();
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const queue: Array<{ entityId: string; depth: number }> = [
@@ -61,6 +66,15 @@ export function traverseGraph(
         rel.source_entity_id === item.entityId
           ? rel.target_entity_id
           : rel.source_entity_id;
+
+      // Skip if this edge was already added from the other endpoint.
+      if (seenEdges.has(rel.id)) {
+        if (!visited.has(neighborId)) {
+          queue.push({ entityId: neighborId, depth: item.depth + 1 });
+        }
+        continue;
+      }
+      seenEdges.add(rel.id);
 
       // Add edge
       const sourceName = db
