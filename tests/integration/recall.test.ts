@@ -111,4 +111,49 @@ describe('recallMemory', () => {
     expect(results.length).toBe(1);
     expect(results[0]!.content).toBe('in ns-a');
   });
+
+  // Regression test for Bug #1 (v0.21.0):
+  //   recallMemory({ id }) without namespace previously returned [] when the
+  //   memory lived in any namespace other than the config default, because
+  //   the SQL implicitly applied `WHERE namespace = config.defaultNamespace`.
+  //   IDs are unique (content_hash), so the namespace filter is redundant
+  //   and harmful when an id is supplied.
+  it('looks up by id WITHOUT namespace, even when memory is in a non-default namespace', () => {
+    const id = insertTestMemory(ctx, {
+      id: 'cross-ns-id-1',
+      content: 'lives in test-A namespace',
+      namespace: 'test-A',
+    });
+    insertTestMemory(ctx, { content: 'noise in default ns' });
+
+    // No namespace passed — must still find by id alone.
+    const results = recallMemory({ id }, ctx.db, ctx.config, ctx.logger, ctx.metrics);
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.id).toBe(id);
+    expect(results[0]!.namespace).toBe('test-A');
+    expect(results[0]!.content).toBe('lives in test-A namespace');
+  });
+
+  // Defensive test: when both id AND namespace are supplied, namespace is
+  // honoured (so callers can scope-and-verify if they want to).
+  it('still respects namespace when id AND namespace are both supplied (mismatch -> empty)', () => {
+    insertTestMemory(ctx, {
+      id: 'scoped-id-1',
+      content: 'in test-A',
+      namespace: 'test-A',
+    });
+
+    const matched = recallMemory(
+      { id: 'scoped-id-1', namespace: 'test-A' },
+      ctx.db, ctx.config, ctx.logger, ctx.metrics,
+    );
+    expect(matched.length).toBe(1);
+
+    const mismatched = recallMemory(
+      { id: 'scoped-id-1', namespace: 'test-B' },
+      ctx.db, ctx.config, ctx.logger, ctx.metrics,
+    );
+    expect(mismatched.length).toBe(0);
+  });
 });

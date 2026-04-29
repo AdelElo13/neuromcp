@@ -21,13 +21,22 @@ export function recallMemory(
 ): readonly Memory[] {
   const start = Date.now();
   const limit = input.limit ?? 20;
-  const namespace = input.namespace ?? config.defaultNamespace;
+
+  // Bug #1 fix (v0.21.0):
+  //   When the caller supplies an `id` but no `namespace`, do NOT apply the
+  //   default-namespace filter. `id` (= content_hash) is unique across all
+  //   namespaces, so the namespace filter is redundant for id-lookups and
+  //   harmful: it silently returns [] when the memory lives in a non-default
+  //   namespace. If both `id` and `namespace` are supplied, the namespace
+  //   filter is honoured (callers who want to scope-and-verify keep that).
+  const idOnlyLookup = input.id !== undefined && input.namespace === undefined;
+  const namespace = idOnlyLookup ? null : (input.namespace ?? config.defaultNamespace);
 
   const conditions: string[] = ['is_deleted = 0'];
   const params: unknown[] = [];
 
-  // Namespace filter ('*' means all)
-  if (namespace !== '*') {
+  // Namespace filter ('*' means all; null means skip — id-only lookup)
+  if (namespace !== null && namespace !== '*') {
     conditions.push('namespace = ?');
     params.push(namespace);
   }
