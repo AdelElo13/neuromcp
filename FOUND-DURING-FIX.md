@@ -47,3 +47,26 @@ trust-boost in the write pipeline.
 ## Closed during sweep
 
 (none yet — bugs #1, #5, #7 closed cleanly without surfacing extra issues.)
+
+---
+
+## P3: Lint — `require()` style import in `src/episode/active-state.ts`
+
+**Symptom:** `npm run lint` fails with:
+- `src/episode/active-state.ts:83:36  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports`
+- `src/episode/active-state.ts:2:10  warning  'dirname' is defined but never used`
+
+**Origin:** introduced in commit `58d116b` (Bug #7 fix, 2026-04-29) — predates this v0.21.0 schema-extension PR.
+
+**Hypothesised root cause:** the `try { return require('node:fs') } catch { return null }` pattern intentionally uses CJS to gracefully degrade when running in environments where dynamic ESM imports throw. Replacement should use top-level `import * as fs from 'node:fs'` since this file is always run in Node, never bundled to a browser.
+
+**Proposed fix:** 
+```ts
+import * as fs from 'node:fs';
+// drop the IIFE; just use fs.* directly
+```
+And: remove the unused `dirname` import on line 2.
+
+**Severity:** P3 — lint fails, build still ships (`tsc --noEmit` does not run because `eslint &&` short-circuits). Not a runtime bug, but blocks `npm run lint` clean state.
+
+**Out of scope here** because the v13 schema additions in this PR do not touch `src/episode/`. Raising as a follow-up ticket.

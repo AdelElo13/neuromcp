@@ -3,6 +3,48 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.21.0] — 2026-05-07
+
+Recall-layer schema reconciliation. Existing v12 installs were missing
+the eight Codex-SOTA tables and five `memories` planner-metadata columns
+that the bundled `auto-retrieve.cjs` hook reads. Without them the
+six-layer recall pipeline silently returned empty `additionalContext`
+on every `UserPromptSubmit`. Fresh installs and `npx neuromcp@latest`
+now self-reconcile via the v12 → v13 migration.
+
+### Fixed
+
+- **Schema drift between bundled hook and persisted DB**: bumped
+  `SCHEMA_VERSION` 12 → 13. v13 adds (idempotent) `working_context`,
+  `semantic_cards` (+ `_evidence`), `memory_atoms`, `memory_edges`,
+  `activation_cache`, `situation_states`, and `replay_queue`. Adds
+  `source_type`, `source_path`, `project`, `kind`, `happened_at`
+  columns to `memories` (all nullable for backwards-compat). Three
+  new regression tests in `tests/unit/migrations.test.ts` cover (a)
+  fresh-install table presence, (b) column presence, (c) in-place
+  v12 → v13 upgrade preserving existing rows.
+- **Bundled `templates/hooks/neuromcp-auto-capture.js` extractor
+  coverage**: added three deterministic extractors that previously
+  required users to hand-write equivalents — `bugFixes` (root-cause
+  narratives in NL/EN), `toolInstalls` (npm/pnpm/yarn/bun/pip/brew/
+  cargo/gh/uv installs), and `criticalConfigEdits` (Edit/Write on
+  `CLAUDE.md`, `hooks.json`, `settings.json`, `.env`, `package.json`,
+  `tsconfig.json`, `vercel.json`/`.ts`, `next.config.*`, etc.).
+  Pure regex, zero LLM cost, runs inside the Stop-hook 15s budget.
+- **`scripts/run-consolidation.sh` threshold deadlock**: default
+  `NEUROMCP_PENDING_THRESHOLD` lowered from 5 to 1. Previously low-
+  volume users (1–4 sessions per consolidation window) would never
+  trigger consolidation because the script would log
+  `pending=1 total=1 threshold=5 → below threshold, skip` indefinitely.
+
+### Notes
+
+- Schema migration is automatic on first `runMigrations()` call;
+  existing v12 databases get backed up to `<dbPath>.backup-v12`
+  before mutation per the established migration policy.
+- No breaking changes to public APIs, MCP tool surface, or
+  `memories` row shape (additions are nullable additive columns).
+
 ## [0.19.1] — 2026-04-24
 
 Patch for reviewer round-3 finding: hardcoded version strings across

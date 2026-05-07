@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG="${NEUROMCP_LOG:-$HOME/.neuromcp/consolidation.log}"
 LEDGER="${NEUROMCP_LEDGER:-$HOME/.neuromcp/consolidation-ledger.json}"
 SESSIONS_DIR="${NEUROMCP_SESSIONS_DIR:-$HOME/.neuromcp/raw/sessions}"
-PENDING_THRESHOLD="${NEUROMCP_PENDING_THRESHOLD:-5}"
+PENDING_THRESHOLD="${NEUROMCP_PENDING_THRESHOLD:-1}"
 WINDOW_DAYS="${NEUROMCP_WINDOW_DAYS:-7}"
 PYTHON_BIN="${NEUROMCP_PYTHON:-python3}"
 

@@ -222,6 +222,131 @@ const extractors = {
     }
     return results;
   },
+
+  /**
+   * Detect bug-fix narratives in assistant output: explicit root-cause +
+   * resolution language. Captures the fix recipe so the same problem can
+   * be recognized faster next time.
+   *
+   * Patterns are intentionally narrow (require clear causal markers) to
+   * keep precision high. Recall is sacrificed — generic "i fixed it"
+   * statements are skipped on purpose.
+   */
+  bugFixes(entries) {
+    const results = [];
+    const patterns = [
+      /(?:root cause(?:\s+was|\s+is|:)?|de oorzaak (?:was|is|:)|het probleem (?:was|is|:)|the bug (?:was|is|:))\s+([^.\n]{20,400}?)(?:[.\n]|$)/i,
+      /(?:fixed by|opgelost door|resolved by|gefikst met)\s+([^.\n]{15,400}?)(?:[.\n]|$)/i,
+      /(?:smoking gun|gevonden:|found it:)\s+([^.\n]{20,400}?)(?:[.\n]|$)/i,
+    ];
+
+    const seen = new Set();
+    for (const entry of entries) {
+      const text = getAssistantText(entry);
+      if (!text) continue;
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (!match) continue;
+        const captured = match[1].trim();
+        const dedupKey = captured.slice(0, 80).toLowerCase();
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
+        results.push({
+          content: `[fix] ${captured.slice(0, 400)}`,
+          category: 'fix',
+          tags: ['fix', 'auto-captured', 'root-cause'],
+          importance: 0.85,
+          metadata: { trigger: 'fix-narrative', context: text.slice(0, 200) },
+        });
+        break; // one fix per entry
+      }
+    }
+    return results;
+  },
+
+  /**
+   * Detect package/tool installs. Each install is a permanent change to
+   * the user's environment — worth remembering so future sessions know
+   * what's available.
+   */
+  toolInstalls(entries) {
+    const results = [];
+    const patterns = [
+      /\b(?:npm|pnpm|yarn|bun)\s+(?:install|add|i)\s+(?:-[a-zA-Z]+\s+)?(@?[a-zA-Z0-9][\w@/-]+)/,
+      /\bpip3?\s+install\s+(?:-[a-zA-Z]+\s+)?([a-zA-Z][\w-]+)/,
+      /\bbrew\s+install\s+([a-zA-Z][\w-]+)/,
+      /\bcargo\s+install\s+([a-zA-Z][\w-]+)/,
+      /\bgh\s+extension\s+install\s+(\S+)/,
+      /\buv\s+(?:add|pip\s+install)\s+([a-zA-Z][\w-]+)/,
+    ];
+
+    const seen = new Set();
+    for (const entry of entries) {
+      const blocks = getToolUseBlocks(entry);
+      for (const block of blocks) {
+        if (block.name !== 'Bash') continue;
+        const cmd = block.input?.command || '';
+        for (const pattern of patterns) {
+          const match = cmd.match(pattern);
+          if (!match) continue;
+          const pkg = match[1];
+          if (pkg.length < 2 || /^[-_]/.test(pkg)) continue;
+          const key = `${pkg}:${cmd.slice(0, 30)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const mgrMatch = cmd.match(/\b(npm|pnpm|yarn|bun|pip3?|brew|cargo|gh|uv)\b/);
+          const manager = mgrMatch ? mgrMatch[1] : 'unknown';
+          results.push({
+            content: `[install] ${manager} install ${pkg}`,
+            category: 'event',
+            tags: ['install', 'auto-captured', manager],
+            importance: 0.6,
+            metadata: { manager, package: pkg, command: cmd.slice(0, 200) },
+          });
+          break;
+        }
+      }
+    }
+    return results;
+  },
+
+  /**
+   * Detect edits to critical configuration files. We do NOT capture the
+   * file contents (PII risk + size); we capture only the fact that the
+   * file was modified, so future sessions know to re-read it.
+   */
+  criticalConfigEdits(entries) {
+    const results = [];
+    const criticalNames = new Set([
+      'CLAUDE.md', 'hooks.json', 'settings.json', 'settings.local.json',
+      '.env', '.env.local', '.env.production',
+      'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod',
+      'vercel.json', 'vercel.ts', 'tsconfig.json', 'next.config.js',
+      'next.config.mjs', 'next.config.ts',
+    ]);
+
+    const seen = new Set();
+    for (const entry of entries) {
+      const blocks = getToolUseBlocks(entry);
+      for (const block of blocks) {
+        if (block.name !== 'Edit' && block.name !== 'Write') continue;
+        const filePath = block.input?.file_path || block.input?.path || '';
+        if (!filePath) continue;
+        const basename = path.basename(filePath);
+        if (!criticalNames.has(basename)) continue;
+        if (seen.has(filePath)) continue;
+        seen.add(filePath);
+        results.push({
+          content: `[config-edit] ${block.name} on ${filePath}`,
+          category: 'event',
+          tags: ['config-edit', 'auto-captured', basename.toLowerCase().replace(/\./g, '-')],
+          importance: 0.7,
+          metadata: { tool: block.name, file: filePath, basename },
+        });
+      }
+    }
+    return results;
+  },
 };
 
 // ─── Transcript Helpers ────────────────────────────────────────────
