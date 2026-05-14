@@ -3,6 +3,50 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.22.1] — 2026-05-14
+
+Sanitization follow-up. An independent review (Codex) of the v0.22.0
+tarball flagged three hardcoded `/Users/a` paths that the v0.22.0 scan
+missed: one functional fallback in another hook, and two strings inside
+a one-off migration script with personal entity data. v0.22.1 strips
+all three from the published artifact.
+
+### Fixed
+
+- **`templates/hooks/neuromcp-auto-capture.js`**: same kind of leak as
+  the persist hook had pre-v0.22.0 — `process.env.HOME || '/Users/a'`
+  fallback would route a user's auto-capture DB writes to `/Users/a`
+  if `$HOME` was unset. Replaced with the same
+  `HOME = process.env.HOME || process.env.USERPROFILE || '/tmp'`
+  constant used by `neuromcp-persist.cjs`.
+
+### Changed
+
+- **`package.json` `files` array**: replaced the broad `"scripts"` glob
+  with an explicit allowlist of the eight scripts end users actually
+  need (`backfill-embeddings`, `consolidate-sessions`, the launchd
+  plist template, `download-model.{mjs,ts}`, `index-wiki`, `launcher`,
+  `run-consolidation`). Five development-only scripts no longer ship
+  in the tarball: `ab-sweep.mjs`, `backfill-verbatim.mjs`,
+  `build-mcpb.sh`, `migrate-memory.ts`, `usefulness-dashboard.mjs`.
+  `migrate-memory.ts` in particular contained personal entity-data
+  observation strings (`"Home directory: /Users/a"`, etc.) that have
+  no business in an installed package — it imported `../src/*` paths
+  that wouldn't have resolved from the tarball anyway, so removing it
+  costs nothing functionally.
+
+### Notes
+
+- Total files in tarball: 198 → 193.
+- Brute scan of the rebuilt tarball: zero `/Users/<name>`,
+  `/home/<name>`, `C:\Users\` hits in any code file. Verified
+  independently by Codex via `npm pack` of the local repo (post-fix)
+  + recursive grep.
+- v0.22.0 has been superseded but is left on the registry; the
+  hardcoded paths in it are descriptive strings in dead-import code
+  (no runtime path), not exploitable, just unclean. Users on v0.22.0
+  upgrade automatically via `npm i neuromcp@latest`.
+
 ## [0.22.0] — 2026-05-14
 
 Stop-hook full sync + empty-session leak fix. The bundled

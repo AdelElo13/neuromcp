@@ -19,7 +19,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const DB_PATH = process.env.NEUROMCP_DB_PATH || path.join(process.env.HOME || '/Users/a', '.neuromcp', 'memory.db');
+const HOME = process.env.HOME || process.env.USERPROFILE || '/tmp';
+const DB_PATH = process.env.NEUROMCP_DB_PATH || path.join(HOME, '.neuromcp', 'memory.db');
 const LOG_PATH = path.join(path.dirname(DB_PATH), 'auto-capture.log');
 
 // ─── Pattern Extractors ────────────────────────────────────────────

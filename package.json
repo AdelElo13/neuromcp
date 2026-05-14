@@ -1,12 +1,28 @@
 {
   "name": "neuromcp",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
     "type": "git",
     "url": "https://github.com/AdelElo13/neuromcp.git"
   },
+  "files": [
+    "dist",
+    "bin",
+    "scripts/backfill-embeddings.mjs",
+    "scripts/consolidate-sessions.py",
+    "scripts/com.neuromcp.consolidate.plist.template",
+    "scripts/download-model.mjs",
+    "scripts/download-model.ts",
+    "scripts/index-wiki.mjs",
+    "scripts/launcher.sh",
+    "scripts/run-consolidation.sh",
+    "templates",
+    "README.md",
+    "LICENSE",
+    "LICENSE-EXAMPLES"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -49,15 +65,6 @@
     "neuromcp-embed": "bin/embed.mjs",
     "neuromcp-doctor": "bin/doctor.mjs"
   },
-  "files": [
-    "dist",
-    "bin",
-    "scripts",
-    "templates",
-    "README.md",
-    "LICENSE",
-    "LICENSE-EXAMPLES"
-  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",
