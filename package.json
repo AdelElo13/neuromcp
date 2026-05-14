@@ -1,6 +1,6 @@
 {
   "name": "neuromcp",
-  "version": "0.22.1",
+  "version": "0.23.0",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
@@ -13,6 +13,7 @@
     "scripts/backfill-embeddings.mjs",
     "scripts/consolidate-sessions.py",
     "scripts/com.neuromcp.consolidate.plist.template",
+    "scripts/com.neuromcp.zombie-cleanup.plist.template",
     "scripts/download-model.mjs",
     "scripts/download-model.ts",
     "scripts/index-wiki.mjs",
@@ -59,6 +60,7 @@
     "neuromcp": "bin/neuromcp.mjs",
     "neuromcp-init-wiki": "bin/init-wiki.mjs",
     "neuromcp-enable-consolidation": "bin/enable-consolidation.mjs",
+    "neuromcp-enable-zombie-cleanup": "bin/enable-zombie-cleanup.mjs",
     "neuromcp-index-wiki": "scripts/index-wiki.mjs",
     "neuromcp-backfill-embeddings": "scripts/backfill-embeddings.mjs",
     "neuromcp-query": "bin/query.mjs",

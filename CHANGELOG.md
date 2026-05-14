@@ -3,6 +3,60 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.23.0] — 2026-05-14
+
+Opt-in Claude desktop-app zombie-session cleanup. The neuromcp-persist
+fix in v0.22.x stopped the bundled hook from writing raw stubs for
+empty sessions, but the Claude desktop app itself has a separate leak
+on a different layer: it persists `~/Library/Application Support/Claude/
+claude-code-sessions/.../local_*.json` metadata the moment you open a
+new session, before any user message exists. If you close the window
+without typing, the metadata sticks in the Recents sidebar forever
+(`No messages yet.`). Tracked upstream at
+[anthropics/claude-code#59134](https://github.com/anthropics/claude-code/issues/59134).
+v0.23.0 ships an opt-in local workaround until that fix lands.
+
+### Added
+
+- **`npx neuromcp-enable-zombie-cleanup`** — installs a macOS launchd
+  agent that scans the Claude desktop-app session storage every N
+  seconds (default 300 = 5 min) and reaps zombies: `local_*.json`
+  files with `lastActivityAt - createdAt < 30s` AND
+  `createdAt > 1 hour ago`. Reaped files move to a sibling
+  `.trash-zombies-<date>/` directory, which is itself
+  garbage-collected after 7 days. Reversible by design — never
+  `rm -rf` on first contact.
+- **`templates/scripts/cleanup-claude-zombies.sh`** — the shell script
+  the launchd agent runs. Configurable via env vars:
+  `ZOMBIE_MAX_LIFETIME_MS` (default 30000), `ZOMBIE_MIN_AGE_MS`
+  (default 3600000), `ZOMBIE_TRASH_RETENTION_DAYS` (default 7),
+  `ZOMBIE_DRY_RUN=1`. Logs to `~/.claude/logs/claude-zombie-cleanup.log`.
+- **`scripts/com.neuromcp.zombie-cleanup.plist.template`** — the
+  launchd plist template, same `{{HOME}}/{{PATH}}/{{SCRIPT_PATH}}/
+  {{INTERVAL_SECONDS}}` substitution pattern as the existing
+  consolidate plist template.
+- **6 regression tests** in `tests/unit/enable-zombie-cleanup.test.ts`:
+  template files ship intact with all placeholders, `--dry-run`
+  touches no filesystem, `--interval` rejects values outside
+  [60, 3600], `--uninstall` is idempotent, non-darwin platforms exit
+  cleanly with a warning.
+
+### Notes
+
+- **macOS only.** The Claude desktop app's session storage path only
+  exists on macOS. The installer warns and exits cleanly on other
+  platforms.
+- **Prerequisite**: `jq` on PATH (`brew install jq`). The cleanup
+  script uses jq to parse `local_*.json` metadata.
+- **Detection threshold is conservative**: even the fastest real
+  `"what is X?"` prompt takes >10s including a response, so the
+  30-second lifetime cutoff cannot reap a session you actually used.
+  The 1-hour minimum age means active sessions are never touched.
+- **Logs**: cleanup logs to `~/.claude/logs/claude-zombie-cleanup.log`;
+  launchd stdout/stderr go to `~/.neuromcp/zombie-cleanup.{out,err}.log`.
+- **Tarball**: 193 → 196 files (3 added: script template + plist
+  template + installer mjs).
+
 ## [0.22.1] — 2026-05-14
 
 Sanitization follow-up. An independent review (Codex) of the v0.22.0
