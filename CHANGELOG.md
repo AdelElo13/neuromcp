@@ -3,6 +3,52 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.22.0] — 2026-05-14
+
+Stop-hook full sync + empty-session leak fix. The bundled
+`templates/hooks/neuromcp-persist` had diverged sharply from the
+production hook running in the maintainer's environment (138 lines
+shipped vs 483 lines used) and silently wrote a raw stub to
+`~/.neuromcp/raw/sessions/` on every Stop invocation — including
+sessions where the user never sent a message (claude spawned by the
+desktop app, a launchd trigger, or a hook loop with no input). On the
+maintainer's machine this produced 51 spurious stubs in six weeks and
+polluted every consolidation pass downstream. Other neuromcp installs
+were affected by the same leak.
+
+### Fixed
+
+- **Empty-session raw-log leak**: `templates/hooks/neuromcp-persist`
+  now counts user-role transcript entries with non-empty content before
+  writing to `~/.neuromcp/raw/sessions/`. Sessions with zero real user
+  messages skip the write and log `Skipping empty session (0 user
+  messages)` to stderr. Four regression tests added in
+  `tests/unit/hook-persist-empty-session.test.ts` covering: empty
+  transcript, real transcript, missing `transcript_path`, and
+  whitespace-only user content. The same guard applies to the
+  follow-on `.work-state.md` update and wiki-log auto-commit.
+
+### Changed
+
+- **`templates/hooks/neuromcp-persist.js` renamed to `.cjs`**: the file
+  uses CommonJS (`require`) but Node was treating it as ESM whenever
+  the nearest `package.json` declared `"type": "module"` (e.g. inside
+  the neuromcp repo itself). The explicit `.cjs` extension forces
+  CommonJS regardless of context.
+- **Bundled hook brought to feature parity with production**: the
+  shipped template now includes the work-state.md auto-update flow,
+  wiki-log recent-activity tail, and periodic checkpoint logic that
+  the maintainer has been iterating on since v0.5.0. All hardcoded
+  user-specific paths (nine `/Users/a` fallbacks) replaced with a
+  single `HOME = process.env.HOME || process.env.USERPROFILE || "/tmp"`
+  constant.
+- **`bin/init-wiki.mjs` migration logic**: on rerun, detects an old
+  `~/.claude/scripts/hooks/neuromcp-persist.js` and archives it as
+  `.bak-pre-cjs-<timestamp>`, then rewrites any stale `.js` command
+  strings in `~/.claude/settings.json` to `.cjs`. Idempotent — only
+  writes settings.json if at least one command was actually rewritten
+  or a new hook entry needed to be added.
+
 ## [0.21.0] — 2026-05-07
 
 Recall-layer schema reconciliation. Existing v12 installs were missing

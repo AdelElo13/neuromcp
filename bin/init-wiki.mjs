@@ -16,7 +16,7 @@
  *   npx neuromcp-init-wiki --editor all       # install all rules
  */
 
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -92,7 +92,17 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     if (!existsSync(claudeHooksDir)) {
       mkdirSync(claudeHooksDir, { recursive: true });
     }
-    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.js', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs', 'neuromcp-critic.cjs']) {
+    // Migration (v0.22.0): neuromcp-persist renamed .js → .cjs to force
+    // CommonJS regardless of parent package.json. Archive the old file so
+    // the new one installs cleanly, and below we patch settings.json to
+    // point at the new filename.
+    const oldPersistHook = join(claudeHooksDir, 'neuromcp-persist.js');
+    if (existsSync(oldPersistHook)) {
+      const archived = `${oldPersistHook}.bak-pre-cjs-${Date.now()}`;
+      renameSync(oldPersistHook, archived);
+      log(`Migrated: archived old neuromcp-persist.js → ${archived}`);
+    }
+    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.cjs', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs', 'neuromcp-critic.cjs']) {
       const src = join(hooksDir, hook);
       const dest = join(claudeHooksDir, hook);
       if (!existsSync(dest) && existsSync(src)) {
@@ -119,7 +129,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
       matcher: '*',
       hooks: [{
         type: 'command',
-        command: `CLAUDE_HOOK_EVENT=PostToolUse node "${claudeHooksDir}/neuromcp-persist.js"`,
+        command: `CLAUDE_HOOK_EVENT=PostToolUse node "${claudeHooksDir}/neuromcp-persist.cjs"`,
         timeout: 5,
         async: true,
       }],
@@ -128,7 +138,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
       matcher: '*',
       hooks: [{
         type: 'command',
-        command: `CLAUDE_HOOK_EVENT=Stop node "${claudeHooksDir}/neuromcp-persist.js"`,
+        command: `CLAUDE_HOOK_EVENT=Stop node "${claudeHooksDir}/neuromcp-persist.cjs"`,
         timeout: 10,
       }],
     },
@@ -176,6 +186,25 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     }
 
     if (!settings.hooks) settings.hooks = {};
+
+    // Migration (v0.22.0): rewrite stale .js commands to .cjs after rename.
+    let migratedCommands = 0;
+    for (const evt of Object.values(settings.hooks)) {
+      if (!Array.isArray(evt)) continue;
+      for (const entry of evt) {
+        if (!Array.isArray(entry.hooks)) continue;
+        for (const h of entry.hooks) {
+          if (h.command && h.command.includes('neuromcp-persist.js')) {
+            h.command = h.command.replace(/neuromcp-persist\.js/g, 'neuromcp-persist.cjs');
+            migratedCommands++;
+          }
+        }
+      }
+    }
+    if (migratedCommands > 0) {
+      log(`Migrated ${migratedCommands} settings.json command(s) from neuromcp-persist.js → .cjs`);
+    }
+
     let added = 0;
 
     for (const [eventType, entry] of Object.entries(neuromcpHooks)) {
@@ -196,7 +225,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
       }
     }
 
-    if (added > 0) {
+    if (added > 0 || migratedCommands > 0) {
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
       log(`Saved ${settingsPath.replace(HOME, '~')}`);
     }
