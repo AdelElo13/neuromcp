@@ -18,7 +18,7 @@
 
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -232,6 +232,27 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
   } catch (err) {
     warn(`Could not auto-configure hooks in settings.json: ${err.message}`);
     console.log('  Add them manually — see https://github.com/AdelElo13/neuromcp#hooks\n');
+  }
+
+  // ─── Auto-install zombie-cleanup (macOS only, opt-OUT via --no-zombie-cleanup) ──
+  // The Claude desktop app persists session metadata before any user message
+  // exists, creating "No messages yet" zombies in Recents. We auto-install
+  // a launchd reaper to keep that clean. See anthropics/claude-code#59134.
+  // Failures here never break init-wiki — the user can run it manually later.
+  const skipZombie = args.includes('--no-zombie-cleanup');
+  if (!skipZombie && platform() === 'darwin') {
+    console.log('');
+    console.log('🧹 Auto-installing Claude desktop-app zombie-session cleanup…');
+    try {
+      const installerPath = join(__dirname, 'enable-zombie-cleanup.mjs');
+      execFileSync('node', [installerPath], { stdio: 'inherit' });
+    } catch (err) {
+      warn(`zombie-cleanup auto-install skipped: ${err.message || 'see above'}`);
+      console.log('  Run later: npx neuromcp-enable-zombie-cleanup');
+    }
+  } else if (!skipZombie) {
+    console.log('');
+    console.log(`  · zombie-cleanup skipped — macOS only (your platform: ${platform()})`);
   }
 }
 

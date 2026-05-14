@@ -3,6 +3,38 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.24.0] — 2026-05-14
+
+Zombie-cleanup is now **automatic** on `npx neuromcp-init-wiki`. The
+v0.23.0 release added the cleanup as an opt-in (`npx
+neuromcp-enable-zombie-cleanup`), but every neuromcp install hits
+the same Claude desktop-app metadata-leak — making it opt-in meant
+fixing the bug only for users who knew to ask. Per the project
+ethos: *"alles automatisch dat maakt neuromcp zo sterk"*.
+
+### Changed
+
+- **`npx neuromcp-init-wiki` now auto-installs zombie-cleanup** on
+  macOS. The init flow calls `bin/enable-zombie-cleanup.mjs` as a
+  subprocess after the hooks + settings.json setup is complete.
+  Failures (missing `jq`, launchctl rejection, etc.) are non-fatal —
+  init-wiki still finishes; a warning prints with the manual fallback
+  command.
+- **Opt-out**: pass `--no-zombie-cleanup` to skip the auto-install.
+  Useful for CI / headless installs where launchd registration is
+  unwanted.
+- **Non-darwin platforms** print a one-line info message and skip
+  silently. No agent install attempt.
+
+### Notes
+
+- `npx neuromcp-enable-zombie-cleanup` and its `--uninstall` flag
+  remain available for users who want explicit control or who
+  installed pre-v0.24.0 and want to reconfigure.
+- Idempotent: re-running `npx neuromcp-init-wiki` clears any prior
+  launchd registration before bootstrapping the new one, same as
+  `enable-consolidation`. No duplicate agents.
+
 ## [0.23.0] — 2026-05-14
 
 Opt-in Claude desktop-app zombie-session cleanup. The neuromcp-persist
