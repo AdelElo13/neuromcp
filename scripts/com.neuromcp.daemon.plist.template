@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  neuromcp daemon launchd agent (macOS).
+
+  This file is a TEMPLATE. `bin/neuromcp-enable-daemon` substitutes the
+  {{...}} placeholders with real values for the installing user and writes
+  the result to ~/Library/LaunchAgents/com.neuromcp.daemon.plist.
+
+  Runs `neuromcp-daemon` as a long-lived background process that serves
+  one shared MCP Streamable HTTP transport on /mcp plus the existing REST
+  endpoints. Every MCP-capable client (Claude Code, Claude Desktop,
+  ChatGPT desktop, Cursor, …) points its config at
+  http://127.0.0.1:{{PORT}}/mcp.
+
+  KeepAlive=true (with successful exit handling) makes launchd restart
+  the daemon on crash. ThrottleInterval=10 prevents rapid restart loops.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.neuromcp.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{NODE_BIN}}</string>
+        <string>{{DAEMON_ENTRY}}</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{{PATH}}</string>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <key>NEUROMCP_DAEMON_PORT</key>
+        <string>{{PORT}}</string>
+        <key>NEUROMCP_DAEMON_HOST</key>
+        <string>{{HOST}}</string>
+        <key>NEUROMCP_LOG_LEVEL</key>
+        <string>{{LOG_LEVEL}}</string>
+{{EXTRA_ENV}}    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/.neuromcp/daemon.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/.neuromcp/daemon.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

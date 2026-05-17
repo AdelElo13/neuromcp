@@ -3,6 +3,231 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — feat/mcp-http-daemon
+
+Multi-client first-class support via a long-lived daemon that serves the
+MCP Streamable HTTP transport on one shared port. Each MCP-capable client
+(Claude Code, Claude Desktop, ChatGPT desktop, Cursor, …) points at
+`http://<host>:<port>/mcp` instead of spawning its own stdio neuromcp
+instance. One shared DB. One embedding pipeline. No port conflicts.
+
+### Added
+
+- **`neuromcp-daemon` bin** (new): runs a long-lived HTTP server that
+  exposes the MCP Streamable HTTP transport on `/mcp` plus the existing
+  REST/SSE endpoints (`/health`, `/api/store`, `/api/search`,
+  `/api/store-batch`, `/events`) on the same port. Multi-tenant: every
+  MCP `initialize` mints a fresh session id + dedicated `McpServer` +
+  dedicated transport, with cleanup on `transport.onclose`.
+- **`src/transport/mcp-http-daemon.ts`**: the daemon transport
+  implementation. Uses `StreamableHTTPServerTransport` from the official
+  MCP SDK. Defensive port-bind error handler (rejects the start Promise
+  instead of letting EADDRINUSE crash the process via an unhandled
+  `'error'` event — see `FOUND-DURING-FIX.md` P1 for the related bug
+  in the legacy `startHttpTransport` path that will be fixed next).
+- **`src/daemon.ts`**: daemon entrypoint. Reads `NEUROMCP_DAEMON_PORT`
+  (default `3200`) and `NEUROMCP_DAEMON_HOST` (default `127.0.0.1`).
+  Graceful shutdown on SIGINT/SIGTERM.
+- **`neuromcp-enable-daemon` bin** (new): macOS launchd helper that
+  renders `scripts/com.neuromcp.daemon.plist.template`, installs it to
+  `~/Library/LaunchAgents/com.neuromcp.daemon.plist`, then bootstraps +
+  kickstarts. `--port`, `--host`, `--log-level`, `--dry-run`,
+  `--uninstall` flags supported. Plist uses `KeepAlive` (Crashed-only)
+  + `ThrottleInterval=10` to survive crashes without thrash loops.
+- **4 new integration tests** in
+  `tests/integration/mcp-http-daemon-e2e.test.ts` covering:
+  initialize → session id; `tools/list` over an established session;
+  400 on a non-init request without session id; legacy `/health`
+  still served on the same port.
+
+### Changed
+
+- **`src/transport/http.ts`**: REST handler extracted as exported
+  `createRestRequestHandler(logger, deps?)` so both the legacy
+  `startHttpTransport` and the new daemon mount the same endpoints
+  without duplicating logic. Behavior unchanged; the existing
+  `http-e2e.test.ts` suite still passes 5/5.
+- **`package.json`**: added `neuromcp-daemon` and
+  `neuromcp-enable-daemon` bin entries; published exports for
+  `./daemon` and `./transport/mcp-http-daemon`; added the daemon plist
+  template to `files`.
+- **`tsup.config.ts`**: added `src/daemon.ts` and
+  `src/transport/mcp-http-daemon.ts` to the entry list.
+
+### Migration
+
+For users who want one neuromcp shared by all their MCP clients:
+
+1. **Install neuromcp at a stable location** — required because the
+   launchd agent must point at a path that does not vanish on cache
+   eviction or reboot. The installer refuses to register a plist that
+   points into `/_npx/`, `/private/tmp/`, `/var/folders/`, or similar
+   ephemeral roots.
+   ```bash
+   npm i -g neuromcp@latest
+   ```
+2. **Enable the daemon**:
+   ```bash
+   neuromcp-enable-daemon
+   ```
+   Default bind: `127.0.0.1:3200`. Flags: `--port`, `--host`,
+   `--log-level`, `--env KEY=VALUE` (repeatable), `--dry-run`,
+   `--uninstall`. Secret-looking values are masked in `--dry-run`.
+3. **Repoint each MCP client**:
+   ```json
+   "neuromcp": {
+     "type": "http",
+     "url": "http://127.0.0.1:3200/mcp"
+   }
+   ```
+   Same shape under `mcpServers.neuromcp` for Claude Code
+   (`~/.claude.json`), Claude Desktop
+   (`~/Library/Application Support/Claude/claude_desktop_config.json`),
+   ChatGPT desktop, Cursor, Continue.
+4. **Restart each client.**
+
+Existing stdio installs continue to work; no migration is forced.
+Escape hatch for advanced users (install in a non-stable location at
+their own risk): `NEUROMCP_ALLOW_TRANSIENT_INSTALL=1 neuromcp-enable-daemon`.
+
+### Security hardening pass (added after three-way independent review)
+
+The daemon listens on loopback only, but a browser tab can still reach
+`http://127.0.0.1:<port>` from any open page. Three independent reviews
+(security-reviewer + typescript-reviewer agents + Codex CLI) flagged
+the same root cause: without Host-header gating the daemon is reachable
+via DNS rebinding, which makes the previous wildcard CORS a real CSRF
+vector. Fixes shipped in this PR before publication:
+
+- **Host header allowlist** (`src/transport/mcp-http-daemon.ts`):
+  any request whose `Host` header is not `127.0.0.1`, `::1`/`[::1]`, or
+  `localhost` is rejected up front with `421 Misdirected Request`. This
+  blocks DNS-rebinding attacks before routing or body parsing.
+- **Loopback-only CORS** (`src/transport/http.ts`): the old
+  `Access-Control-Allow-Origin: *` default is gone. `ACAO` is only set
+  when the request `Origin` is itself loopback (or absent — non-browser
+  client). Any other origin gets no `ACAO` header and the browser blocks
+  the cross-origin read.
+- **Body size limit on REST POST endpoints** (`src/transport/http.ts`):
+  `/api/store` and `/api/store-batch` previously accumulated bodies in
+  `body += chunk.toString()` with no cap. Now capped at 32 MiB,
+  enforced before parsing, with `413 payload_too_large` on overflow.
+  The `/mcp` endpoint already had an 8 MiB cap.
+- **Session cap on the MCP daemon** (`src/transport/mcp-http-daemon.ts`):
+  64 concurrent sessions max. A misbehaving client cannot exhaust
+  memory by spinning up sessions without ever closing.
+- **Session-init error cleanup** (`src/transport/mcp-http-daemon.ts`):
+  if `transport.handleRequest()` throws after `onsessioninitialized`
+  has fired, the session would previously leak in the map.
+  `transport.close()` is now invoked in the catch path, which triggers
+  `onclose` and removes the entry.
+- **XML-escape in plist substitution** (`bin/enable-daemon.mjs`): all
+  rendered values pass through `xmlEscape()` so `&`, `<`, `>`, `"`, `'`
+  in `PATH` or `--host` cannot produce malformed plist XML.
+- **`--env KEY=VALUE` + auto-forward of relevant env vars**
+  (`bin/enable-daemon.mjs` + plist template): users migrating from
+  `mcpServers.neuromcp.env` configs keep their config. Auto-forwards
+  `NEUROMCP_*`, `OLLAMA_HOST`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
+  from the installing shell; `--env` adds anything else explicitly.
+- **Dry-run secret masking** (`bin/enable-daemon.mjs`): keys matching
+  `KEY|TOKEN|SECRET|PASSWORD` are rendered as `[REDACTED-N-chars]` in
+  the printed plist. The real plist (written when `--dry-run` is
+  omitted) still carries the real values. Prevents accidental leaks via
+  pasted dry-run output.
+- **Argv flag-value parsing**: `--port` / `--host` / `--log-level`
+  / `--env` with a missing value now errors instead of silently
+  consuming the next flag.
+- **Daemon shutdown race guard** (`src/daemon.ts`): re-entrant
+  `cleanup()` (two signals in quick succession) is a no-op on the
+  second call. `Number.parseInt` replaced with `Number.isInteger`
+  validation so `"3200.5"` is rejected.
+
+### Codex review loop (rounds 2 through 8)
+
+After the initial three-way review (security-reviewer agent +
+typescript-reviewer agent + Codex), the working tree was re-reviewed
+by Codex CLI seven more times. Each round surfaced fewer issues than
+the last; every actionable finding inside the new code is now fixed:
+
+- Round 2 → 4 issues fixed (non-loopback bind reject, plist 0o600,
+  session idle sweep, IPv6 bracketed origins).
+- Round 3 → 3 issues fixed (REST-write CSRF on text/plain POST, stale
+  POST-session 404, plist chmod-on-write).
+- Round 4 → 2 issues fixed (MCP `/mcp` CORS preflight + Expose-Headers,
+  non-loopback Host header allowlist under insecure-mode opt-in).
+- Round 5 → 2 issues fixed (GET-session 404 consistency, 413-before-destroy).
+- Round 6 → 2 issues fixed (concurrent-init pending counter to enforce
+  cap under load, Host port validation + defensive URL parse).
+- Round 7 → 2 in-PR fixes (pendingInits leak on rejected initialize,
+  active-SSE-stream tracking so live notification subscribers are not
+  reaped by the idle sweep). 1 P2 deferred to FOUND-DURING-FIX.md
+  (`enable-daemon.mjs` writes npx-cache paths into the launchd plist —
+  needs a focused installer PR that copies the daemon into
+  `~/.neuromcp/bin/` first; out of scope for the daemon transport itself).
+- Round 8 → only the deferred npx-cache-path P2 remains.
+
+Final test count and verifications:
+
+
+
+A second Codex review on the hardened branch surfaced four more issues
+in the new code itself; all fixed in this PR before publication:
+
+- **Non-loopback bind guard** (`src/daemon.ts`): the daemon now refuses
+  to start when `NEUROMCP_DAEMON_HOST` is anything other than
+  `127.0.0.1`, `::1`, or `localhost`. The Host-header allowlist does
+  not protect a real LAN bind because any HTTP client on the network
+  can forge `Host: 127.0.0.1` themselves. Escape hatch:
+  `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1` (for users running behind
+  a reverse-proxy + auth).
+- **Owner-only plist permissions** (`bin/enable-daemon.mjs`): when the
+  installer auto-forwards `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+  user-supplied `--env` values, the rendered plist contains secrets.
+  File mode is now `0o600` (`-rw-------`) instead of `0o644`, so other
+  local users / processes cannot read those secrets off disk.
+- **Idle-session sweep** (`src/transport/mcp-http-daemon.ts`): POST
+  `/mcp` is stateless — when a client crashes without sending DELETE,
+  the socket close does NOT trigger `transport.onclose` because the
+  transport already detached from the request. A 60s-cadence sweep
+  closes sessions idle for more than 30 minutes, so a long-lived
+  daemon does not eventually saturate the 64-session cap with
+  abandoned sessions.
+- **Bracketed IPv6 origin** (`src/transport/http.ts`): some browsers /
+  Node versions return `[::1]` (with brackets) from `URL.hostname`.
+  The CORS allowlist now strips them so IPv6 loopback origins
+  (`http://[::1]:...`) keep working.
+
+### Verification
+
+- Live security smoke (post-hardening):
+  - `curl -H 'Host: attacker.com' .../health` → `421 misdirected_request`
+  - `curl -H 'Origin: https://evil.example.com' .../health` → 200 but
+    no `Access-Control-Allow-Origin` header in response
+  - `curl -H 'Origin: http://127.0.0.1:5173' .../health` → 200 and
+    `Access-Control-Allow-Origin: http://127.0.0.1:5173`
+  - `OPENAI_API_KEY=sk-test-... node bin/enable-daemon.mjs --dry-run`
+    → output contains `[REDACTED-26-chars]`, no `sk-test` literal
+  - `NEUROMCP_DAEMON_HOST=0.0.0.0 neuromcp-daemon` → fatal-exits with
+    "Refusing to start neuromcp daemon on non-loopback host"
+  - `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1 NEUROMCP_DAEMON_HOST=0.0.0.0
+    neuromcp-daemon` → starts (explicit opt-in)
+  - Loopback default (127.0.0.1) → starts normally
+- Live multi-client smoke (Fase D, still valid post-hardening): two
+  independent cURL sessions with different session ids, one stores a
+  memory in a fresh namespace, the other recalls the exact same id.
+- Test suite: 53 files / **348 tests green** (4 daemon E2E + 3 new
+  security-guard tests on top of the existing 341).
+- Build: clean (`tsup` emits both `dist/daemon.js` and
+  `dist/transport/mcp-http-daemon.js`).
+
+### Notes
+
+- Out of scope here: fixing the legacy `startHttpTransport` EADDRINUSE
+  crash. Logged in `FOUND-DURING-FIX.md` as P1; will be a focused
+  follow-up PR.
+
+---
+
 ## [0.24.0] — 2026-05-14
 
 Zombie-cleanup is now **automatic** on `npx neuromcp-init-wiki`. The
