@@ -54,6 +54,28 @@ instance. One shared DB. One embedding pipeline. No port conflicts.
 - **`tsup.config.ts`**: added `src/daemon.ts` and
   `src/transport/mcp-http-daemon.ts` to the entry list.
 
+### Fixed
+
+- **`templates/hooks/neuromcp-persist.cjs` — `.work-state.md` append-spam
+  (regression from v0.22.0, commit `943c436`).** The Stop hook's
+  `stripActiveProject` regex used `\Z` to anchor at end-of-string, but in
+  JavaScript `\Z` matches a literal `Z` character (Perl/Python semantics
+  do not apply). Because every Active-Project block contains an ISO 8601
+  UTC timestamp ending in `Z`, the non-greedy match terminated at that
+  timestamp's trailing `Z` instead of the next `##` header or end-of-file.
+  The block was only partially stripped, leaving `Z\nWiki page: …` orphan
+  content. Each subsequent Stop run carried the orphan forward in
+  `existingClaudeBody` while ALSO writing a fresh Active-Project block,
+  causing the file to grow by one block per session. Observed in the wild
+  at 25k tokens after enough sessions, which then poisoned the
+  SessionStart context-inject path. Fix: replace `\Z` with `$` (JS
+  end-of-string anchor without the `m` flag). Regression test:
+  `tests/unit/hook-persist-strip-active-project.test.ts` — 2 assertions:
+  no orphan `^Z$` lines after strip, file size stable across 5 repeated
+  Stop invocations. Existing corrupted `.work-state.md` files at users
+  are repaired automatically on the next Stop with the patched hook; no
+  migration step needed.
+
 ### Migration
 
 For users who want one neuromcp shared by all their MCP clients:

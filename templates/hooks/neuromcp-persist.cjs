@@ -321,8 +321,14 @@ try {
         const stripActiveProject = (s) => {
           // Drop the "## Active Project" header block — Stop hook re-writes
           // it from wiki ground truth on every session.
+          //
+          // NOTE: `\Z` is NOT end-of-string in JavaScript regex (it matches a
+          // literal `Z` character). We use `$` without the `m` flag, which
+          // anchors to end-of-string. The non-greedy `[\s\S]*?` ensures we
+          // stop at the first following `\n## ` header (next section) when
+          // one exists, otherwise at end-of-string.
           return s
-            .replace(/##\s+Active Project[\s\S]*?(?=\n##\s|\Z)/g, "")
+            .replace(/##\s+Active Project[\s\S]*?(?=\n##\s|$)/g, "")
             .replace(/^\s*\n+/, "");
         };
 
