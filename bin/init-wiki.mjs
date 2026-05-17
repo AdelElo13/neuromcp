@@ -102,7 +102,7 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
       renameSync(oldPersistHook, archived);
       log(`Migrated: archived old neuromcp-persist.js → ${archived}`);
     }
-    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.cjs', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs', 'neuromcp-critic.cjs']) {
+    for (const hook of ['neuromcp-context-inject.js', 'neuromcp-persist.cjs', 'neuromcp-auto-capture.js', 'neuromcp-auto-retrieve.cjs', 'neuromcp-critic.cjs', 'neuromcp-health-check.cjs']) {
       const src = join(hooksDir, hook);
       const dest = join(claudeHooksDir, hook);
       if (!existsSync(dest) && existsSync(src)) {
@@ -123,6 +123,14 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
         type: 'command',
         command: `node "${claudeHooksDir}/neuromcp-context-inject.js"`,
         timeout: 5,
+      }],
+    },
+    'SessionStart:health-check': {
+      matcher: '*',
+      hooks: [{
+        type: 'command',
+        command: `node "${claudeHooksDir}/neuromcp-health-check.cjs"`,
+        timeout: 8,
       }],
     },
     PostToolUse: {
@@ -208,10 +216,14 @@ if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all
     let added = 0;
 
     for (const [eventType, entry] of Object.entries(neuromcpHooks)) {
-      // Stop:auto-capture is registered under the Stop event type
-      const actualEventType = eventType.startsWith('Stop:') ? 'Stop' : eventType;
+      // Stop:auto-capture is registered under the Stop event type;
+      // SessionStart:health-check under the SessionStart event type.
+      const actualEventType = eventType.startsWith('Stop:') ? 'Stop'
+        : eventType.startsWith('SessionStart:') ? 'SessionStart'
+        : eventType;
       if (!settings.hooks[actualEventType]) settings.hooks[actualEventType] = [];
       const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject'
+        : eventType.includes('health-check') ? 'neuromcp-health-check'
         : eventType.includes('auto-capture') ? 'neuromcp-auto-capture'
         : eventType.includes('neuromcp-critic') ? 'neuromcp-critic'
         : eventType === 'UserPromptSubmit' ? 'neuromcp-auto-retrieve'
