@@ -151,27 +151,47 @@ if (claudePath) {
 }
 
 // ─── Output ───────────────────────────────────────────────────────────
+//
+// IMPORTANT: Claude Code SessionStart hooks (v2 format) require JSON output
+// wrapped in { hookSpecificOutput: { hookEventName: "SessionStart",
+// additionalContext: "..." } } — plain text is silently discarded. We emit
+// the same human-readable report two ways:
+//   - JSON to stdout → Claude sees it as additionalContext
+//   - identical text to stderr → visible if a human tails the hook
+//
+// This dual-channel pattern means broken consolidation reaches BOTH the
+// agent and any human watching the logs — the entire point of P1.
+
 const ts = new Date().toISOString();
 const plural = (n) => (n === 1 ? '' : 's');
 
+function emit(body, exitCode) {
+    // Human-readable copy to stderr (for `tail -f` debugging by users).
+    process.stderr.write(`${body}\n`);
+    // JSON envelope to stdout (Claude Code consumes this as additionalContext).
+    process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: body,
+        },
+    }));
+    process.exit(exitCode);
+}
+
 if (fails > 0) {
-    process.stdout.write(`[neuromcp-health ${ts}] ❌ DEGRADED\n`);
-    for (const l of lines) process.stdout.write(`${l}\n`);
-    process.stdout.write(
-        `\n⚠️  neuromcp DEGRADED (${fails} failure${plural(fails)}, ${warns} warning${plural(warns)}) — ` +
-        `recall + auto-capture incomplete until fixed.\n`
-    );
-    process.exit(2);
+    let body = `[neuromcp-health ${ts}] ❌ DEGRADED\n`;
+    for (const l of lines) body += `${l}\n`;
+    body += `\n⚠️  neuromcp DEGRADED (${fails} failure${plural(fails)}, ${warns} warning${plural(warns)}) — ` +
+            `recall + auto-capture incomplete until fixed.`;
+    emit(body, 2);
 }
 
 if (warns > 0) {
-    process.stdout.write(`[neuromcp-health ${ts}] ⚠️  ${warns} warning${plural(warns)}\n`);
-    for (const l of lines) process.stdout.write(`${l}\n`);
-    process.exit(1);
+    let body = `[neuromcp-health ${ts}] ⚠️  ${warns} warning${plural(warns)}\n`;
+    for (const l of lines) body += `${l}\n`;
+    emit(body.trimEnd(), 1);
 }
 
-process.stdout.write(
-    `[neuromcp-health ${ts}] ✅ healthy ` +
-    `(DB ${dbSizeMb}MB, wiki ${wikiAgeDays}d, ${pendingSessions} queued)\n`
-);
-process.exit(0);
+const healthyBody = `[neuromcp-health ${ts}] ✅ healthy ` +
+    `(DB ${dbSizeMb}MB, wiki ${wikiAgeDays}d, ${pendingSessions} queued)`;
+emit(healthyBody, 0);
