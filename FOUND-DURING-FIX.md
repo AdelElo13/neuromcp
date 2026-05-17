@@ -70,3 +70,189 @@ And: remove the unused `dirname` import on line 2.
 **Severity:** P3 — lint fails, build still ships (`tsc --noEmit` does not run because `eslint &&` short-circuits). Not a runtime bug, but blocks `npm run lint` clean state.
 
 **Out of scope here** because the v13 schema additions in this PR do not touch `src/episode/`. Raising as a follow-up ticket.
+
+---
+
+## P1: `startHttpTransport()` does not attach `httpServer.on('error', ...)` — EADDRINUSE crashes whole process despite try/catch
+
+**Symptom:** Starting `neuromcp` with `NEUROMCP_HTTP_ENABLED=true` while another instance already holds port 3200 causes the new process to die with an uncaught `Error: listen EADDRINUSE: address already in use 127.0.0.1:3200`. The `try { await startHttpTransport(...) } catch { logger.warn(...) }` block in `src/index.ts` does NOT catch this, even though it looks like it should.
+
+**Origin:** `src/transport/http.ts:250-262` returns a Promise that only resolves on the `listen()` success callback. There is no `httpServer.on('error', ...)` registration. When the bind fails, `'error'` is emitted asynchronously on the server instance with no listener attached, which Node treats as an unhandled `'error'` event → process exit.
+
+**Hypothesised root cause:** classic Node.js http.Server bind-error pitfall. Listen success callback fires only on success; bind errors come through the `'error'` event, not as a Promise rejection of `listen()`.
+
+**Proposed fix:** in `src/transport/http.ts`, change the final return to attach both `error` and `listening` handlers, racing them to the Promise outcome:
+
+```ts
+return new Promise<Server>((resolve, reject) => {
+  const onError = (err: Error): void => {
+    httpServer.removeListener('listening', onListening);
+    reject(err);
+  };
+  const onListening = (): void => {
+    httpServer.removeListener('error', onError);
+    logger.info('http', `HTTP API listening on ${options.host}:${options.port}`, { /* … */ });
+    resolve(httpServer);
+  };
+  httpServer.once('error', onError);
+  httpServer.once('listening', onListening);
+  httpServer.listen(options.port, options.host);
+});
+```
+
+That makes the existing try/catch in `index.ts` actually do its job ("HTTP transport failed to start, running stdio-only"), and removes the EADDRINUSE crash from multi-client setups (Claude Code + Claude Desktop + ChatGPT all spawning their own stdio-neuromcp).
+
+**Severity:** P1 — silently breaks neuromcp for any user with multiple MCP-capable clients on the same machine. No data loss, but feature simply does not start. Workaround (`NEUROMCP_HTTP_ENABLED=false`) is what unblocked the present author.
+
+**Out of scope here** because the daemon-mode work in this PR introduces a *new* `src/transport/mcp-http.ts` daemon path and doesn't refactor the legacy `startHttpTransport()` listen logic. Will be addressed in a focused PR (defensive-listen) right after v0.25 daemon mode lands; that PR can attach the error handler in 8 lines without touching the rest of `http.ts`.
+
+---
+
+## ~~P2: `neuromcp-enable-daemon` renders npx cache paths into launchd plist~~ [RESOLVED in-PR]
+
+**Originally deferred to a follow-up.** Closed during round-8 hardening pass after Adel's "echt af, geen fouten meer" directive.
+
+**Fix shipped (in `bin/enable-daemon.mjs`):** the installer now detects transient install roots (`/_npx/`, `/_cacache/`, `/private/tmp/`, `/var/folders/`, `/tmp/`) and refuses to register a plist that would point at a path the OS or npm can evict. First-attempt fix tried to copy `bin/` + `dist/` to `~/.neuromcp/` but the daemon also needs `node_modules` (MCP SDK, better-sqlite3 native binding, onnxruntime native) which cannot be relocated faithfully across Node ABIs — so the safer fix is detect-and-refuse with a clear remedy (`npm i -g neuromcp@latest`) and an explicit escape hatch (`NEUROMCP_ALLOW_TRANSIENT_INSTALL=1`) for advanced users.
+
+---
+
+## P2: Consolidation summarizer produces speculative content → 100% audit-rejection rate
+
+**Reported symptom:** Wiki pages stale (`~/.neuromcp/wiki/index.md` 3 days old at 2026-05-17 even though `launchd` cron `com.neuromcp.consolidate` fires every 4h). Every `consolidate-sessions.py` run ends with `Done: 0/N projects processed`. Result: user-facing recall is consistently "thin" — recurring frustration *"werkt neuromcp nu naar behoren?"*.
+
+**What I found in code (branch `feat/mcp-http-daemon-v0.25`, file `scripts/consolidate-sessions.py:564-581`):**
+
+The summarizer prompt instructs Claude to *"Cover: version changes, bugs (root cause + fix), decisions (with rationale)..."* but contains **no evidence-grounding clause**. Claude (Haiku) produces plausible-sounding summaries that include details the source sessions do not contain.
+
+The auditor (`scripts/consolidate-sessions.py:171+`, `audit_summary()`) is strict — it verifies every claim traces back to a quoted line in the source sessions. Sample rejections from the 2026-05-16 02:19 launchd run, captured in `~/.neuromcp/consolidation.log`:
+
+- `Verascripta batch 1/2 REJECTED — Last commit date (30 apr) ... not mentioned in source sessions`
+- `Verascripta batch 2/2 REJECTED — scripts/run-tests.sh does not appear in FILES MODIFIED across any of the 4 source sessions`
+- `home batch 1/1 REJECTED — Summary invents causal mechanisms (Supabase re-triggering telegram) ... not present in session logs`
+- `neuromcp batch 1/1 REJECTED — Summary conflates Telegram questions with invented technical explanations`
+
+All 4 batches rejected → `Done: 0/3 projects processed`. The auditor catches the speculation but no summary survives → wiki never updates → recall stays thin.
+
+**Root cause:** summarizer prompt is permissive, auditor is strict. The two are mis-aligned. Softening the auditor would breach Adel's hard evidence-rule; the fix is to harden the summarizer.
+
+**Proposed fix:** add four evidence-grounding clauses to the `STRICT INSTRUCTIONS` block in `consolidate_batch()` around line 574:
+
+```
+- EVIDENCE RULE: every factual claim (version, date, name, fix, error, decision rationale) MUST be directly traceable to a quoted line in SESSIONS. If you cannot point to a source line, leave it out. Sparse summaries beat fabricated ones.
+- DO NOT invent: causal mechanisms ("X caused Y" when sources show only X and Y separately), commit dates, version numbers, or fix details that the sessions do not explicitly state.
+- DO NOT conflate user questions with answers: if a session contains "[USER]: how does X work?" without a follow-up explanation in the same session, do NOT write a summary that contains the answer.
+- WHEN IN DOUBT: write less, or write "No technical substance this window." A correct sparse summary is acceptable; a confident wrong summary is not.
+```
+
+**Severity:** P2 — real bug, blocks the entire wiki-update pipeline, but has a clean workaround (lokal patch in `~/.neuromcp/scripts/consolidate-sessions.py`). Affects every user of `neuromcp` who enables consolidation — the same prompt ships via npm.
+
+**Out of scope here** because the daemon-mode work in this PR touches `src/transport/*` + `bin/`; it does not modify `scripts/consolidate-sessions.py`. Per CLAUDE.md bug-fix policy: logged here, addressed in a focused follow-up PR after v0.25 lands.
+
+**Recommended next step (post-merge):** branch `fix/consolidation-summarizer-evidence-prompt`. Write regression test that mocks `claude -p` with a known speculative completion and asserts auditor rejects → re-run with patched prompt and assert auditor accepts. Apply the four-clause patch.
+
+**Workaround applied locally on 2026-05-17:** patched `~/.neuromcp/scripts/consolidate-sessions.py` with the four clauses above, so Adel's own cron starts producing acceptable summaries immediately. Not committed to the repo — waiting on daemon-PR merge per project policy.
+
+---
+
+## P2: `consolidate_batch()` silently swallows `claude -p` stderr → opaque "no output" warnings
+
+**Reported symptom:** `~/.neuromcp/consolidation.log` shows `WARN: no output for <project> batch <N>/<M>` with no further context. Real failure mode (auth, rate-limit, crashed CLI, missing prompt-cache, etc.) is invisible. Adel's own debug took >24h to root-cause because the script printed the same "no output" line for an auth-failure as it would for a model-empty-response.
+
+**What I found in code (branch `feat/mcp-http-daemon-v0.25`, file `scripts/consolidate-sessions.py:582-591`):**
+
+```python
+r = subprocess.run(
+    ["claude", "-p", "--tools", "", "--no-session-persistence", prompt],
+    capture_output=True,    # ← captures BOTH stdout and stderr
+    text=True,
+    timeout=300,
+)
+if r.returncode != 0 or not r.stdout.strip():
+    print(f"  WARN: no output for {project} batch {batch_idx}/{batch_total}")
+    return False, []         # ← r.stderr is captured but never inspected
+```
+
+When `claude -p` is logged out, it prints `Not logged in · Please run /login` to stderr **with exit code 0** (which itself is debatable, but it's a separate upstream issue). The Python check `r.returncode != 0` is false, `not r.stdout.strip()` is true → WARN line emitted with no hint that auth was the cause.
+
+**Verification:**
+- `env -i HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin claude -p --tools "" --no-session-persistence --model haiku "say HI" 2>&1` → prints `Not logged in · Please run /login`, exit 0.
+- Three consecutive cron runs (2026-05-16 02:19, 2026-05-17 01:28, 2026-05-17 01:33) all logged 0/N processed with the opaque WARN, masking the actual auth failure for hours.
+
+**Proposed fix:** capture the stderr (or stdout when stderr is empty) tail and print it alongside the exit code:
+
+```python
+if r.returncode != 0 or not r.stdout.strip():
+    stderr_tail = (r.stderr or "").strip().splitlines()[-3:]
+    stdout_tail = (r.stdout or "").strip().splitlines()[-3:]
+    hint = " | stderr: " + " ¶ ".join(stderr_tail) if stderr_tail else ""
+    if stdout_tail and not stderr_tail:
+        hint = " | stdout: " + " ¶ ".join(stdout_tail)
+    print(f"  WARN: no output for {project} batch {batch_idx}/{batch_total} (exit {r.returncode}){hint}")
+    return False, []
+```
+
+Three lines emitted instead of one, with exit-code + last 3 lines of stderr (or stdout if stderr is empty). Costs nothing on success path. Turns silent failures into actionable signal.
+
+**Severity:** P2 — observability bug, not a correctness bug. Masks downstream issues (like the auth failure that hid for >24h). Affects everyone who runs neuromcp consolidation; same script ships via npm.
+
+**Out of scope here** because it lives in `scripts/`, the daemon-PR touches `src/transport/*` + `bin/`. Logged here per CLAUDE.md policy, addressed in the same follow-up PR as the P2 above (single `scripts/consolidate-sessions.py` patch covers both).
+
+**Workaround applied locally on 2026-05-17:** patched `~/.neuromcp/scripts/consolidate-sessions.py` with the diff above. Next failed batch will now log the real cause.
+
+**Upstream context (not a neuromcp bug but worth noting):** `claude -p` returning exit 0 on a not-logged-in error is itself a UX-bug worth raising with Anthropic. A logged-out CLI should arguably exit non-zero so subprocess callers can fail fast.
+
+---
+
+## P1: neuromcp has no runtime-health surface → silent failures break user trust
+
+**Reported symptom:** Adel's hard quote on 2026-05-17: *"voor users die dit downloaden moet alles werken en als er iets mis is moet jij claude dus dat aan ze melden iets mis met neuromcp mensen vertrouwen er blind op dat alles werkt"*.
+
+Concrete failure mode this exposes: when consolidation breaks (e.g. P2 prompt-bug above, or P2 stderr-swallow above, or `claude -p` auth fail, or DB corruption, or 4h cron not firing), **the user keeps using neuromcp assuming it works**. Symptoms only emerge as "recall is thin" days/weeks later. No surface signals: no health endpoint, no `doctor --runtime` mode, no SessionStart context injection saying "I'm degraded".
+
+**What I found in code:**
+
+- `bin/doctor.mjs` (206 lines): install-time checks only — node version, dist presence, sqlite native build, package version, data dir, platform. Pass on all of these even when the runtime pipeline is fully broken.
+- No `health-check`, `--runtime`, `doctor live`, or equivalent command exists.
+- `templates/hooks/` ships auto-capture + persist, but **no health/diagnostics hook**.
+- `~/.neuromcp/consolidation.log` is the only signal — and only if the user happens to `tail` it.
+
+**Proposed fix (two parts):**
+
+### Part A: extend `neuromcp-doctor` with `--runtime` mode
+
+Add a flag that runs runtime checks against the live install. Mirror the structure of the bash script in `Workaround` below, but in Node so it ships cross-platform via npm. Check items:
+
+1. **DB integrity**: `~/.neuromcp/memory.db` exists, openable, returns `SELECT COUNT(*) FROM memories`.
+2. **Wiki freshness**: `wiki/index.md` mtime — WARN if >2d, FAIL if >14d.
+3. **Consolidation backlog**: count `raw/sessions/*.md` minus processed ledger entries; WARN if >100.
+4. **Last consolidation result**: parse last `Done: X/Y` from `consolidation.log`; FAIL if X=0 and Y>0.
+5. **`claude -p` subprocess auth**: probe with 5s ceiling; FAIL on 401 / "Not logged in" / "Invalid auth"; surface fix suggestion.
+6. **Embedding provider reachable**: ping Ollama `nomic-embed-text` endpoint at `http://localhost:11434/api/tags` (or whatever the resolved provider is).
+7. **Auto-capture hook installed**: check `~/.claude/hooks/hooks.json` for the bundled neuromcp hooks, warn if missing on a Claude Code install.
+
+Exit codes: `0=healthy`, `1=degraded(warn)`, `2=broken(fail)`.
+
+Output: structured human-readable lines + `--json` flag for machine consumption.
+
+### Part B: ship a SessionStart hook in `templates/hooks/`
+
+Add `templates/hooks/neuromcp-health-check.{sh,js}` that:
+- Runs `neuromcp-doctor --runtime --quiet` (or equivalent).
+- Outputs a one-liner when healthy (don't pollute every SessionStart with noise).
+- Outputs the full report when degraded (so Claude has the failure surface in context and can tell the user).
+
+Register it in the `neuromcp-init-wiki` installer's hook-injection step so downstream Claude Code users get it automatically.
+
+**Severity:** P1 — addresses Adel's #1 product requirement on 2026-05-17: trust by default, loud failures when broken. Without this, the same silent-failure mode that hid the auth bug for 3+ days will recur with every future regression. The two P2 bugs above (prompt + stderr) only get *caught* by users if this surface exists.
+
+**Workaround applied locally on 2026-05-17:**
+- Created `~/.neuromcp/scripts/health-check.sh` (bash, portable) implementing all 6 checks listed in Part A (except embedding-provider ping; deferred).
+- Registered in `~/.claude/hooks/hooks.json` as 4th SessionStart entry `id: session:neuromcp-health`. Backup of pre-edit hooks.json at `~/.claude/hooks/hooks.json.bak-2026-05-17`.
+- Verified live: outputs one-liner when healthy, full report when degraded. Tested in current degraded state (consolidation broken due to `claude -p` auth), surfaced the 401 + fix suggestion in <1s.
+
+Once daemon-PR merges, the bash script can be ported 1:1 to `bin/doctor.mjs --runtime` (or new `bin/health-check.mjs`), and the template hook can be added to `templates/hooks/`.
+
+**Not yet handled (next iteration):**
+- Telegram/email/desktop notification when health drops from green → red (currently only visible in next SessionStart).
+- Trend tracking (run-to-run delta in `~/.neuromcp/health-log.jsonl`) so we can see "auth broke 14h ago" instead of just "auth broken now".
+- Auto-repair attempts where safe (e.g. `claude -p` 401 → suggest token refresh path, or run `claude login` interactive prompt).
