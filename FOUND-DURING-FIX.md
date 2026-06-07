@@ -256,3 +256,96 @@ Once daemon-PR merges, the bash script can be ported 1:1 to `bin/doctor.mjs --ru
 - Telegram/email/desktop notification when health drops from green → red (currently only visible in next SessionStart).
 - Trend tracking (run-to-run delta in `~/.neuromcp/health-log.jsonl`) so we can see "auth broke 14h ago" instead of just "auth broken now".
 - Auto-repair attempts where safe (e.g. `claude -p` 401 → suggest token refresh path, or run `claude login` interactive prompt).
+
+---
+
+## P1: consolidate-sessions.py — no audit-retry loop on rejected batches
+
+**Reported symptom:** when `audit_summary` returns `(False, reason)` the
+batch is written to `~/.neuromcp/review-queue/<timestamp>_<project>_batch<n>.md`
+and `consolidate_batch` returns `(False, [])`. The ledger is NOT advanced for
+those sessions, so the next scheduled consolidation run will see the same
+batch as pending. But the script does not re-attempt the summary on a fresh
+`claude -p` call within the same run — a single audit rejection per project
+blocks all forward progress for that project until human intervention.
+
+**Observed in the wild:**
+- 2026-05-27 10:00 — `csm-staging batch 1/1 rejected — AUDIT UNAVAILABLE`
+  (timeout). Sat in review-queue 24h until next run, which got further but
+  rejected on different grounds.
+- 2026-06-07 03:31 — `home batch 1/1 rejected — Summary claims '4 sessions'
+  but explicitly lists only 3`. Real audit fired correctly (post-`--tools`
+  fix); the auditor caught a hallucinated count in the Haiku summary. No
+  retry: the next launchd run will hit the same Haiku non-determinism and
+  may reject again.
+
+**Hypothesised root cause:** `consolidate_batch` treats audit rejection as a
+terminal outcome for the run, on the (defensible) theory that humans should
+review queued summaries before re-trying. But the review-queue is not wired
+to any UI or automated re-injection path, so in practice the queue is
+write-only and the backlog grows monotonically.
+
+**Proposed fix (two layers):**
+1. In-run retry with bounded attempts (default 2): on rejection, regenerate
+   summary + re-audit. Different temperature or model on second pass to
+   reduce determinism in the failure mode.
+2. Scheduled re-process pass that walks `review-queue/`, runs the audit
+   against the queued summary + originating raw sessions, and either
+   approves+writes-to-wiki or moves to a `review-queue/exhausted/` dir
+   after N total attempts across runs. Exhausted batches surface in
+   `health-check.sh` as a degraded-state signal.
+
+**Severity:** P1 — the consolidation main flow was rescued by the
+`--tools ""` removal (this PR), but without retry the wiki will still
+plateau on any project that hits a single Haiku hallucination in summary
+generation. That is exactly the kind of silent slow-degrade that Adel
+called out: "we gaan niet voor 'goed genoeg' ... geen stille fallbacks".
+
+**Out of scope for this PR** (current PR: tools/stdin fix in
+`consolidate-sessions.py` only).
+
+---
+
+## P2: claude CLI — at least one MCP tool registers a top-level oneOf/allOf/anyOf input_schema
+
+**Reported symptom:** any `claude -p --tools <value>` invocation (any value
+— `""`, `none`, `[]`, `Read`, etc.) returns
+`API Error 400 tools.N.custom.input_schema: input_schema does not support
+oneOf, allOf, or anyOf at the top level`. The index N shifts with each added
+`--tools <value>`, suggesting the flag appends to the implicit registered
+set rather than replacing it.
+
+**What I confirmed (not in this repo):**
+- `claude -p --no-session-persistence "<prompt>"` (no `--tools` flag at all)
+  works correctly with no tools registered → exit 0, response on stdout.
+- `claude -p --tools "" "<prompt>"` and every other `--tools <value>` I
+  tried → exit 1 with the 400 error above.
+- Reproduced with `claude --version` = `2.1.141 (Claude Code)` on macOS
+  Darwin 25.5.0, 2026-06-07.
+
+**Why this matters for neuromcp:**
+- The fixed call sites in `consolidate-sessions.py` now correctly omit the
+  flag. No further action needed inside this repo.
+- BUT: any future `claude -p`-based workflow (tests, scripts, integrations
+  in downstream tools) that tries to use `--tools` for tool-allow-listing
+  will hit this. It is an ecosystem-wide footgun, not a neuromcp one.
+
+**Hypothesised root cause (educated guess, not verified):** one of the
+installed MCP servers / Claude Code plugins / built-in tools is shipping a
+JSON Schema whose top-level form uses `oneOf` / `allOf` / `anyOf`. The
+Anthropic Messages API tool-schema validator rejects this (per the API
+error message). The CLI does not pre-validate the schema before sending,
+so the rejection only surfaces at API-call time.
+
+**Proposed action:** out-of-scope investigation in Adel's `~/.claude/`
+plugin/MCP set. To identify tool N: run `claude -p --tools "" --debug
+"<prompt>"` (if `--debug` exists) or instrument the CLI to dump the
+registered tool list before the API call. Once N is identified, find the
+offending tool's `input_schema` and rewrite as a flat object schema.
+
+**Severity:** P2 — workaround (don't use `--tools` flag) is trivial and
+fully effective for neuromcp. But it is a latent trap for any future
+project relying on this CLI surface.
+
+**Out of scope for this PR** entirely — this is an upstream / ecosystem
+issue, not a neuromcp issue.

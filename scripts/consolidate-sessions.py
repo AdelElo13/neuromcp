@@ -195,8 +195,9 @@ Rules:
 """
     try:
         r = subprocess.run(
-            ["claude", "-p", "--tools", "", "--no-session-persistence",
+            ["claude", "-p", "--no-session-persistence",
              "--model", AUDIT_MODEL, prompt],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AUDIT_TIMEOUT_SEC,
@@ -245,10 +246,18 @@ def queue_for_review(project: str, batch_idx: int, summary: str, reason: str) ->
 # ─── Tier 2 C+D+F: atomic fact extraction + temporal supersession ───────
 
 def _run_claude(prompt: str, timeout: int) -> str | None:
+    # NOTE: --tools "" removed — Claude CLI >= 2.x rejects any --tools value
+    # because a registered MCP tool has a top-level oneOf/allOf/anyOf schema
+    # the Anthropic API refuses (API Error 400 tools.N.custom.input_schema).
+    # Default (no flag) yields prompt-only completion, which is what
+    # summary/audit/facts need.
+    # stdin=DEVNULL avoids a 3s stdin handshake stall when invoked from
+    # launchd or other non-TTY contexts.
     try:
         r = subprocess.run(
-            ["claude", "-p", "--tools", "", "--no-session-persistence",
+            ["claude", "-p", "--no-session-persistence",
              "--model", AUDIT_MODEL, prompt],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=timeout,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -581,7 +590,8 @@ STRICT INSTRUCTIONS:
 """
     try:
         r = subprocess.run(
-            ["claude", "-p", "--tools", "", "--no-session-persistence", prompt],
+            ["claude", "-p", "--no-session-persistence", prompt],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=300,

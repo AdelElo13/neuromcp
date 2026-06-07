@@ -76,6 +76,36 @@ instance. One shared DB. One embedding pipeline. No port conflicts.
   are repaired automatically on the next Stop with the patched hook; no
   migration step needed.
 
+- **`scripts/consolidate-sessions.py` — main flow stalled since Claude CLI
+  >= 2.x tightened tool-schema validation.** Every `claude -p` invocation in
+  the script (audit, summary, fact-extract) passed `--tools ""` as an
+  attempt to disable external tools. The new CLI does not interpret the
+  empty value as "no tools" — it registers the user's full MCP tool set
+  anyway, and the Anthropic API rejects the call with
+  `API Error 400 tools.N.custom.input_schema: input_schema does not support
+  oneOf, allOf, or anyOf at the top level` because at least one registered
+  MCP tool exposes a top-level `oneOf/allOf/anyOf` schema. The tool index N
+  shifts with each additional `--tools <value>`, confirming the flag
+  appends rather than replaces. Effect: every consolidation batch failed
+  before producing a summary, the audit fail-closed path queued the empty
+  batch to `~/.neuromcp/review-queue/`, the launchd job logged
+  `0/N projects updated`, and wiki pages have not been updated since
+  2026-05-19 (project `home` page) / 2026-05-28 (`csm-staging`). Two
+  related symptoms observed in the same call sites: a 3s stdin-handshake
+  stall (`Warning: no stdin data received in 3s, proceeding without it`)
+  when the parent process is non-TTY (launchd, subprocess.run without an
+  explicit `stdin=`), causing exit 1 with empty stdout before the API call
+  even fires. Fix: drop the `--tools` flag entirely (default behaviour is
+  prompt-only completion, which is what audit/summary/facts want) and
+  pass `stdin=subprocess.DEVNULL` to all three `subprocess.run(["claude",
+  "-p", ...])` call sites in the script. Regression test:
+  `tests/unit/consolidate-sessions-script.test.ts` — code-level inspect
+  asserting no `--tools ""` substring and `stdin=subprocess.DEVNULL`
+  present on every `claude -p` subprocess.run header. No new test
+  runtime dependencies (vitest + filesystem read only). Reproduced
+  end-to-end on the local install with a smoke run against `--project home`
+  before and after the patch.
+
 ### Migration
 
 For users who want one neuromcp shared by all their MCP clients:
