@@ -106,6 +106,33 @@ instance. One shared DB. One embedding pipeline. No port conflicts.
   end-to-end on the local install with a smoke run against `--project home`
   before and after the patch.
 
+### Added
+
+- **`scripts/consolidate-sessions.py` — bounded audit retry with model
+  escalation.** Previously, a single audit rejection (e.g. Haiku
+  hallucinating a session count in the generated summary) terminated the
+  batch immediately, queued it to `~/.neuromcp/review-queue/`, and never
+  re-attempted — the review-queue was effectively write-only because no
+  re-injection path existed. Now `consolidate_batch` wraps summary
+  generation + audit in a `for attempt in range(MAX_AUDIT_ATTEMPTS + 1)`
+  loop. Attempt 0 uses `AUDIT_MODEL` (haiku, cheap default); attempts 1+
+  escalate to `RETRY_MODEL` (sonnet) to break Haiku-class non-determinism.
+  The audit fires on every attempt and either approves → wiki write +
+  fact persist, or records the rejection reason for the next attempt.
+  All attempts exhausted → batch lands in `review-queue/exhausted/`
+  (separate from the transient `review-queue/` for single-attempt rejects)
+  so `health-check.sh` can surface persistent failures distinctly. New
+  constants at module scope: `MAX_AUDIT_ATTEMPTS = 2` (= 3 total tries,
+  cost-capped), `RETRY_MODEL = "sonnet"`, `EXHAUSTED_DIR = REVIEW_QUEUE /
+  "exhausted"`. `queue_for_review` gained an `exhausted: bool = False`
+  kwarg that routes the file to the right subdir. Resolves FOUND-DURING-FIX
+  P1 (audit-retry gap). Regression test: `tests/unit/consolidate-sessions-retry.test.ts`
+  — code-level structural assertions on the four primitives (constants
+  exist, loop is bounded by the constant, `RETRY_MODEL != AUDIT_MODEL`,
+  `exhausted` folder is referenced). A behavioural integration test with a
+  fake `claude` shim is deferred (logged in FOUND-DURING-FIX.md as a new
+  P3 follow-up).
+
 ### Migration
 
 For users who want one neuromcp shared by all their MCP clients:

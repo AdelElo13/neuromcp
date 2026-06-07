@@ -259,7 +259,18 @@ Once daemon-PR merges, the bash script can be ported 1:1 to `bin/doctor.mjs --ru
 
 ---
 
-## P1: consolidate-sessions.py — no audit-retry loop on rejected batches
+## P1: consolidate-sessions.py — no audit-retry loop on rejected batches *(RESOLVED — see commit `<sha>` and CHANGELOG.md Unreleased ### Added)*
+
+> **Status:** resolved in the same PR stack that closed the kernel
+> `--tools ""` bug. `consolidate_batch` now wraps summary + audit in a
+> bounded `for attempt in range(MAX_AUDIT_ATTEMPTS + 1)` loop with model
+> escalation (`AUDIT_MODEL` → `RETRY_MODEL`) on retry, and exhausted
+> batches land in `review-queue/exhausted/` so health-check.sh can flag
+> them as a persistent degraded signal. Regression test:
+> `tests/unit/consolidate-sessions-retry.test.ts`.
+>
+> Behavioural integration test with a fake `claude` shim deferred — see
+> P3 below.
 
 **Reported symptom:** when `audit_summary` returns `(False, reason)` the
 batch is written to `~/.neuromcp/review-queue/<timestamp>_<project>_batch<n>.md`
@@ -349,3 +360,49 @@ project relying on this CLI surface.
 
 **Out of scope for this PR** entirely — this is an upstream / ecosystem
 issue, not a neuromcp issue.
+
+---
+
+## P3: consolidate-sessions.py — retry loop has structural test only, no behaviour test
+
+**Reported symptom:** `tests/unit/consolidate-sessions-retry.test.ts`
+asserts that the retry primitives (constants, loop construct, exhausted
+folder reference) exist in the script source. It does NOT assert that a
+rejected batch is actually retried with the escalated model and that
+exhausted batches actually land in `review-queue/exhausted/`. A refactor
+that renames the constants while breaking the runtime behaviour would
+silently pass this test if the new names happen to keep the same regex
+shape, or fail without a clear pointer to the regression.
+
+**Why structural-only was chosen for this PR:** a behaviour test needs
+either (a) a Python test runner (forbidden by project CLAUDE.md "no new
+dependencies without discussion") or (b) a vitest integration test that
+spawns `python3 scripts/consolidate-sessions.py` against a tmpdir with a
+fake `claude` shim binary on PATH. Option (b) is the right answer but
+introduces a new test pattern (PATH manipulation + spawned subprocess +
+fixture sessions) that has no precedent in the repo. Doing it correctly
+takes ~1 hour and benefits from its own design review.
+
+**Proposed fix:** add `tests/integration/consolidate-sessions-retry-behaviour.test.ts`
+that:
+1. Creates a tmpdir with 2 fake raw session files under
+   `<tmpdir>/raw/sessions/`.
+2. Generates a fake `claude` shell script at `<tmpdir>/bin/claude` that
+   - on first invocation returns a summary with a deliberate count
+     mismatch (trigger audit reject),
+   - on second invocation (the retry, with `--model sonnet`) returns a
+     summary that the audit will approve.
+3. Prepends `<tmpdir>/bin` to PATH, runs `python3 scripts/consolidate-sessions.py
+   --since <today>` with `NEUROMCP_DIR` env override pointing at the tmpdir.
+4. Asserts: exit 0, wiki page `<tmpdir>/wiki/projects/<project>.md` was
+   created with the approved summary, ledger advanced, no file in
+   `<tmpdir>/review-queue/exhausted/`.
+5. Mirror test for the exhaustion path: fake `claude` rejects on every
+   call, assert batch lands in `exhausted/` and ledger NOT advanced.
+
+**Severity:** P3 — the structural test catches the common refactor mistake
+(deleting the loop entirely). The gap is the silent-rename-while-breaking
+case, which is rarer. P3 not P1 because we have other observability
+(`health-check.sh` will surface stuck batches in production).
+
+**Blocked by:** nothing. This is straight follow-up work.
