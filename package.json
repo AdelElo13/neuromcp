@@ -1,12 +1,30 @@
 {
   "name": "neuromcp",
-  "version": "0.19.1",
+  "version": "0.25.0",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
     "type": "git",
     "url": "https://github.com/AdelElo13/neuromcp.git"
   },
+  "files": [
+    "dist",
+    "bin",
+    "scripts/backfill-embeddings.mjs",
+    "scripts/consolidate-sessions.py",
+    "scripts/com.neuromcp.consolidate.plist.template",
+    "scripts/com.neuromcp.daemon.plist.template",
+    "scripts/com.neuromcp.zombie-cleanup.plist.template",
+    "scripts/download-model.mjs",
+    "scripts/download-model.ts",
+    "scripts/index-wiki.mjs",
+    "scripts/launcher.sh",
+    "scripts/run-consolidation.sh",
+    "templates",
+    "README.md",
+    "LICENSE",
+    "LICENSE-EXAMPLES"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -36,28 +54,24 @@
     "./cognitive/contradiction": "./dist/cognitive/contradiction.js",
     "./transport/events": "./dist/transport/events.js",
     "./transport/http": "./dist/transport/http.js",
+    "./transport/mcp-http-daemon": "./dist/transport/mcp-http-daemon.js",
+    "./daemon": "./dist/daemon.js",
     "./resources": "./dist/resources/index.js",
     "./prompts": "./dist/prompts/index.js"
   },
   "bin": {
     "neuromcp": "bin/neuromcp.mjs",
+    "neuromcp-daemon": "bin/neuromcp-daemon.mjs",
     "neuromcp-init-wiki": "bin/init-wiki.mjs",
     "neuromcp-enable-consolidation": "bin/enable-consolidation.mjs",
+    "neuromcp-enable-zombie-cleanup": "bin/enable-zombie-cleanup.mjs",
+    "neuromcp-enable-daemon": "bin/enable-daemon.mjs",
     "neuromcp-index-wiki": "scripts/index-wiki.mjs",
     "neuromcp-backfill-embeddings": "scripts/backfill-embeddings.mjs",
     "neuromcp-query": "bin/query.mjs",
     "neuromcp-embed": "bin/embed.mjs",
     "neuromcp-doctor": "bin/doctor.mjs"
   },
-  "files": [
-    "dist",
-    "bin",
-    "scripts",
-    "templates",
-    "README.md",
-    "LICENSE",
-    "LICENSE-EXAMPLES"
-  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",

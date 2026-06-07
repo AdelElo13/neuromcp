@@ -3,6 +3,564 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — feat/mcp-http-daemon
+
+Multi-client first-class support via a long-lived daemon that serves the
+MCP Streamable HTTP transport on one shared port. Each MCP-capable client
+(Claude Code, Claude Desktop, ChatGPT desktop, Cursor, …) points at
+`http://<host>:<port>/mcp` instead of spawning its own stdio neuromcp
+instance. One shared DB. One embedding pipeline. No port conflicts.
+
+### Added
+
+- **`neuromcp-daemon` bin** (new): runs a long-lived HTTP server that
+  exposes the MCP Streamable HTTP transport on `/mcp` plus the existing
+  REST/SSE endpoints (`/health`, `/api/store`, `/api/search`,
+  `/api/store-batch`, `/events`) on the same port. Multi-tenant: every
+  MCP `initialize` mints a fresh session id + dedicated `McpServer` +
+  dedicated transport, with cleanup on `transport.onclose`.
+- **`src/transport/mcp-http-daemon.ts`**: the daemon transport
+  implementation. Uses `StreamableHTTPServerTransport` from the official
+  MCP SDK. Defensive port-bind error handler (rejects the start Promise
+  instead of letting EADDRINUSE crash the process via an unhandled
+  `'error'` event — see `FOUND-DURING-FIX.md` P1 for the related bug
+  in the legacy `startHttpTransport` path that will be fixed next).
+- **`src/daemon.ts`**: daemon entrypoint. Reads `NEUROMCP_DAEMON_PORT`
+  (default `3200`) and `NEUROMCP_DAEMON_HOST` (default `127.0.0.1`).
+  Graceful shutdown on SIGINT/SIGTERM.
+- **`neuromcp-enable-daemon` bin** (new): macOS launchd helper that
+  renders `scripts/com.neuromcp.daemon.plist.template`, installs it to
+  `~/Library/LaunchAgents/com.neuromcp.daemon.plist`, then bootstraps +
+  kickstarts. `--port`, `--host`, `--log-level`, `--dry-run`,
+  `--uninstall` flags supported. Plist uses `KeepAlive` (Crashed-only)
+  + `ThrottleInterval=10` to survive crashes without thrash loops.
+- **4 new integration tests** in
+  `tests/integration/mcp-http-daemon-e2e.test.ts` covering:
+  initialize → session id; `tools/list` over an established session;
+  400 on a non-init request without session id; legacy `/health`
+  still served on the same port.
+
+### Changed
+
+- **`src/transport/http.ts`**: REST handler extracted as exported
+  `createRestRequestHandler(logger, deps?)` so both the legacy
+  `startHttpTransport` and the new daemon mount the same endpoints
+  without duplicating logic. Behavior unchanged; the existing
+  `http-e2e.test.ts` suite still passes 5/5.
+- **`package.json`**: added `neuromcp-daemon` and
+  `neuromcp-enable-daemon` bin entries; published exports for
+  `./daemon` and `./transport/mcp-http-daemon`; added the daemon plist
+  template to `files`.
+- **`tsup.config.ts`**: added `src/daemon.ts` and
+  `src/transport/mcp-http-daemon.ts` to the entry list.
+
+### Fixed
+
+- **`templates/hooks/neuromcp-persist.cjs` — `.work-state.md` append-spam
+  (regression from v0.22.0, commit `943c436`).** The Stop hook's
+  `stripActiveProject` regex used `\Z` to anchor at end-of-string, but in
+  JavaScript `\Z` matches a literal `Z` character (Perl/Python semantics
+  do not apply). Because every Active-Project block contains an ISO 8601
+  UTC timestamp ending in `Z`, the non-greedy match terminated at that
+  timestamp's trailing `Z` instead of the next `##` header or end-of-file.
+  The block was only partially stripped, leaving `Z\nWiki page: …` orphan
+  content. Each subsequent Stop run carried the orphan forward in
+  `existingClaudeBody` while ALSO writing a fresh Active-Project block,
+  causing the file to grow by one block per session. Observed in the wild
+  at 25k tokens after enough sessions, which then poisoned the
+  SessionStart context-inject path. Fix: replace `\Z` with `$` (JS
+  end-of-string anchor without the `m` flag). Regression test:
+  `tests/unit/hook-persist-strip-active-project.test.ts` — 2 assertions:
+  no orphan `^Z$` lines after strip, file size stable across 5 repeated
+  Stop invocations. Existing corrupted `.work-state.md` files at users
+  are repaired automatically on the next Stop with the patched hook; no
+  migration step needed.
+
+- **`templates/hooks/neuromcp-persist.cjs` — raw-log filename collision
+  (silent overwrite).** Surfaced by Codex review 2026-06-07 on the
+  persist-hook test suite. The raw-log filename was
+  `YYYY-MM-DD-HHMM.md` (minute precision). When two Stop hooks fire within
+  the same minute — common during fast iteration, hook-driven workflows,
+  or rapid restart cycles — the second invocation silently overwrote the
+  first session's raw log. No warning, no error, just one session of work
+  lost. Patched to `YYYY-MM-DD-HHMMSS.md` (second precision) with a
+  collision-counter suffix (`-1`, `-2`, ...) for the rare case where even
+  second-precision names already exist. Regression test:
+  `tests/unit/hook-persist-filename-collision.test.ts` — 3 cases
+  (back-to-back distinct files, distinct internal Session-ended
+  timestamps, 3 rapid-fire stops). Same Codex review also led us to
+  beef up `tests/unit/hook-persist-strip-active-project.test.ts` with
+  assertions that Claude-authored body sections (`## Current Work`,
+  `## Next Steps`, `## Key Files`) survive the Active-Project strip;
+  previously the test would have green-lighted a regression that
+  preserves the `\Z` fix while stripping the Claude-owned body — silent
+  context destruction. The new assertions pin both section headers and
+  content snippets.
+
+- **`scripts/consolidate-sessions.py` — main flow stalled since Claude CLI
+  >= 2.x tightened tool-schema validation.** Every `claude -p` invocation in
+  the script (audit, summary, fact-extract) passed `--tools ""` as an
+  attempt to disable external tools. The new CLI does not interpret the
+  empty value as "no tools" — it registers the user's full MCP tool set
+  anyway, and the Anthropic API rejects the call with
+  `API Error 400 tools.N.custom.input_schema: input_schema does not support
+  oneOf, allOf, or anyOf at the top level` because at least one registered
+  MCP tool exposes a top-level `oneOf/allOf/anyOf` schema. The tool index N
+  shifts with each additional `--tools <value>`, confirming the flag
+  appends rather than replaces. Effect: every consolidation batch failed
+  before producing a summary, the audit fail-closed path queued the empty
+  batch to `~/.neuromcp/review-queue/`, the launchd job logged
+  `0/N projects updated`, and wiki pages have not been updated since
+  2026-05-19 (project `home` page) / 2026-05-28 (`csm-staging`). Two
+  related symptoms observed in the same call sites: a 3s stdin-handshake
+  stall (`Warning: no stdin data received in 3s, proceeding without it`)
+  when the parent process is non-TTY (launchd, subprocess.run without an
+  explicit `stdin=`), causing exit 1 with empty stdout before the API call
+  even fires. Fix: drop the `--tools` flag entirely (default behaviour is
+  prompt-only completion, which is what audit/summary/facts want) and
+  pass `stdin=subprocess.DEVNULL` to all three `subprocess.run(["claude",
+  "-p", ...])` call sites in the script. Regression test:
+  `tests/unit/consolidate-sessions-script.test.ts` — code-level inspect
+  asserting no `--tools ""` substring and `stdin=subprocess.DEVNULL`
+  present on every `claude -p` subprocess.run header. No new test
+  runtime dependencies (vitest + filesystem read only). Reproduced
+  end-to-end on the local install with a smoke run against `--project home`
+  before and after the patch.
+
+### Added
+
+- **`scripts/consolidate-sessions.py` — bounded audit retry with model
+  escalation.** Previously, a single audit rejection (e.g. Haiku
+  hallucinating a session count in the generated summary) terminated the
+  batch immediately, queued it to `~/.neuromcp/review-queue/`, and never
+  re-attempted — the review-queue was effectively write-only because no
+  re-injection path existed. Now `consolidate_batch` wraps summary
+  generation + audit in a `for attempt in range(MAX_AUDIT_ATTEMPTS + 1)`
+  loop. Attempt 0 uses `AUDIT_MODEL` (haiku, cheap default); attempts 1+
+  escalate to `RETRY_MODEL` (sonnet) to break Haiku-class non-determinism.
+  The audit fires on every attempt and either approves → wiki write +
+  fact persist, or records the rejection reason for the next attempt.
+  All attempts exhausted → batch lands in `review-queue/exhausted/`
+  (separate from the transient `review-queue/` for single-attempt rejects)
+  so `health-check.sh` can surface persistent failures distinctly. New
+  constants at module scope: `MAX_AUDIT_ATTEMPTS = 2` (= 3 total tries,
+  cost-capped), `RETRY_MODEL = "sonnet"`, `EXHAUSTED_DIR = REVIEW_QUEUE /
+  "exhausted"`. `queue_for_review` gained an `exhausted: bool = False`
+  kwarg that routes the file to the right subdir. Resolves FOUND-DURING-FIX
+  P1 (audit-retry gap). Regression test: `tests/unit/consolidate-sessions-retry.test.ts`
+  — code-level structural assertions on the four primitives (constants
+  exist, loop is bounded by the constant, `RETRY_MODEL != AUDIT_MODEL`,
+  `exhausted` folder is referenced). A behavioural integration test with a
+  fake `claude` shim is deferred (logged in FOUND-DURING-FIX.md as a new
+  P3 follow-up).
+
+- **`scripts/reprocess-review-queue.py` (new) — stale queue file pruner.**
+  Walks `~/.neuromcp/review-queue/*.md` and deletes queue files whose
+  underlying batch sessions are now all in the ledger. This happens when
+  the in-script retry loop (above) eventually succeeds for those sessions
+  in a later launchd run — the ledger advances on the success, but the
+  earlier failed-run's queue file is not auto-removed; without this pruner
+  it would accumulate forever. Files in `review-queue/exhausted/` are
+  never touched: those represent batches that have burned every in-script
+  retry attempt and need human review. Hooked into
+  `scripts/run-consolidation.sh` to run after each consolidation pass.
+  `$NEUROMCP_DIR` (and `$HOME`) env-overridable for testing. Behavioural
+  integration test: `tests/integration/reprocess-review-queue.test.ts` —
+  5 cases covering prune, keep, exhausted-never-touched, missing
+  review-queue/, malformed filenames.
+
+### Migration
+
+For users who want one neuromcp shared by all their MCP clients:
+
+1. **Install neuromcp at a stable location** — required because the
+   launchd agent must point at a path that does not vanish on cache
+   eviction or reboot. The installer refuses to register a plist that
+   points into `/_npx/`, `/private/tmp/`, `/var/folders/`, or similar
+   ephemeral roots.
+   ```bash
+   npm i -g neuromcp@latest
+   ```
+2. **Enable the daemon**:
+   ```bash
+   neuromcp-enable-daemon
+   ```
+   Default bind: `127.0.0.1:3200`. Flags: `--port`, `--host`,
+   `--log-level`, `--env KEY=VALUE` (repeatable), `--dry-run`,
+   `--uninstall`. Secret-looking values are masked in `--dry-run`.
+3. **Repoint each MCP client**:
+   ```json
+   "neuromcp": {
+     "type": "http",
+     "url": "http://127.0.0.1:3200/mcp"
+   }
+   ```
+   Same shape under `mcpServers.neuromcp` for Claude Code
+   (`~/.claude.json`), Claude Desktop
+   (`~/Library/Application Support/Claude/claude_desktop_config.json`),
+   ChatGPT desktop, Cursor, Continue.
+4. **Restart each client.**
+
+Existing stdio installs continue to work; no migration is forced.
+Escape hatch for advanced users (install in a non-stable location at
+their own risk): `NEUROMCP_ALLOW_TRANSIENT_INSTALL=1 neuromcp-enable-daemon`.
+
+### Security hardening pass (added after three-way independent review)
+
+The daemon listens on loopback only, but a browser tab can still reach
+`http://127.0.0.1:<port>` from any open page. Three independent reviews
+(security-reviewer + typescript-reviewer agents + Codex CLI) flagged
+the same root cause: without Host-header gating the daemon is reachable
+via DNS rebinding, which makes the previous wildcard CORS a real CSRF
+vector. Fixes shipped in this PR before publication:
+
+- **Host header allowlist** (`src/transport/mcp-http-daemon.ts`):
+  any request whose `Host` header is not `127.0.0.1`, `::1`/`[::1]`, or
+  `localhost` is rejected up front with `421 Misdirected Request`. This
+  blocks DNS-rebinding attacks before routing or body parsing.
+- **Loopback-only CORS** (`src/transport/http.ts`): the old
+  `Access-Control-Allow-Origin: *` default is gone. `ACAO` is only set
+  when the request `Origin` is itself loopback (or absent — non-browser
+  client). Any other origin gets no `ACAO` header and the browser blocks
+  the cross-origin read.
+- **Body size limit on REST POST endpoints** (`src/transport/http.ts`):
+  `/api/store` and `/api/store-batch` previously accumulated bodies in
+  `body += chunk.toString()` with no cap. Now capped at 32 MiB,
+  enforced before parsing, with `413 payload_too_large` on overflow.
+  The `/mcp` endpoint already had an 8 MiB cap.
+- **Session cap on the MCP daemon** (`src/transport/mcp-http-daemon.ts`):
+  64 concurrent sessions max. A misbehaving client cannot exhaust
+  memory by spinning up sessions without ever closing.
+- **Session-init error cleanup** (`src/transport/mcp-http-daemon.ts`):
+  if `transport.handleRequest()` throws after `onsessioninitialized`
+  has fired, the session would previously leak in the map.
+  `transport.close()` is now invoked in the catch path, which triggers
+  `onclose` and removes the entry.
+- **XML-escape in plist substitution** (`bin/enable-daemon.mjs`): all
+  rendered values pass through `xmlEscape()` so `&`, `<`, `>`, `"`, `'`
+  in `PATH` or `--host` cannot produce malformed plist XML.
+- **`--env KEY=VALUE` + auto-forward of relevant env vars**
+  (`bin/enable-daemon.mjs` + plist template): users migrating from
+  `mcpServers.neuromcp.env` configs keep their config. Auto-forwards
+  `NEUROMCP_*`, `OLLAMA_HOST`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
+  from the installing shell; `--env` adds anything else explicitly.
+- **Dry-run secret masking** (`bin/enable-daemon.mjs`): keys matching
+  `KEY|TOKEN|SECRET|PASSWORD` are rendered as `[REDACTED-N-chars]` in
+  the printed plist. The real plist (written when `--dry-run` is
+  omitted) still carries the real values. Prevents accidental leaks via
+  pasted dry-run output.
+- **Argv flag-value parsing**: `--port` / `--host` / `--log-level`
+  / `--env` with a missing value now errors instead of silently
+  consuming the next flag.
+- **Daemon shutdown race guard** (`src/daemon.ts`): re-entrant
+  `cleanup()` (two signals in quick succession) is a no-op on the
+  second call. `Number.parseInt` replaced with `Number.isInteger`
+  validation so `"3200.5"` is rejected.
+
+### Codex review loop (rounds 2 through 8)
+
+After the initial three-way review (security-reviewer agent +
+typescript-reviewer agent + Codex), the working tree was re-reviewed
+by Codex CLI seven more times. Each round surfaced fewer issues than
+the last; every actionable finding inside the new code is now fixed:
+
+- Round 2 → 4 issues fixed (non-loopback bind reject, plist 0o600,
+  session idle sweep, IPv6 bracketed origins).
+- Round 3 → 3 issues fixed (REST-write CSRF on text/plain POST, stale
+  POST-session 404, plist chmod-on-write).
+- Round 4 → 2 issues fixed (MCP `/mcp` CORS preflight + Expose-Headers,
+  non-loopback Host header allowlist under insecure-mode opt-in).
+- Round 5 → 2 issues fixed (GET-session 404 consistency, 413-before-destroy).
+- Round 6 → 2 issues fixed (concurrent-init pending counter to enforce
+  cap under load, Host port validation + defensive URL parse).
+- Round 7 → 2 in-PR fixes (pendingInits leak on rejected initialize,
+  active-SSE-stream tracking so live notification subscribers are not
+  reaped by the idle sweep). 1 P2 deferred to FOUND-DURING-FIX.md
+  (`enable-daemon.mjs` writes npx-cache paths into the launchd plist —
+  needs a focused installer PR that copies the daemon into
+  `~/.neuromcp/bin/` first; out of scope for the daemon transport itself).
+- Round 8 → only the deferred npx-cache-path P2 remains.
+
+Final test count and verifications:
+
+
+
+A second Codex review on the hardened branch surfaced four more issues
+in the new code itself; all fixed in this PR before publication:
+
+- **Non-loopback bind guard** (`src/daemon.ts`): the daemon now refuses
+  to start when `NEUROMCP_DAEMON_HOST` is anything other than
+  `127.0.0.1`, `::1`, or `localhost`. The Host-header allowlist does
+  not protect a real LAN bind because any HTTP client on the network
+  can forge `Host: 127.0.0.1` themselves. Escape hatch:
+  `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1` (for users running behind
+  a reverse-proxy + auth).
+- **Owner-only plist permissions** (`bin/enable-daemon.mjs`): when the
+  installer auto-forwards `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+  user-supplied `--env` values, the rendered plist contains secrets.
+  File mode is now `0o600` (`-rw-------`) instead of `0o644`, so other
+  local users / processes cannot read those secrets off disk.
+- **Idle-session sweep** (`src/transport/mcp-http-daemon.ts`): POST
+  `/mcp` is stateless — when a client crashes without sending DELETE,
+  the socket close does NOT trigger `transport.onclose` because the
+  transport already detached from the request. A 60s-cadence sweep
+  closes sessions idle for more than 30 minutes, so a long-lived
+  daemon does not eventually saturate the 64-session cap with
+  abandoned sessions.
+- **Bracketed IPv6 origin** (`src/transport/http.ts`): some browsers /
+  Node versions return `[::1]` (with brackets) from `URL.hostname`.
+  The CORS allowlist now strips them so IPv6 loopback origins
+  (`http://[::1]:...`) keep working.
+
+### Verification
+
+- Live security smoke (post-hardening):
+  - `curl -H 'Host: attacker.com' .../health` → `421 misdirected_request`
+  - `curl -H 'Origin: https://evil.example.com' .../health` → 200 but
+    no `Access-Control-Allow-Origin` header in response
+  - `curl -H 'Origin: http://127.0.0.1:5173' .../health` → 200 and
+    `Access-Control-Allow-Origin: http://127.0.0.1:5173`
+  - `OPENAI_API_KEY=sk-test-... node bin/enable-daemon.mjs --dry-run`
+    → output contains `[REDACTED-26-chars]`, no `sk-test` literal
+  - `NEUROMCP_DAEMON_HOST=0.0.0.0 neuromcp-daemon` → fatal-exits with
+    "Refusing to start neuromcp daemon on non-loopback host"
+  - `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1 NEUROMCP_DAEMON_HOST=0.0.0.0
+    neuromcp-daemon` → starts (explicit opt-in)
+  - Loopback default (127.0.0.1) → starts normally
+- Live multi-client smoke (Fase D, still valid post-hardening): two
+  independent cURL sessions with different session ids, one stores a
+  memory in a fresh namespace, the other recalls the exact same id.
+- Test suite: 53 files / **348 tests green** (4 daemon E2E + 3 new
+  security-guard tests on top of the existing 341).
+- Build: clean (`tsup` emits both `dist/daemon.js` and
+  `dist/transport/mcp-http-daemon.js`).
+
+### Notes
+
+- Out of scope here: fixing the legacy `startHttpTransport` EADDRINUSE
+  crash. Logged in `FOUND-DURING-FIX.md` as P1; will be a focused
+  follow-up PR.
+
+---
+
+## [0.24.0] — 2026-05-14
+
+Zombie-cleanup is now **automatic** on `npx neuromcp-init-wiki`. The
+v0.23.0 release added the cleanup as an opt-in (`npx
+neuromcp-enable-zombie-cleanup`), but every neuromcp install hits
+the same Claude desktop-app metadata-leak — making it opt-in meant
+fixing the bug only for users who knew to ask. Per the project
+ethos: *"alles automatisch dat maakt neuromcp zo sterk"*.
+
+### Changed
+
+- **`npx neuromcp-init-wiki` now auto-installs zombie-cleanup** on
+  macOS. The init flow calls `bin/enable-zombie-cleanup.mjs` as a
+  subprocess after the hooks + settings.json setup is complete.
+  Failures (missing `jq`, launchctl rejection, etc.) are non-fatal —
+  init-wiki still finishes; a warning prints with the manual fallback
+  command.
+- **Opt-out**: pass `--no-zombie-cleanup` to skip the auto-install.
+  Useful for CI / headless installs where launchd registration is
+  unwanted.
+- **Non-darwin platforms** print a one-line info message and skip
+  silently. No agent install attempt.
+
+### Notes
+
+- `npx neuromcp-enable-zombie-cleanup` and its `--uninstall` flag
+  remain available for users who want explicit control or who
+  installed pre-v0.24.0 and want to reconfigure.
+- Idempotent: re-running `npx neuromcp-init-wiki` clears any prior
+  launchd registration before bootstrapping the new one, same as
+  `enable-consolidation`. No duplicate agents.
+
+## [0.23.0] — 2026-05-14
+
+Opt-in Claude desktop-app zombie-session cleanup. The neuromcp-persist
+fix in v0.22.x stopped the bundled hook from writing raw stubs for
+empty sessions, but the Claude desktop app itself has a separate leak
+on a different layer: it persists `~/Library/Application Support/Claude/
+claude-code-sessions/.../local_*.json` metadata the moment you open a
+new session, before any user message exists. If you close the window
+without typing, the metadata sticks in the Recents sidebar forever
+(`No messages yet.`). Tracked upstream at
+[anthropics/claude-code#59134](https://github.com/anthropics/claude-code/issues/59134).
+v0.23.0 ships an opt-in local workaround until that fix lands.
+
+### Added
+
+- **`npx neuromcp-enable-zombie-cleanup`** — installs a macOS launchd
+  agent that scans the Claude desktop-app session storage every N
+  seconds (default 300 = 5 min) and reaps zombies: `local_*.json`
+  files with `lastActivityAt - createdAt < 30s` AND
+  `createdAt > 1 hour ago`. Reaped files move to a sibling
+  `.trash-zombies-<date>/` directory, which is itself
+  garbage-collected after 7 days. Reversible by design — never
+  `rm -rf` on first contact.
+- **`templates/scripts/cleanup-claude-zombies.sh`** — the shell script
+  the launchd agent runs. Configurable via env vars:
+  `ZOMBIE_MAX_LIFETIME_MS` (default 30000), `ZOMBIE_MIN_AGE_MS`
+  (default 3600000), `ZOMBIE_TRASH_RETENTION_DAYS` (default 7),
+  `ZOMBIE_DRY_RUN=1`. Logs to `~/.claude/logs/claude-zombie-cleanup.log`.
+- **`scripts/com.neuromcp.zombie-cleanup.plist.template`** — the
+  launchd plist template, same `{{HOME}}/{{PATH}}/{{SCRIPT_PATH}}/
+  {{INTERVAL_SECONDS}}` substitution pattern as the existing
+  consolidate plist template.
+- **6 regression tests** in `tests/unit/enable-zombie-cleanup.test.ts`:
+  template files ship intact with all placeholders, `--dry-run`
+  touches no filesystem, `--interval` rejects values outside
+  [60, 3600], `--uninstall` is idempotent, non-darwin platforms exit
+  cleanly with a warning.
+
+### Notes
+
+- **macOS only.** The Claude desktop app's session storage path only
+  exists on macOS. The installer warns and exits cleanly on other
+  platforms.
+- **Prerequisite**: `jq` on PATH (`brew install jq`). The cleanup
+  script uses jq to parse `local_*.json` metadata.
+- **Detection threshold is conservative**: even the fastest real
+  `"what is X?"` prompt takes >10s including a response, so the
+  30-second lifetime cutoff cannot reap a session you actually used.
+  The 1-hour minimum age means active sessions are never touched.
+- **Logs**: cleanup logs to `~/.claude/logs/claude-zombie-cleanup.log`;
+  launchd stdout/stderr go to `~/.neuromcp/zombie-cleanup.{out,err}.log`.
+- **Tarball**: 193 → 196 files (3 added: script template + plist
+  template + installer mjs).
+
+## [0.22.1] — 2026-05-14
+
+Sanitization follow-up. An independent review (Codex) of the v0.22.0
+tarball flagged three hardcoded `/Users/a` paths that the v0.22.0 scan
+missed: one functional fallback in another hook, and two strings inside
+a one-off migration script with personal entity data. v0.22.1 strips
+all three from the published artifact.
+
+### Fixed
+
+- **`templates/hooks/neuromcp-auto-capture.js`**: same kind of leak as
+  the persist hook had pre-v0.22.0 — `process.env.HOME || '/Users/a'`
+  fallback would route a user's auto-capture DB writes to `/Users/a`
+  if `$HOME` was unset. Replaced with the same
+  `HOME = process.env.HOME || process.env.USERPROFILE || '/tmp'`
+  constant used by `neuromcp-persist.cjs`.
+
+### Changed
+
+- **`package.json` `files` array**: replaced the broad `"scripts"` glob
+  with an explicit allowlist of the eight scripts end users actually
+  need (`backfill-embeddings`, `consolidate-sessions`, the launchd
+  plist template, `download-model.{mjs,ts}`, `index-wiki`, `launcher`,
+  `run-consolidation`). Five development-only scripts no longer ship
+  in the tarball: `ab-sweep.mjs`, `backfill-verbatim.mjs`,
+  `build-mcpb.sh`, `migrate-memory.ts`, `usefulness-dashboard.mjs`.
+  `migrate-memory.ts` in particular contained personal entity-data
+  observation strings (`"Home directory: /Users/a"`, etc.) that have
+  no business in an installed package — it imported `../src/*` paths
+  that wouldn't have resolved from the tarball anyway, so removing it
+  costs nothing functionally.
+
+### Notes
+
+- Total files in tarball: 198 → 193.
+- Brute scan of the rebuilt tarball: zero `/Users/<name>`,
+  `/home/<name>`, `C:\Users\` hits in any code file. Verified
+  independently by Codex via `npm pack` of the local repo (post-fix)
+  + recursive grep.
+- v0.22.0 has been superseded but is left on the registry; the
+  hardcoded paths in it are descriptive strings in dead-import code
+  (no runtime path), not exploitable, just unclean. Users on v0.22.0
+  upgrade automatically via `npm i neuromcp@latest`.
+
+## [0.22.0] — 2026-05-14
+
+Stop-hook full sync + empty-session leak fix. The bundled
+`templates/hooks/neuromcp-persist` had diverged sharply from the
+production hook running in the maintainer's environment (138 lines
+shipped vs 483 lines used) and silently wrote a raw stub to
+`~/.neuromcp/raw/sessions/` on every Stop invocation — including
+sessions where the user never sent a message (claude spawned by the
+desktop app, a launchd trigger, or a hook loop with no input). On the
+maintainer's machine this produced 51 spurious stubs in six weeks and
+polluted every consolidation pass downstream. Other neuromcp installs
+were affected by the same leak.
+
+### Fixed
+
+- **Empty-session raw-log leak**: `templates/hooks/neuromcp-persist`
+  now counts user-role transcript entries with non-empty content before
+  writing to `~/.neuromcp/raw/sessions/`. Sessions with zero real user
+  messages skip the write and log `Skipping empty session (0 user
+  messages)` to stderr. Four regression tests added in
+  `tests/unit/hook-persist-empty-session.test.ts` covering: empty
+  transcript, real transcript, missing `transcript_path`, and
+  whitespace-only user content. The same guard applies to the
+  follow-on `.work-state.md` update and wiki-log auto-commit.
+
+### Changed
+
+- **`templates/hooks/neuromcp-persist.js` renamed to `.cjs`**: the file
+  uses CommonJS (`require`) but Node was treating it as ESM whenever
+  the nearest `package.json` declared `"type": "module"` (e.g. inside
+  the neuromcp repo itself). The explicit `.cjs` extension forces
+  CommonJS regardless of context.
+- **Bundled hook brought to feature parity with production**: the
+  shipped template now includes the work-state.md auto-update flow,
+  wiki-log recent-activity tail, and periodic checkpoint logic that
+  the maintainer has been iterating on since v0.5.0. All hardcoded
+  user-specific paths (nine `/Users/a` fallbacks) replaced with a
+  single `HOME = process.env.HOME || process.env.USERPROFILE || "/tmp"`
+  constant.
+- **`bin/init-wiki.mjs` migration logic**: on rerun, detects an old
+  `~/.claude/scripts/hooks/neuromcp-persist.js` and archives it as
+  `.bak-pre-cjs-<timestamp>`, then rewrites any stale `.js` command
+  strings in `~/.claude/settings.json` to `.cjs`. Idempotent — only
+  writes settings.json if at least one command was actually rewritten
+  or a new hook entry needed to be added.
+
+## [0.21.0] — 2026-05-07
+
+Recall-layer schema reconciliation. Existing v12 installs were missing
+the eight Codex-SOTA tables and five `memories` planner-metadata columns
+that the bundled `auto-retrieve.cjs` hook reads. Without them the
+six-layer recall pipeline silently returned empty `additionalContext`
+on every `UserPromptSubmit`. Fresh installs and `npx neuromcp@latest`
+now self-reconcile via the v12 → v13 migration.
+
+### Fixed
+
+- **Schema drift between bundled hook and persisted DB**: bumped
+  `SCHEMA_VERSION` 12 → 13. v13 adds (idempotent) `working_context`,
+  `semantic_cards` (+ `_evidence`), `memory_atoms`, `memory_edges`,
+  `activation_cache`, `situation_states`, and `replay_queue`. Adds
+  `source_type`, `source_path`, `project`, `kind`, `happened_at`
+  columns to `memories` (all nullable for backwards-compat). Three
+  new regression tests in `tests/unit/migrations.test.ts` cover (a)
+  fresh-install table presence, (b) column presence, (c) in-place
+  v12 → v13 upgrade preserving existing rows.
+- **Bundled `templates/hooks/neuromcp-auto-capture.js` extractor
+  coverage**: added three deterministic extractors that previously
+  required users to hand-write equivalents — `bugFixes` (root-cause
+  narratives in NL/EN), `toolInstalls` (npm/pnpm/yarn/bun/pip/brew/
+  cargo/gh/uv installs), and `criticalConfigEdits` (Edit/Write on
+  `CLAUDE.md`, `hooks.json`, `settings.json`, `.env`, `package.json`,
+  `tsconfig.json`, `vercel.json`/`.ts`, `next.config.*`, etc.).
+  Pure regex, zero LLM cost, runs inside the Stop-hook 15s budget.
+- **`scripts/run-consolidation.sh` threshold deadlock**: default
+  `NEUROMCP_PENDING_THRESHOLD` lowered from 5 to 1. Previously low-
+  volume users (1–4 sessions per consolidation window) would never
+  trigger consolidation because the script would log
+  `pending=1 total=1 threshold=5 → below threshold, skip` indefinitely.
+
+### Notes
+
+- Schema migration is automatic on first `runMigrations()` call;
+  existing v12 databases get backed up to `<dbPath>.backup-v12`
+  before mutation per the established migration policy.
+- No breaking changes to public APIs, MCP tool surface, or
+  `memories` row shape (additions are nullable additive columns).
+
 ## [0.19.1] — 2026-04-24
 
 Patch for reviewer round-3 finding: hardcoded version strings across

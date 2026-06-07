@@ -30,6 +30,8 @@ export default defineConfig({
     'src/cognitive/contradiction.ts',
     'src/transport/events.ts',
     'src/transport/http.ts',
+    'src/transport/mcp-http-daemon.ts',
+    'src/daemon.ts',
     'src/resources/index.ts',
     'src/prompts/index.ts',
   ],

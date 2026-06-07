@@ -4,6 +4,7 @@ import type { ServerDeps } from '../server.js';
 import { textResult } from './types.js';
 import { storeMemory } from '../tools/store.js';
 import { ensureAmbientEpisode } from '../tools/episode.js';
+import { activeEpisodeForNamespace } from '../episode/active-state.js';
 import { searchMemory, toCompact } from '../tools/search.js';
 import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
@@ -36,17 +37,21 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       episode_id: z.string().optional().describe('Episode ID to associate this memory with (from start_episode)'),
     },
   }, async (args) => {
-    // v0.19.1: auto-attach ambient episode when caller did not pass episode_id,
-    // so list_episodes is no longer perpetually empty. Opt-out: set env
-    // NEUROMCP_DISABLE_AMBIENT_EPISODE=1. Explicit episode_id always wins.
+    // Episode resolution order (v0.21.0 — Bug #7 fix):
+    //   1. explicit args.episode_id (caller passed it) → wins, no override.
+    //   2. active episode marker (~/.neuromcp/active-episode.json) — set by
+    //      start_episode in this process, namespace-matched, pid-alive.
+    //   3. ambient episode for the namespace (auto-grouping fallback).
+    // Opt-out: NEUROMCP_DISABLE_AMBIENT_EPISODE=1 disables 2 AND 3.
     let effectiveArgs = args;
     if (!args.episode_id && process.env.NEUROMCP_DISABLE_AMBIENT_EPISODE !== '1') {
       try {
         const namespace = args.namespace ?? config.defaultNamespace;
-        const ambientId = ensureAmbientEpisode(db, namespace);
-        effectiveArgs = { ...args, episode_id: ambientId };
+        const activeId = activeEpisodeForNamespace(namespace);
+        const resolvedId = activeId ?? ensureAmbientEpisode(db, namespace);
+        effectiveArgs = { ...args, episode_id: resolvedId };
       } catch (err) {
-        logger.warn('store', 'ambient episode attach failed', { error: err instanceof Error ? err.message : String(err) });
+        logger.warn('store', 'episode resolution failed', { error: err instanceof Error ? err.message : String(err) });
       }
     }
     const result = await storeMemory(effectiveArgs, { db, vecStore, embedder, logger, metrics, config });

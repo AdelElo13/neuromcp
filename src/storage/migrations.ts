@@ -243,6 +243,28 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     }
   }
 
+  if (currentVersion < 13) {
+    logger.info('migrations', 'Running v12 to v13 migration: recall layer extension tables + memories metadata cols');
+
+    // Step 1 — add planner-aware recall metadata cols on memories.
+    // Idempotent: ALTER TABLE ADD COLUMN throws if column exists; swallow.
+    const alterStatements = [
+      'ALTER TABLE memories ADD COLUMN source_type TEXT',
+      'ALTER TABLE memories ADD COLUMN source_path TEXT',
+      'ALTER TABLE memories ADD COLUMN project TEXT',
+      'ALTER TABLE memories ADD COLUMN kind TEXT',
+      'ALTER TABLE memories ADD COLUMN happened_at TEXT',
+    ];
+    for (const stmt of alterStatements) {
+      try { db.prepare(stmt).run(); } catch { /* column exists */ }
+    }
+
+    // Step 2 — apply schema. The CREATE TABLE IF NOT EXISTS / CREATE INDEX
+    // IF NOT EXISTS statements in schema.ts cover the 9 v13 tables and
+    // their indexes idempotently.
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

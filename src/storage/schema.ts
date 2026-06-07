@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -38,7 +38,13 @@ const CREATE_TABLES = `
     review_interval_days REAL,
     ease_factor REAL DEFAULT 2.5,
     next_review_at TEXT,
-    review_count INTEGER NOT NULL DEFAULT 0
+    review_count INTEGER NOT NULL DEFAULT 0,
+    -- v13: recall planner metadata (nullable for backwards compat)
+    source_type TEXT,
+    source_path TEXT,
+    project TEXT,
+    kind TEXT,
+    happened_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS episodes (
@@ -269,6 +275,155 @@ const CREATE_INDEXES = `
   );
   CREATE INDEX IF NOT EXISTS idx_rem_memory ON retrieval_event_memories(memory_id);
   CREATE INDEX IF NOT EXISTS idx_rem_cited ON retrieval_event_memories(was_cited);
+
+  -- v13: recall layer extension tables (Codex SOTA spec).
+  -- Power the six-layer auto-retrieve hook: working-context, semantic-cards,
+  -- situation-graph (atoms+edges+activation), pre-compiled situation_states,
+  -- and replay_queue. All idempotent.
+
+  -- Working context: hot table — active goal, open plan, constraints, prefs.
+  CREATE TABLE IF NOT EXISTS working_context (
+    key            TEXT PRIMARY KEY,
+    namespace      TEXT NOT NULL DEFAULT 'default',
+    project        TEXT,
+    kind           TEXT NOT NULL,
+    value_json     TEXT NOT NULL,
+    salience       REAL NOT NULL DEFAULT 0.5,
+    evidence_ids   TEXT NOT NULL DEFAULT '[]',
+    expires_at     TEXT NOT NULL,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_wc_kind     ON working_context(kind);
+  CREATE INDEX IF NOT EXISTS idx_wc_project  ON working_context(project);
+  CREATE INDEX IF NOT EXISTS idx_wc_expires  ON working_context(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_wc_salience ON working_context(salience DESC);
+
+  -- Semantic cards: distilled "what is currently true about subject Y".
+  CREATE TABLE IF NOT EXISTS semantic_cards (
+    id              TEXT PRIMARY KEY,
+    namespace       TEXT NOT NULL DEFAULT 'default',
+    project         TEXT,
+    card_type       TEXT NOT NULL,
+    subject         TEXT NOT NULL,
+    current_value   TEXT NOT NULL,
+    confidence      REAL NOT NULL DEFAULT 0.7,
+    valid_from      TEXT,
+    valid_to        TEXT,
+    superseded_by_id TEXT REFERENCES semantic_cards(id),
+    source_hash     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_sc_project        ON semantic_cards(project);
+  CREATE INDEX IF NOT EXISTS idx_sc_card_type      ON semantic_cards(card_type);
+  CREATE INDEX IF NOT EXISTS idx_sc_subject        ON semantic_cards(subject);
+  CREATE INDEX IF NOT EXISTS idx_sc_valid_to       ON semantic_cards(valid_to);
+  CREATE INDEX IF NOT EXISTS idx_sc_superseded_by  ON semantic_cards(superseded_by_id);
+
+  CREATE TABLE IF NOT EXISTS semantic_card_evidence (
+    card_id     TEXT NOT NULL REFERENCES semantic_cards(id) ON DELETE CASCADE,
+    memory_id   TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'supports',
+    weight      REAL NOT NULL DEFAULT 1.0,
+    added_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (card_id, memory_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_sce_memory ON semantic_card_evidence(memory_id);
+
+  -- Situation graph: atoms, edges, activation cache, pre-compiled packets.
+  CREATE TABLE IF NOT EXISTS memory_atoms (
+    id            TEXT PRIMARY KEY,
+    atom_type     TEXT NOT NULL,
+    source_table  TEXT NOT NULL,
+    source_id     TEXT NOT NULL,
+    namespace     TEXT NOT NULL DEFAULT 'default',
+    project       TEXT,
+    subject       TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    salience      REAL NOT NULL DEFAULT 0.5,
+    confidence    REAL NOT NULL DEFAULT 0.7,
+    valid_from    TEXT,
+    valid_to      TEXT,
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_atoms_type      ON memory_atoms(atom_type);
+  CREATE INDEX IF NOT EXISTS idx_atoms_project   ON memory_atoms(project);
+  CREATE INDEX IF NOT EXISTS idx_atoms_subject   ON memory_atoms(subject);
+  CREATE INDEX IF NOT EXISTS idx_atoms_status    ON memory_atoms(status);
+  CREATE INDEX IF NOT EXISTS idx_atoms_source    ON memory_atoms(source_table, source_id);
+  CREATE INDEX IF NOT EXISTS idx_atoms_salience  ON memory_atoms(salience DESC);
+
+  CREATE TABLE IF NOT EXISTS memory_edges (
+    src_atom_id   TEXT NOT NULL REFERENCES memory_atoms(id) ON DELETE CASCADE,
+    dst_atom_id   TEXT NOT NULL REFERENCES memory_atoms(id) ON DELETE CASCADE,
+    edge_type     TEXT NOT NULL,
+    weight        REAL NOT NULL DEFAULT 1.0,
+    polarity      REAL NOT NULL DEFAULT 1.0,
+    evidence_id   TEXT,
+    reason        TEXT,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (src_atom_id, dst_atom_id, edge_type)
+  );
+  CREATE INDEX IF NOT EXISTS idx_edges_src       ON memory_edges(src_atom_id);
+  CREATE INDEX IF NOT EXISTS idx_edges_dst       ON memory_edges(dst_atom_id);
+  CREATE INDEX IF NOT EXISTS idx_edges_type      ON memory_edges(edge_type);
+
+  CREATE TABLE IF NOT EXISTS activation_cache (
+    seed_key      TEXT NOT NULL,
+    atom_id       TEXT NOT NULL REFERENCES memory_atoms(id) ON DELETE CASCADE,
+    ppr_score     REAL NOT NULL,
+    reason        TEXT,
+    computed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (seed_key, atom_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_act_seed        ON activation_cache(seed_key);
+  CREATE INDEX IF NOT EXISTS idx_act_score       ON activation_cache(seed_key, ppr_score DESC);
+
+  CREATE TABLE IF NOT EXISTS situation_states (
+    id            TEXT PRIMARY KEY,
+    project       TEXT,
+    goal_key      TEXT,
+    status        TEXT NOT NULL DEFAULT 'active',
+    state_json    TEXT NOT NULL DEFAULT '{}',
+    packet_text   TEXT NOT NULL,
+    evidence_ids  TEXT NOT NULL DEFAULT '[]',
+    expires_at    TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_sit_project     ON situation_states(project);
+  CREATE INDEX IF NOT EXISTS idx_sit_status      ON situation_states(status);
+  CREATE INDEX IF NOT EXISTS idx_sit_expires     ON situation_states(expires_at);
+
+  -- Replay queue: hippocampal sharp-wave-ripple analogue.
+  CREATE TABLE IF NOT EXISTS replay_queue (
+    id              TEXT PRIMARY KEY,
+    atom_id         TEXT NOT NULL REFERENCES memory_atoms(id) ON DELETE CASCADE,
+    project         TEXT,
+    reason          TEXT NOT NULL,
+    strength        REAL NOT NULL DEFAULT 0.5,
+    due_at          TEXT NOT NULL,
+    last_shown_at   TEXT,
+    shown_count     INTEGER NOT NULL DEFAULT 0,
+    suppressed_until TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_rq_due       ON replay_queue(due_at);
+  CREATE INDEX IF NOT EXISTS idx_rq_project   ON replay_queue(project);
+  CREATE INDEX IF NOT EXISTS idx_rq_strength  ON replay_queue(strength DESC);
+  CREATE INDEX IF NOT EXISTS idx_rq_atom      ON replay_queue(atom_id);
+
+  -- v13: recall planner indexes on memories metadata cols
+  CREATE INDEX IF NOT EXISTS idx_memories_project    ON memories(project);
+  CREATE INDEX IF NOT EXISTS idx_memories_kind       ON memories(kind);
+  CREATE INDEX IF NOT EXISTS idx_memories_happened   ON memories(happened_at);
+  CREATE INDEX IF NOT EXISTS idx_memories_src_type   ON memories(source_type);
 `;
 
 function ftsTableExists(db: Database): boolean {

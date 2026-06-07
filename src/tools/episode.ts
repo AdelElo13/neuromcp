@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { Episode, EpisodeWithStats } from '../types.js';
+import { writeActive, clearActive } from '../episode/active-state.js';
 
 const AMBIENT_TITLE_PREFIX = 'ambient-';
 const AMBIENT_WINDOW_MS = Number.parseInt(process.env.NEUROMCP_AMBIENT_EPISODE_WINDOW_MS ?? '', 10) || 4 * 60 * 60 * 1000;
@@ -47,6 +48,16 @@ export function startEpisode(
     INSERT INTO episodes (id, title, namespace, started_at, metadata)
     VALUES (?, ?, ?, ?, ?)
   `).run(id, input.title, namespace, now, JSON.stringify(input.metadata ?? {}));
+
+  // Bug #7 (v0.21.0): mark this episode as the per-process "active"
+  // one. Subsequent store_memory calls without explicit episode_id
+  // attach here instead of to the ambient episode.
+  try {
+    writeActive({ episode_id: id, started_at: now, pid: process.pid, namespace });
+  } catch {
+    // Non-fatal — DB record is still created. Active-state file is a
+    // convenience hook; caller can still pass episode_id explicitly.
+  }
 
   return {
     id,
@@ -100,6 +111,14 @@ export function endEpisode(
   db.prepare(`
     UPDATE episodes SET ended_at = ?, summary = ? WHERE id = ?
   `).run(now, summary, input.episode_id);
+
+  // Bug #7 (v0.21.0): if the ended episode was the active one, clear
+  // the marker so the next store falls back to ambient.
+  try {
+    clearActive(input.episode_id);
+  } catch {
+    /* non-fatal */
+  }
 
   return {
     ...episode,

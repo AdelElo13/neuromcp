@@ -47,6 +47,15 @@ CONTRADICTION_CHECK = os.environ.get("NEUROMCP_CONTRADICTION_CHECK", "1") != "0"
 # Power users who accept the risk can opt back into fail-open behaviour.
 AUDIT_FAIL_OPEN = os.environ.get("NEUROMCP_AUDIT_FAIL_OPEN", "0") == "1"
 
+# Audit retry: on rejection, regenerate the summary + re-audit with a
+# higher-tier model. MAX_AUDIT_ATTEMPTS caps cost (and prevents infinite
+# spin on persistent Haiku non-determinism). Exhausted batches land in
+# EXHAUSTED_DIR so health-check.sh can surface a clear degraded signal,
+# distinct from transient single-attempt rejects in REVIEW_QUEUE.
+MAX_AUDIT_ATTEMPTS = 2  # = 3 total tries (attempt 0 + 2 retries)
+RETRY_MODEL = "sonnet"  # escalate from AUDIT_MODEL on retry
+EXHAUSTED_DIR = REVIEW_QUEUE / "exhausted"
+
 # Project detection: only paths under <HOME>/projects/<NAME> count as project signal.
 PROJECT_PATH_RE = re.compile(
     rf"{re.escape(str(HOME))}/projects/([A-Za-z0-9_\-.]+)"
@@ -195,8 +204,9 @@ Rules:
 """
     try:
         r = subprocess.run(
-            ["claude", "-p", "--tools", "", "--no-session-persistence",
+            ["claude", "-p", "--no-session-persistence",
              "--model", AUDIT_MODEL, prompt],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AUDIT_TIMEOUT_SEC,
@@ -230,11 +240,23 @@ Rules:
     return False, reason
 
 
-def queue_for_review(project: str, batch_idx: int, summary: str, reason: str) -> Path:
-    """Park a rejected summary under review-queue/ for human inspection."""
-    REVIEW_QUEUE.mkdir(parents=True, exist_ok=True)
+def queue_for_review(
+    project: str,
+    batch_idx: int,
+    summary: str,
+    reason: str,
+    exhausted: bool = False,
+) -> Path:
+    """Park a rejected summary under review-queue/ for human inspection.
+
+    Exhausted batches (all retry attempts burned in `consolidate_batch`) go to
+    `review-queue/exhausted/` so health-check.sh can flag persistent failures
+    distinctly from transient single-attempt rejects.
+    """
+    target_dir = EXHAUSTED_DIR if exhausted else REVIEW_QUEUE
+    target_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    path = REVIEW_QUEUE / f"{stamp}_{project}_batch{batch_idx}.md"
+    path = target_dir / f"{stamp}_{project}_batch{batch_idx}.md"
     path.write_text(
         f"# Rejected consolidation — {project} batch {batch_idx}\n"
         f"\n> {reason}\n\n---\n\n{summary}\n"
@@ -245,10 +267,18 @@ def queue_for_review(project: str, batch_idx: int, summary: str, reason: str) ->
 # ─── Tier 2 C+D+F: atomic fact extraction + temporal supersession ───────
 
 def _run_claude(prompt: str, timeout: int) -> str | None:
+    # NOTE: --tools "" removed — Claude CLI >= 2.x rejects any --tools value
+    # because a registered MCP tool has a top-level oneOf/allOf/anyOf schema
+    # the Anthropic API refuses (API Error 400 tools.N.custom.input_schema).
+    # Default (no flag) yields prompt-only completion, which is what
+    # summary/audit/facts need.
+    # stdin=DEVNULL avoids a 3s stdin handshake stall when invoked from
+    # launchd or other non-TTY contexts.
     try:
         r = subprocess.run(
-            ["claude", "-p", "--tools", "", "--no-session-persistence",
+            ["claude", "-p", "--no-session-persistence",
              "--model", AUDIT_MODEL, prompt],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=timeout,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -579,55 +609,87 @@ STRICT INSTRUCTIONS:
 - DO NOT attempt tool use (no Edit/Write). Only return text.
 - If there is nothing substantive: a single bullet inside the fence, e.g. "## [{label}]\\n- No technical substance this window." — nothing else.
 """
-    try:
-        r = subprocess.run(
-            ["claude", "-p", "--tools", "", "--no-session-persistence", prompt],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+    # Retry-loop: on audit rejection (count hallucinations, unsupported claims,
+    # missing fence) regenerate the summary with a higher-tier model and re-audit.
+    # Bounded by MAX_AUDIT_ATTEMPTS. Exhausted batches land in EXHAUSTED_DIR.
+    last_reason = "no attempt completed"
+    last_summary = ""
+
+    for attempt in range(MAX_AUDIT_ATTEMPTS + 1):
+        # attempt 0 uses AUDIT_MODEL (cheap default for cost control);
+        # retries escalate to RETRY_MODEL to break Haiku-class hallucination
+        # loops (e.g. miscounted sessions in summary).
+        gen_model = AUDIT_MODEL if attempt == 0 else RETRY_MODEL
+        attempt_tag = f"attempt {attempt + 1}/{MAX_AUDIT_ATTEMPTS + 1}"
+        try:
+            r = subprocess.run(
+                ["claude", "-p", "--no-session-persistence",
+                 "--model", gen_model, prompt],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"  WARN: timeout on {project} batch {batch_idx}/{batch_total} ({attempt_tag})")
+            last_reason = f"summary call timeout ({attempt_tag})"
+            continue
+        except FileNotFoundError:
+            print("  ERROR: 'claude' CLI not found on PATH. Install Claude Code first.")
+            sys.exit(1)
+
         if r.returncode != 0 or not r.stdout.strip():
-            print(f"  WARN: no output for {project} batch {batch_idx}/{batch_total}")
-            return False, []
+            print(f"  WARN: no output for {project} batch {batch_idx}/{batch_total} ({attempt_tag})")
+            last_reason = f"summary call empty/exit={r.returncode} ({attempt_tag})"
+            continue
+
         extracted = extract_markdown(r.stdout)
         if not extracted:
-            print(f"  WARN: fence missing or contaminated for {project} batch {batch_idx}/{batch_total}")
-            return False, []
+            print(f"  WARN: fence missing or contaminated for {project} batch {batch_idx}/{batch_total} ({attempt_tag})")
+            last_reason = f"fence missing or contaminated ({attempt_tag})"
+            continue
+
         # Eval-loop: verify every claim traces to a source session before writing.
         approved, reason = audit_summary(extracted, batch)
-        if not approved:
-            path = queue_for_review(project, batch_idx, extracted, reason)
-            print(f"  ⚠ {project} batch {batch_idx}/{batch_total} rejected — queued: {path.name}")
-            print(f"    {reason}")
-            return False, []
-        projects_dir = WIKI_DIR / "projects"
-        systems_dir = WIKI_DIR / "systems"
-        target = projects_dir / f"{project}.md"
-        if not target.exists() and (systems_dir / f"{project}.md").exists():
-            target = systems_dir / f"{project}.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            with target.open("a") as f:
-                f.write(f"\n\n{extracted}\n")
-            print(f"  ✓ {target.name} batch {batch_idx}/{batch_total} ({len(batch)} sessions)")
-        else:
-            target.write_text(
-                f"---\ntitle: {project}\ntype: project\ncreated: {today}\n---\n\n{extracted}\n"
-            )
-            print(f"  ✓ {target.name} created batch {batch_idx}/{batch_total} ({len(batch)} sessions)")
-        # Tier 2 C+D: distill atomic facts and persist with supersession edges.
-        facts = extract_facts(extracted, batch, project)
-        if facts:
-            added = persist_facts(facts, project, batch)
-            if added:
-                print(f"    + {added} fact(s) stored")
-        return True, list(batch)
-    except subprocess.TimeoutExpired:
-        print(f"  ERROR: timeout on {project} batch {batch_idx}/{batch_total}")
-        return False, []
-    except FileNotFoundError:
-        print("  ERROR: 'claude' CLI not found on PATH. Install Claude Code first.")
-        sys.exit(1)
+        if approved:
+            projects_dir = WIKI_DIR / "projects"
+            systems_dir = WIKI_DIR / "systems"
+            target = projects_dir / f"{project}.md"
+            if not target.exists() and (systems_dir / f"{project}.md").exists():
+                target = systems_dir / f"{project}.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            attempt_note = f" [{attempt_tag}]" if attempt > 0 else ""
+            if target.exists():
+                with target.open("a") as f:
+                    f.write(f"\n\n{extracted}\n")
+                print(f"  ✓ {target.name} batch {batch_idx}/{batch_total} ({len(batch)} sessions){attempt_note}")
+            else:
+                target.write_text(
+                    f"---\ntitle: {project}\ntype: project\ncreated: {today}\n---\n\n{extracted}\n"
+                )
+                print(f"  ✓ {target.name} created batch {batch_idx}/{batch_total} ({len(batch)} sessions){attempt_note}")
+            # Tier 2 C+D: distill atomic facts and persist with supersession edges.
+            facts = extract_facts(extracted, batch, project)
+            if facts:
+                added = persist_facts(facts, project, batch)
+                if added:
+                    print(f"    + {added} fact(s) stored")
+            return True, list(batch)
+
+        # Audit rejected — keep last summary + reason for exhaustion path.
+        last_reason = reason
+        last_summary = extracted
+        if attempt < MAX_AUDIT_ATTEMPTS:
+            print(f"  ⟳ {project} batch {batch_idx}/{batch_total} rejected ({attempt_tag}), retrying with {RETRY_MODEL}")
+            print(f"    {reason[:200]}")
+
+    # All attempts exhausted — queue to dedicated subfolder, do not advance ledger.
+    if not last_summary:
+        last_summary = "(no summary produced — all attempts failed before audit)"
+    path = queue_for_review(project, batch_idx, last_summary, last_reason, exhausted=True)
+    print(f"  ✗ {project} batch {batch_idx}/{batch_total} EXHAUSTED after {MAX_AUDIT_ATTEMPTS + 1} attempts — queued: exhausted/{path.name}")
+    print(f"    Final rejection: {last_reason[:200]}")
+    return False, []
 
 
 def consolidate_project(

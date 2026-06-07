@@ -109,4 +109,86 @@ describe('runMigrations', () => {
     const row = db.prepare("SELECT id FROM memories WHERE id = 'canary'").get() as { id: string } | undefined;
     expect(row?.id).toBe('canary');
   });
+
+  // v13: Codex SOTA recall layer — situation graph, semantic cards,
+  // working context, replay queue, and memories.{source_type,source_path,
+  // project,kind,happened_at}. The auto-retrieve hook reads ALL of these;
+  // a fresh install previously left them missing, causing six-layer
+  // recall to silently return empty additionalContext.
+  it('v13: creates all recall-layer extension tables', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = openDatabase(dbPath);
+
+    runMigrations(db, dbPath, logger);
+
+    const required = [
+      'memory_atoms',
+      'memory_edges',
+      'activation_cache',
+      'situation_states',
+      'working_context',
+      'semantic_cards',
+      'semantic_card_evidence',
+      'replay_queue',
+    ];
+    for (const name of required) {
+      const row = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+      ).get(name) as { name: string } | undefined;
+      expect(row?.name, `expected table "${name}" to exist after migration`).toBe(name);
+    }
+  });
+
+  it('v13: adds recall-planner metadata columns to memories', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = openDatabase(dbPath);
+
+    runMigrations(db, dbPath, logger);
+
+    const cols = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    for (const col of ['source_type', 'source_path', 'project', 'kind', 'happened_at']) {
+      expect(colNames.has(col), `expected memories.${col} column to exist`).toBe(true);
+    }
+  });
+
+  it('v13: migrates a v12 database in place without dropping data', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = openDatabase(dbPath);
+
+    // Bootstrap a v12 schema by running migrations, then forcibly
+    // rewriting the version row and dropping the v13 artifacts.
+    runMigrations(db, dbPath, logger);
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('keep-me', 'hash', 'pre-v13 content')").run();
+
+    db.prepare('DELETE FROM schema_version').run();
+    db.prepare(
+      "INSERT INTO schema_version (version, applied_at, description) VALUES (12, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'simulated v12')"
+    ).run();
+    // Drop the v13 tables to simulate a v12-era DB upgrading to v13.
+    for (const t of ['replay_queue', 'situation_states', 'activation_cache', 'memory_edges', 'memory_atoms', 'semantic_card_evidence', 'semantic_cards', 'working_context']) {
+      db.prepare(`DROP TABLE IF EXISTS ${t}`).run();
+    }
+
+    // Run again — should detect v12 → v13 and reconcile.
+    runMigrations(db, dbPath, logger);
+
+    // Pre-existing data preserved
+    const keep = db.prepare("SELECT id FROM memories WHERE id='keep-me'").get() as { id: string } | undefined;
+    expect(keep?.id).toBe('keep-me');
+
+    // All v13 tables present
+    const required = ['memory_atoms', 'situation_states', 'working_context', 'semantic_cards', 'replay_queue'];
+    for (const name of required) {
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name) as { name: string } | undefined;
+      expect(row?.name, `expected table "${name}" after v12→v13 upgrade`).toBe(name);
+    }
+
+    // Version recorded as v13 (= SCHEMA_VERSION)
+    const ver = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
+    expect(ver.v).toBe(SCHEMA_VERSION);
+  });
 });

@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG="${NEUROMCP_LOG:-$HOME/.neuromcp/consolidation.log}"
 LEDGER="${NEUROMCP_LEDGER:-$HOME/.neuromcp/consolidation-ledger.json}"
 SESSIONS_DIR="${NEUROMCP_SESSIONS_DIR:-$HOME/.neuromcp/raw/sessions}"
-PENDING_THRESHOLD="${NEUROMCP_PENDING_THRESHOLD:-5}"
+PENDING_THRESHOLD="${NEUROMCP_PENDING_THRESHOLD:-1}"
 WINDOW_DAYS="${NEUROMCP_WINDOW_DAYS:-7}"
 PYTHON_BIN="${NEUROMCP_PYTHON:-python3}"
 
@@ -45,5 +45,12 @@ fi
 SINCE=$("$PYTHON_BIN" -c "from datetime import date, timedelta; print((date.today()-timedelta(days=$WINDOW_DAYS)).isoformat())")
 
 "$PYTHON_BIN" "$SCRIPT_DIR/consolidate-sessions.py" --since "$SINCE" 2>&1 | tee -a "$LOG"
+
+# Stale-file pruner: remove queue files whose sessions were superseded
+# by a successful retry in a later run. Defensive: don't fail the
+# consolidation run if the pruner script is missing.
+if [ -f "$SCRIPT_DIR/reprocess-review-queue.py" ]; then
+    "$PYTHON_BIN" "$SCRIPT_DIR/reprocess-review-queue.py" 2>&1 | tee -a "$LOG"
+fi
 
 printf '[%s] done\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"
