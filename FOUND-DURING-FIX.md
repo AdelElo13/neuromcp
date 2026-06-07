@@ -266,11 +266,14 @@ Once daemon-PR merges, the bash script can be ported 1:1 to `bin/doctor.mjs --ru
 > bounded `for attempt in range(MAX_AUDIT_ATTEMPTS + 1)` loop with model
 > escalation (`AUDIT_MODEL` → `RETRY_MODEL`) on retry, and exhausted
 > batches land in `review-queue/exhausted/` so health-check.sh can flag
-> them as a persistent degraded signal. Regression test:
-> `tests/unit/consolidate-sessions-retry.test.ts`.
+> them as a persistent degraded signal. Stale queue files from earlier
+> failed runs are pruned automatically by `scripts/reprocess-review-queue.py`
+> (hooked into `scripts/run-consolidation.sh`). Regression tests:
+> `tests/unit/consolidate-sessions-retry.test.ts` (structural) and
+> `tests/integration/reprocess-review-queue.test.ts` (behavioural — 5 cases).
 >
-> Behavioural integration test with a fake `claude` shim deferred — see
-> P3 below.
+> Behavioural integration test for the in-script retry path itself
+> deferred — see P3 below.
 
 **Reported symptom:** when `audit_summary` returns `(False, reason)` the
 batch is written to `~/.neuromcp/review-queue/<timestamp>_<project>_batch<n>.md`

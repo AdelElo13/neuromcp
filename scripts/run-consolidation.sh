@@ -46,4 +46,11 @@ SINCE=$("$PYTHON_BIN" -c "from datetime import date, timedelta; print((date.toda
 
 "$PYTHON_BIN" "$SCRIPT_DIR/consolidate-sessions.py" --since "$SINCE" 2>&1 | tee -a "$LOG"
 
+# Stale-file pruner: remove queue files whose sessions were superseded
+# by a successful retry in a later run. Defensive: don't fail the
+# consolidation run if the pruner script is missing.
+if [ -f "$SCRIPT_DIR/reprocess-review-queue.py" ]; then
+    "$PYTHON_BIN" "$SCRIPT_DIR/reprocess-review-queue.py" 2>&1 | tee -a "$LOG"
+fi
+
 printf '[%s] done\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"

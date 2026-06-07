@@ -133,6 +133,21 @@ instance. One shared DB. One embedding pipeline. No port conflicts.
   fake `claude` shim is deferred (logged in FOUND-DURING-FIX.md as a new
   P3 follow-up).
 
+- **`scripts/reprocess-review-queue.py` (new) — stale queue file pruner.**
+  Walks `~/.neuromcp/review-queue/*.md` and deletes queue files whose
+  underlying batch sessions are now all in the ledger. This happens when
+  the in-script retry loop (above) eventually succeeds for those sessions
+  in a later launchd run — the ledger advances on the success, but the
+  earlier failed-run's queue file is not auto-removed; without this pruner
+  it would accumulate forever. Files in `review-queue/exhausted/` are
+  never touched: those represent batches that have burned every in-script
+  retry attempt and need human review. Hooked into
+  `scripts/run-consolidation.sh` to run after each consolidation pass.
+  `$NEUROMCP_DIR` (and `$HOME`) env-overridable for testing. Behavioural
+  integration test: `tests/integration/reprocess-review-queue.test.ts` —
+  5 cases covering prune, keep, exhausted-never-touched, missing
+  review-queue/, malformed filenames.
+
 ### Migration
 
 For users who want one neuromcp shared by all their MCP clients:
