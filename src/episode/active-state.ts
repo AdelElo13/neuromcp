@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
@@ -79,11 +79,11 @@ export function writeActive(episode: ActiveEpisode): void {
   const path = statePath();
   const tmp = path + '.tmp';
   writeFileSync(tmp, JSON.stringify(episode, null, 2), { mode: 0o600 });
-  // rename is atomic on POSIX
-  const fs = (() => { try { return require('node:fs'); } catch { return null; } })();
-  if (fs !== null) {
-    fs.renameSync(tmp, path);
-  } else {
+  // rename is atomic on POSIX; fall back to direct write + tmp cleanup if
+  // the rename fails (e.g. cross-device, exotic FS).
+  try {
+    renameSync(tmp, path);
+  } catch {
     writeFileSync(path, JSON.stringify(episode, null, 2), { mode: 0o600 });
     try { unlinkSync(tmp); } catch { /* ignore */ }
   }
