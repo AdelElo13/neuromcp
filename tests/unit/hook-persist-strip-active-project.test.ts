@@ -108,6 +108,17 @@ describe('neuromcp-persist hook — stripActiveProject regex (\\Z bug)', () => {
     // 3. Active Project header appears at most once.
     const activeProjectMatches = after.match(/^## Active Project$/gm) ?? [];
     expect(activeProjectMatches.length).toBeLessThanOrEqual(1);
+
+    // 4. Codex review 2026-06-07 — Claude-authored body sections must survive
+    //    the strip. A future regression that overzealously strips them would
+    //    pass assertions 1-3 but silently destroy the user's context. Pin
+    //    each Claude-owned head + a content snippet from each section.
+    expect(after, 'Current Work section must survive the strip').toMatch(/^## Current Work$/m);
+    expect(after, 'Current Work content must survive').toContain('Implementing the feature.');
+    expect(after, 'Next Steps section must survive the strip').toMatch(/^## Next Steps$/m);
+    expect(after, 'Next Steps content must survive').toContain('- Step one');
+    expect(after, 'Key Files section must survive the strip').toMatch(/^## Key Files$/m);
+    expect(after, 'Key Files content must survive').toContain('- src/foo.ts');
   });
 
   it('does not grow unboundedly across repeated Stop invocations (append-spam regression)', () => {

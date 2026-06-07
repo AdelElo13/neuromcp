@@ -76,6 +76,27 @@ instance. One shared DB. One embedding pipeline. No port conflicts.
   are repaired automatically on the next Stop with the patched hook; no
   migration step needed.
 
+- **`templates/hooks/neuromcp-persist.cjs` — raw-log filename collision
+  (silent overwrite).** Surfaced by Codex review 2026-06-07 on the
+  persist-hook test suite. The raw-log filename was
+  `YYYY-MM-DD-HHMM.md` (minute precision). When two Stop hooks fire within
+  the same minute — common during fast iteration, hook-driven workflows,
+  or rapid restart cycles — the second invocation silently overwrote the
+  first session's raw log. No warning, no error, just one session of work
+  lost. Patched to `YYYY-MM-DD-HHMMSS.md` (second precision) with a
+  collision-counter suffix (`-1`, `-2`, ...) for the rare case where even
+  second-precision names already exist. Regression test:
+  `tests/unit/hook-persist-filename-collision.test.ts` — 3 cases
+  (back-to-back distinct files, distinct internal Session-ended
+  timestamps, 3 rapid-fire stops). Same Codex review also led us to
+  beef up `tests/unit/hook-persist-strip-active-project.test.ts` with
+  assertions that Claude-authored body sections (`## Current Work`,
+  `## Next Steps`, `## Key Files`) survive the Active-Project strip;
+  previously the test would have green-lighted a regression that
+  preserves the `\Z` fix while stripping the Claude-owned body — silent
+  context destruction. The new assertions pin both section headers and
+  content snippets.
+
 - **`scripts/consolidate-sessions.py` — main flow stalled since Claude CLI
   >= 2.x tightened tool-schema validation.** Every `claude -p` invocation in
   the script (audit, summary, fact-extract) passed `--tools ""` as an

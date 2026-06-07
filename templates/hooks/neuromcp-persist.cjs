@@ -276,8 +276,16 @@ try {
         fs.mkdirSync(RAW_SESSIONS_DIR, { recursive: true });
       }
       const today = new Date().toISOString().split("T")[0];
-      const time = new Date().toISOString().split("T")[1].replace(/:/g, "").slice(0, 4);
-      const logFile = path.join(RAW_SESSIONS_DIR, `${today}-${time}.md`);
+      // Codex review 2026-06-07: HHMMSS (was HHMM) + collision counter so that
+      // two Stop hooks within the same minute/second do not silently overwrite
+      // each other's raw-log. Regression: tests/unit/hook-persist-filename-collision.test.ts.
+      const time = new Date().toISOString().split("T")[1].replace(/:/g, "").slice(0, 6);
+      let logFile = path.join(RAW_SESSIONS_DIR, `${today}-${time}.md`);
+      let collisionSuffix = 1;
+      while (fs.existsSync(logFile)) {
+        logFile = path.join(RAW_SESSIONS_DIR, `${today}-${time}-${collisionSuffix}.md`);
+        collisionSuffix++;
+      }
 
       const logParts = [];
       logParts.push(`---`);
