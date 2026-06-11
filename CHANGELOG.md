@@ -3,7 +3,25 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — feat/mcp-http-daemon
+## [0.25.1] — 2026-06-11
+
+### Fixed
+
+- **FIX: `neuromcp-enable-daemon` baked a version-pinned Homebrew node path
+  into the launchd plist.** `process.execPath` realpath-resolves to
+  `<prefix>/Cellar/node@22/<version>/bin/node`; a `brew upgrade node@22`
+  deletes that keg dir, so launchd could no longer exec node — the daemon
+  died with `EX_CONFIG` (exit 78) and never restarted (the exec fails before
+  the process starts, so nothing is even logged). The installer now rewrites
+  a *versioned* Homebrew Cellar path to the prefix's version-independent
+  `opt` symlink (`<prefix>/opt/node@22/bin/node`), which Homebrew re-points
+  on every upgrade while staying within one Node major (native-module ABI —
+  better-sqlite3, onnxruntime-node — preserved). The unversioned `node`
+  formula, nvm/fnm/asdf/Volta paths, and non-executable targets fall through
+  unchanged. New `bin/resolve-node-bin.mjs` helper + 8 regression tests in
+  `tests/unit/resolve-node-bin.test.ts`. (#3)
+
+## [0.25.0] — 2026-06-07 — feat/mcp-http-daemon
 
 Multi-client first-class support via a long-lived daemon that serves the
 MCP Streamable HTTP transport on one shared port. Each MCP-capable client
