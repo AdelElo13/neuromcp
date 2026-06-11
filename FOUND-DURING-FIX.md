@@ -409,3 +409,31 @@ case, which is rarer. P3 not P1 because we have other observability
 (`health-check.sh` will surface stuck batches in production).
 
 **Blocked by:** nothing. This is straight follow-up work.
+
+---
+
+## P3: local `node` default is v26 → `npm test` fails with 226 better-sqlite3 ABI errors
+
+**Discovered while fixing the daemon node-path bug (2026-06-09).** Running
+`npx vitest run` with the machine's default `node` (`/opt/homebrew/bin/node`
+= v26.0.0) makes every DB-backed test fail at `new Database()` with a native
+ABI mismatch — 226 failed / 117 passed / 25 skipped. The native
+`better-sqlite3` binding in `node_modules` was built for node@22 (the
+daemon's runtime).
+
+**Proof:** the identical suite under node@22
+(`/opt/homebrew/opt/node@22/bin/node`) → 59 files / 368 tests pass, 0 fail.
+Only the node version changed.
+
+**Not a repo bug** — `package.json` engines is `>=20`, and a fresh
+`npm install` under node 26 would rebuild/download the matching binary. This
+is local toolchain drift: node was upgraded to 26 without rebuilding native
+modules.
+
+**Remedy (local):** run tests under node@22 —
+`PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test` — or
+`npm rebuild better-sqlite3 onnxruntime-node` after a node major bump.
+
+**Severity:** P3 — environment-only, zero production impact, but it masks
+real regressions behind a wall of fake failures. Worth a one-line note in
+the README/CONTRIBUTING test section so it doesn't burn an hour next time.

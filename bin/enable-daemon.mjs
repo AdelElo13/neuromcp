@@ -34,6 +34,7 @@ import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolveStableNodeBin } from './resolve-node-bin.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
@@ -270,7 +271,11 @@ if (transientMarker !== null) {
   warn('NEUROMCP_ALLOW_TRANSIENT_INSTALL=1 — proceeding despite transient install root');
 }
 
-const nodeBin = process.execPath;
+// process.execPath realpath-resolves to Homebrew's version-pinned Cellar
+// path; bake the version-independent opt symlink instead so a
+// `brew upgrade node@22` patch bump does not orphan the plist (see
+// resolve-node-bin.mjs). Falls back to the original path off-Homebrew.
+const nodeBin = resolveStableNodeBin(process.execPath);
 const userPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
 
 // Minimal XML-escape for values that land inside <string>...</string>.
