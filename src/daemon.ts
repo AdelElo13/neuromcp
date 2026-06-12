@@ -25,6 +25,7 @@ import { openDatabase } from './storage/database.js';
 import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
 import { createEmbeddingProvider } from './embeddings/factory.js';
+import { validateEmbeddingCompatibility } from './embeddings/validate.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
 import { startMcpHttpDaemon, type McpHttpDaemonDeps } from './transport/mcp-http-daemon.js';
@@ -89,6 +90,9 @@ async function main(): Promise<void> {
   runMigrations(db, config.dbPath, logger);
 
   const embedder = await createEmbeddingProvider(config, logger);
+  // Fail loudly if the provider is incompatible with stored embeddings
+  // (dimension or model mismatch silently corrupts recall otherwise).
+  validateEmbeddingCompatibility(db, embedder, logger);
   const vecStore = new SqliteVecStore(embedder.dimensions);
   vecStore.initialize(db);
 

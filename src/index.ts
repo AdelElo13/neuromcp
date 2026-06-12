@@ -7,6 +7,7 @@ import { openDatabase } from './storage/database.js';
 import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
 import { createEmbeddingProvider } from './embeddings/factory.js';
+import { validateEmbeddingCompatibility } from './embeddings/validate.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
 import { startHttpTransport } from './transport/http.js';
@@ -29,8 +30,11 @@ async function main(): Promise<void> {
   const db = openDatabase(config.dbPath);
   runMigrations(db, config.dbPath, logger);
 
-  // Initialize embedding provider
+  // Initialize embedding provider, then fail loudly if it is incompatible
+  // with the embeddings already stored in this database (dimension or model
+  // mismatch silently corrupts recall otherwise).
   const embedder = await createEmbeddingProvider(config, logger);
+  validateEmbeddingCompatibility(db, embedder, logger);
 
   // Initialize vector store
   const vecStore = new SqliteVecStore(embedder.dimensions);

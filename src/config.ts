@@ -42,6 +42,9 @@ export interface NeuromcpConfig {
   // the prior is a tiebreaker rather than a dominator.
   readonly usefulnessExplorationThreshold: number;
   readonly usefulnessFactorRange: number;
+  // Embedding HTTP timeout (ms) — a hung Ollama/OpenAI must not block
+  // store/search (and startup) indefinitely.
+  readonly embedTimeoutMs: number;
   // Entity extraction
   readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
   readonly ollamaChatModel: string;
@@ -101,6 +104,7 @@ export function loadConfig(): NeuromcpConfig {
     blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),
     usefulnessExplorationThreshold: envNum('NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD', 3),
     usefulnessFactorRange: envNum('NEUROMCP_USEFULNESS_FACTOR_RANGE', 0.5),
+    embedTimeoutMs: envNum('NEUROMCP_EMBED_TIMEOUT_MS', 30_000),
     // Default 'regex': the write path must stay LLM-free (store_memory used
     // to block up to 15s on an Ollama /api/chat call per store). 'auto' and
     // 'llm' remain available as explicit opt-ins.

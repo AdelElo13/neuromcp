@@ -141,13 +141,27 @@ export async function searchMemory(
   // hit `namespace = '*'` equality filters and silently return zero rows.
   const scopedNamespace = namespace === '*' ? undefined : namespace;
 
-  // Step 1: Generate query embedding
-  const embedding = await embedder.embed(input.query);
+  // Step 1: Generate query embedding. When the embedder is down (Ollama not
+  // running, network timeout) a hybrid search degrades LOUDLY to FTS-only
+  // instead of failing the whole call — the user still gets keyword recall,
+  // and the warn + metric make the degradation visible. Vector-only search
+  // (hybrid=false) cannot degrade and keeps failing loudly.
+  let embedding: Float32Array | null = null;
+  try {
+    embedding = await embedder.embed(input.query);
+  } catch (err: unknown) {
+    if (!hybrid) throw err;
+    logger.warn('search', 'Embedder unavailable — DEGRADED to FTS-only results', {
+      error: err instanceof Error ? err.message : String(err),
+      query: input.query,
+    });
+    metrics.increment('search.degraded_fts_only');
+  }
 
   // Step 2: Vector search — push namespace into the vec query so we don't
   // waste the top-k budget on other tenants' data (see sqlite-vec.ts for
   // the recall-collapse story).
-  const vecResults = vecStore.search(embedding, limit * 3, scopedNamespace);
+  const vecResults = embedding !== null ? vecStore.search(embedding, limit * 3, scopedNamespace) : [];
 
   const vecRanks = new Map<string, number>();
   vecResults.forEach((r, i) => {
