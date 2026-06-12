@@ -71,6 +71,7 @@ export function getRelationsForEntity(
   options?: {
     readonly direction?: 'outgoing' | 'incoming' | 'both';
     readonly relation_type?: string;
+    readonly relation_types?: readonly string[];
     readonly valid_at?: string;
   },
 ): readonly Relation[] {
@@ -89,9 +90,17 @@ export function getRelationsForEntity(
     params.push(entityId, entityId);
   }
 
-  if (options?.relation_type !== undefined) {
-    clauses.push('r.relation_type = ?');
-    params.push(options.relation_type);
+  // relation_types (plural) wins when both are provided; relation_type kept
+  // for backward compatibility with single-type callers.
+  const types =
+    options?.relation_types !== undefined && options.relation_types.length > 0
+      ? options.relation_types
+      : options?.relation_type !== undefined
+        ? [options.relation_type]
+        : undefined;
+  if (types !== undefined) {
+    clauses.push(`r.relation_type IN (${types.map(() => '?').join(', ')})`);
+    params.push(...types);
   }
 
   // Temporal filter: only relations valid at the given time

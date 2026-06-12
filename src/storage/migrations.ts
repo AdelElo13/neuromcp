@@ -1,7 +1,36 @@
-import { copyFileSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import type { Database } from 'better-sqlite3';
 import type { Logger } from '../observability/logger.js';
 import { applySchema, SCHEMA_VERSION } from './schema.js';
+
+/**
+ * Run an idempotent ALTER TABLE ... ADD COLUMN. Swallows ONLY the
+ * "duplicate column name" error (the re-run case); every other failure —
+ * SQLITE_BUSY, I/O errors, missing table — propagates so the migration
+ * aborts BEFORE the schema version is stamped. The old blanket catch{}
+ * could leave a DB permanently marked migrated with the migration half
+ * applied.
+ */
+export function tryAlterAddColumn(db: Database, stmt: string): void {
+  try {
+    db.prepare(stmt).run();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/duplicate column name/i.test(msg)) return;
+    throw err;
+  }
+}
+
+/**
+ * Consistent point-in-time backup of a live database. copyFileSync on a
+ * WAL-mode DB can miss recent commits that only exist in the -wal file (or
+ * tear mid-checkpoint); VACUUM INTO produces a transactionally consistent
+ * snapshot regardless of WAL state.
+ */
+export function backupDatabase(db: Database, backupPath: string): void {
+  if (existsSync(backupPath)) unlinkSync(backupPath);
+  db.prepare('VACUUM INTO ?').run(backupPath);
+}
 
 function getCurrentVersion(db: Database): number {
   // Check if schema_version table exists
@@ -36,11 +65,7 @@ function migrateV1ToV2(db: Database, logger: Logger): void {
   ];
 
   for (const stmt of alterStatements) {
-    try {
-      db.prepare(stmt).run();
-    } catch {
-      // Column already exists
-    }
+    tryAlterAddColumn(db, stmt);
   }
 
   applySchema(db);
@@ -64,13 +89,32 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       to: SCHEMA_VERSION,
       backupPath,
     });
-    copyFileSync(dbPath, backupPath);
+    backupDatabase(db, backupPath);
   }
 
   logger.info('migrations', 'Applying schema migration', {
     from: currentVersion,
     to: SCHEMA_VERSION,
   });
+
+  // Fresh database (no memories table at all): there is nothing to migrate —
+  // apply the canonical schema and stamp the current version. Distinguish
+  // "fresh" from "legacy pre-versioning DB with data": the latter HAS a
+  // memories table but no schema_version table, and must run the legacy
+  // migration chain below. The old code relied on the legacy ALTERs failing
+  // with "no such table" and being silently swallowed on fresh DBs — that
+  // blanket swallow also hid real migration failures, which is exactly what
+  // tryAlterAddColumn now prevents.
+  const hasMemoriesTable =
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")
+      .get() !== undefined;
+  if (currentVersion === 0 && !hasMemoriesTable) {
+    applySchema(db);
+    recordVersion(db, SCHEMA_VERSION, 'Fresh install');
+    logger.info('migrations', 'Fresh database initialized', { version: SCHEMA_VERSION });
+    return;
+  }
 
   if (currentVersion < 2) {
     migrateV1ToV2(db, logger);
@@ -84,21 +128,13 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
   if (currentVersion < 4) {
     logger.info('migrations', 'Running v3 to v4 migration: episodes table, episode_id on memories');
     // episodes table is created by applySchema, just add column to existing memories
-    try {
-      db.prepare('ALTER TABLE memories ADD COLUMN episode_id TEXT REFERENCES episodes(id)').run();
-    } catch {
-      // Column already exists
-    }
+    tryAlterAddColumn(db, 'ALTER TABLE memories ADD COLUMN episode_id TEXT REFERENCES episodes(id)');
     applySchema(db);
   }
 
   if (currentVersion < 5) {
     logger.info('migrations', 'Running v4 to v5 migration: clusters table, cluster_id on memories');
-    try {
-      db.prepare('ALTER TABLE memories ADD COLUMN cluster_id TEXT REFERENCES clusters(id)').run();
-    } catch {
-      // Column already exists
-    }
+    tryAlterAddColumn(db, 'ALTER TABLE memories ADD COLUMN cluster_id TEXT REFERENCES clusters(id)');
     applySchema(db);
   }
 
@@ -111,7 +147,7 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       'ALTER TABLE memories ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0',
     ];
     for (const stmt of alterStatements) {
-      try { db.prepare(stmt).run(); } catch { /* Column exists */ }
+      tryAlterAddColumn(db, stmt);
     }
     applySchema(db);
   }
@@ -135,7 +171,8 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       'CREATE INDEX IF NOT EXISTS idx_co_retrievals_b ON co_retrievals(memory_b)',
     ];
     for (const stmt of coRetrievalStatements) {
-      try { db.prepare(stmt).run(); } catch { /* table/index exists */ }
+      // IF NOT EXISTS handles the re-run case; real errors must propagate.
+      db.prepare(stmt).run();
     }
   }
 
@@ -174,7 +211,8 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       'CREATE INDEX IF NOT EXISTS idx_memory_usefulness_score ON memory_usefulness(usefulness_score)',
     ];
     for (const stmt of attributionStatements) {
-      try { db.prepare(stmt).run(); } catch { /* table/index exists */ }
+      // IF NOT EXISTS handles the re-run case; real errors must propagate.
+      db.prepare(stmt).run();
     }
   }
 
@@ -184,7 +222,7 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       'ALTER TABLE memory_usefulness ADD COLUMN last_critiqued_at TEXT',
     ];
     for (const stmt of v10Statements) {
-      try { db.prepare(stmt).run(); } catch { /* column exists */ }
+      tryAlterAddColumn(db, stmt);
     }
   }
 
@@ -203,15 +241,16 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       'CREATE INDEX IF NOT EXISTS idx_rem_cited ON retrieval_event_memories(was_cited)',
     ];
     for (const stmt of v11Statements) {
-      try { db.prepare(stmt).run(); } catch { /* table/index exists */ }
+      // IF NOT EXISTS handles the re-run case; real errors must propagate.
+      db.prepare(stmt).run();
     }
   }
 
   if (currentVersion < 12) {
     logger.info('migrations', 'Running v11 to v12 migration: session_id on retrieval_events + backfill historical join rows');
     // Add session_id column (nullable for backwards compat)
-    try { db.prepare('ALTER TABLE retrieval_events ADD COLUMN session_id TEXT').run(); } catch { /* exists */ }
-    try { db.prepare('CREATE INDEX IF NOT EXISTS idx_retrieval_events_session ON retrieval_events(session_id)').run(); } catch { /* exists */ }
+    tryAlterAddColumn(db, 'ALTER TABLE retrieval_events ADD COLUMN session_id TEXT');
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_retrieval_events_session ON retrieval_events(session_id)').run();
     // Backfill: for every historical event, explode retrieved_ids/cited_ids
     // JSON into the retrieval_event_memories join table. Previously
     // v11 migration only created the empty table; historical data
@@ -256,7 +295,7 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
       'ALTER TABLE memories ADD COLUMN happened_at TEXT',
     ];
     for (const stmt of alterStatements) {
-      try { db.prepare(stmt).run(); } catch { /* column exists */ }
+      tryAlterAddColumn(db, stmt);
     }
 
     // Step 2 — apply schema. The CREATE TABLE IF NOT EXISTS / CREATE INDEX

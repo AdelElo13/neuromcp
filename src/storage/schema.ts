@@ -264,6 +264,20 @@ const CREATE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_memory_usefulness_namespace ON memory_usefulness(namespace);
   CREATE INDEX IF NOT EXISTS idx_memory_usefulness_score ON memory_usefulness(usefulness_score);
 
+  -- Attention-based co-retrieval pairs (v8). Lived only in the v8 migration
+  -- block until v0.26, so applySchema-initialized databases lacked it and
+  -- every co-retrieval write was silently swallowed by search's best-effort
+  -- catch.
+  CREATE TABLE IF NOT EXISTS co_retrievals (
+    memory_a TEXT NOT NULL,
+    memory_b TEXT NOT NULL,
+    co_count INTEGER NOT NULL DEFAULT 1,
+    last_co_retrieved_at TEXT NOT NULL,
+    PRIMARY KEY (memory_a, memory_b)
+  );
+  CREATE INDEX IF NOT EXISTS idx_co_retrievals_a ON co_retrievals(memory_a);
+  CREATE INDEX IF NOT EXISTS idx_co_retrievals_b ON co_retrievals(memory_b);
+
   -- v11: normalised retrieval-memory join + FK cascade for usefulness.
   CREATE TABLE IF NOT EXISTS retrieval_event_memories (
     event_id TEXT NOT NULL,

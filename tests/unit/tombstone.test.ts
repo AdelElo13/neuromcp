@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
+import { openDatabase, closeDatabase } from '../../src/storage/database.js';
+import { applySchema } from '../../src/storage/schema.js';
 import {
   tombstone,
   tombstoneWithLineage,
@@ -11,35 +13,6 @@ import {
   countTombstones,
 } from '../../src/governance/tombstone.js';
 import type { Logger } from '../../src/observability/logger.js';
-
-const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS memories (
-  id TEXT PRIMARY KEY,
-  content TEXT NOT NULL,
-  content_hash TEXT NOT NULL,
-  embedding_model TEXT NOT NULL DEFAULT 'test',
-  embedding_dim INTEGER NOT NULL DEFAULT 384,
-  namespace TEXT NOT NULL DEFAULT 'default',
-  source TEXT NOT NULL DEFAULT 'user',
-  source_trust TEXT NOT NULL DEFAULT 'high',
-  visibility TEXT NOT NULL DEFAULT 'private',
-  schema_version INTEGER NOT NULL DEFAULT 1,
-  category TEXT NOT NULL DEFAULT 'general',
-  tags TEXT DEFAULT '[]',
-  importance REAL NOT NULL DEFAULT 0.5,
-  access_count INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-  last_accessed_at TEXT,
-  expires_at TEXT,
-  is_deleted INTEGER NOT NULL DEFAULT 0,
-  tombstoned_at TEXT,
-  supersedes_id TEXT,
-  superseded_by_id TEXT,
-  metadata TEXT DEFAULT '{}',
-  project_id TEXT,
-  agent_id TEXT,
-  summary TEXT
-)`;
 
 function createMockLogger(): Logger {
   return {
@@ -50,10 +23,18 @@ function createMockLogger(): Logger {
   };
 }
 
+// The v0.26 purge cleans up FTS + child tables, so these tests run against
+// the real schema instead of a minimal stand-in memories table.
 function insertMemory(db: Database.Database, id: string, content: string): void {
+  const now = new Date().toISOString();
   db.prepare(
-    'INSERT INTO memories (id, content, content_hash) VALUES (?, ?, ?)',
-  ).run(id, content, `hash_${id}`);
+    `INSERT INTO memories
+       (id, content_hash, content, namespace, source, source_trust, category, tags,
+        importance, metadata, created_at, updated_at, schema_version, visibility,
+        embedding_model, embedding_dim)
+     VALUES (?, ?, ?, 'default', 'user', 'high', 'general', '[]',
+             0.5, '{}', ?, ?, 1, 'private', 'test', 384)`,
+  ).run(id, `hash_${id}`, content, now, now);
 }
 
 describe('tombstone utilities', () => {
@@ -63,16 +44,18 @@ describe('tombstone utilities', () => {
 
   beforeEach(() => {
     dbPath = join(tmpdir(), `neuromcp-test-${randomUUID()}.db`);
-    db = new Database(dbPath);
-    db.exec(CREATE_TABLE);
+    db = openDatabase(dbPath);
+    applySchema(db);
   });
 
   afterEach(() => {
-    db.close();
-    try {
-      unlinkSync(dbPath);
-    } catch {
-      // ignore cleanup errors
+    closeDatabase();
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        unlinkSync(dbPath + suffix);
+      } catch {
+        // ignore cleanup errors
+      }
     }
   });
 

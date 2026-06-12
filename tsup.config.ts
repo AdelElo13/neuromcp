@@ -15,6 +15,7 @@ export default defineConfig({
     'src/tools/admin.ts',
     'src/tools/backfill.ts',
     'src/tools/graph.ts',
+    'src/graph/entity-name-dedup.ts',
     'src/tools/wiki.ts',
     'src/registration/wiki.ts',
     'src/storage/database.ts',
