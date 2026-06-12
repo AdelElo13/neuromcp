@@ -88,6 +88,40 @@ function sanitizeFtsQuery(query: string): string {
   return '"' + query.replace(/"/g, '""') + '"';
 }
 
+/**
+ * FTS5 candidate lookup with namespace pushdown. Without the pushdown the
+ * limit*3 candidate budget is consumed by other namespaces' rows (which the
+ * post-filter then discards), starving the FTS leg in multi-tenant DBs —
+ * the keyword-side twin of the vec-side recall collapse fixed in
+ * sqlite-vec.ts. `namespace === undefined` (or '*' resolved by the caller)
+ * searches all namespaces.
+ */
+export function ftsCandidates(
+  db: Database.Database,
+  ftsQuery: string,
+  k: number,
+  namespace?: string,
+): Array<{ id: string }> {
+  if (namespace === undefined) {
+    return db
+      .prepare(
+        `SELECT m.id FROM memories_fts f
+         JOIN memories m ON m.rowid = f.rowid
+         WHERE memories_fts MATCH ? AND m.is_deleted = 0
+         ORDER BY rank LIMIT ?`,
+      )
+      .all(ftsQuery, k) as Array<{ id: string }>;
+  }
+  return db
+    .prepare(
+      `SELECT m.id FROM memories_fts f
+       JOIN memories m ON m.rowid = f.rowid
+       WHERE memories_fts MATCH ? AND m.is_deleted = 0 AND m.namespace = ?
+       ORDER BY rank LIMIT ?`,
+    )
+    .all(ftsQuery, namespace, k) as Array<{ id: string }>;
+}
+
 export async function searchMemory(
   input: SearchInput,
   deps: SearchDeps,
@@ -102,32 +136,30 @@ export async function searchMemory(
   const graphBoost = input.graph_boost !== false;
   const explain = input.explain !== false; // default: true
 
+  // '*' means "all namespaces": the vec store and FTS leg express that as
+  // "no namespace filter" (undefined). Passing the literal '*' through would
+  // hit `namespace = '*'` equality filters and silently return zero rows.
+  const scopedNamespace = namespace === '*' ? undefined : namespace;
+
   // Step 1: Generate query embedding
   const embedding = await embedder.embed(input.query);
 
   // Step 2: Vector search — push namespace into the vec query so we don't
   // waste the top-k budget on other tenants' data (see sqlite-vec.ts for
   // the recall-collapse story).
-  const vecResults = vecStore.search(embedding, limit * 3, namespace);
+  const vecResults = vecStore.search(embedding, limit * 3, scopedNamespace);
 
   const vecRanks = new Map<string, number>();
   vecResults.forEach((r, i) => {
     vecRanks.set(r.id, i + 1);
   });
 
-  // Step 3: FTS search (best-effort)
+  // Step 3: FTS search (best-effort), namespace pushed down like the vec leg
   const ftsRanks = new Map<string, number>();
   if (hybrid) {
     try {
       const ftsQuery = sanitizeFtsQuery(input.query);
-      const ftsRows = db
-        .prepare(
-          `SELECT m.id FROM memories_fts f
-           JOIN memories m ON m.rowid = f.rowid
-           WHERE memories_fts MATCH ? AND m.is_deleted = 0
-           ORDER BY rank LIMIT ?`,
-        )
-        .all(ftsQuery, limit * 3) as Array<{ id: string }>;
+      const ftsRows = ftsCandidates(db, ftsQuery, limit * 3, scopedNamespace);
 
       ftsRows.forEach((row, i) => {
         ftsRanks.set(row.id, i + 1);
@@ -320,6 +352,12 @@ export async function searchMemory(
 
     results.push({ ...memory, similarity_score: finalScore });
   }
+
+  // Step 8: Re-sort by final score. The adaptive multiplier in Step 7 can
+  // reorder candidates relative to the RRF order, and MMR assumes its input
+  // is sorted by relevance (it seeds with candidates[0] and normalizes
+  // against candidates[0].similarity_score).
+  results.sort((a, b) => b.similarity_score - a.similarity_score);
 
   // Step 9: MMR re-ranking for diversity
   const mmrResults = mmrRerank(results, config.mmrLambda, limit);

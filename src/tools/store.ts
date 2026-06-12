@@ -226,54 +226,60 @@ export async function storeMemory(
   const now = new Date().toISOString();
   const validFrom = input.valid_from ?? now;
 
-  db.prepare(
-    `INSERT INTO memories (
-      id, content_hash, content, summary, embedding_model, embedding_dim,
-      namespace, project_id, agent_id, source, source_trust, visibility,
-      schema_version, category, tags, importance, access_count,
-      created_at, updated_at, last_accessed_at, expires_at,
-      is_deleted, tombstoned_at, supersedes_id, superseded_by_id, metadata,
-      valid_from, valid_to, surprise_score, episode_id
-    ) VALUES (
-      ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'namespace', 2, ?, ?, ?, 0,
-      ?, ?, NULL, ?, 0, NULL, NULL, NULL, ?,
-      ?, ?, ?, ?
-    )`,
-  ).run(
-    id,
-    hash,
-    input.content,
-    embedder.name,
-    embedder.dimensions,
-    namespace,
-    input.project_id ?? null,
-    input.agent_id ?? null,
-    source,
-    sourceTrust,
-    category,
-    tagsJson,
-    adjustedImportance,
-    now,
-    now,
-    input.expires_at ?? null,
-    metadataJson,
-    validFrom,
-    input.valid_to ?? null,
-    surpriseScore,
-    input.episode_id ?? null,
-  );
+  // The memories row, its vector, and its FTS row must land atomically: a
+  // crash or vec/FTS failure between separate statements used to leave a
+  // committed memory that hybrid search can never find (or a vector for a
+  // row that does not exist). The embedding is computed above, so the
+  // transaction body is fully synchronous.
+  const insertAtomically = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO memories (
+        id, content_hash, content, summary, embedding_model, embedding_dim,
+        namespace, project_id, agent_id, source, source_trust, visibility,
+        schema_version, category, tags, importance, access_count,
+        created_at, updated_at, last_accessed_at, expires_at,
+        is_deleted, tombstoned_at, supersedes_id, superseded_by_id, metadata,
+        valid_from, valid_to, surprise_score, episode_id
+      ) VALUES (
+        ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'namespace', 2, ?, ?, ?, 0,
+        ?, ?, NULL, ?, 0, NULL, NULL, NULL, ?,
+        ?, ?, ?, ?
+      )`,
+    ).run(
+      id,
+      hash,
+      input.content,
+      embedder.name,
+      embedder.dimensions,
+      namespace,
+      input.project_id ?? null,
+      input.agent_id ?? null,
+      source,
+      sourceTrust,
+      category,
+      tagsJson,
+      adjustedImportance,
+      now,
+      now,
+      input.expires_at ?? null,
+      metadataJson,
+      validFrom,
+      input.valid_to ?? null,
+      surpriseScore,
+      input.episode_id ?? null,
+    );
 
-  // Upsert embedding into vector store
-  vecStore.upsert(id, embedding);
+    vecStore.upsert(id, embedding);
 
-  // Sync to FTS
-  const row = db
-    .prepare('SELECT rowid FROM memories WHERE id = ?')
-    .get(id) as { rowid: number };
+    const row = db
+      .prepare('SELECT rowid FROM memories WHERE id = ?')
+      .get(id) as { rowid: number };
 
-  db.prepare(
-    'INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, ?)',
-  ).run(row.rowid, input.content, tagsJson, category);
+    db.prepare(
+      'INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, ?)',
+    ).run(row.rowid, input.content, tagsJson, category);
+  });
+  insertAtomically();
 
   // Step 7: Entity extraction — LLM (Ollama) with regex fallback
   let entitiesExtracted: readonly string[] = [];

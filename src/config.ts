@@ -101,7 +101,10 @@ export function loadConfig(): NeuromcpConfig {
     blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),
     usefulnessExplorationThreshold: envNum('NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD', 3),
     usefulnessFactorRange: envNum('NEUROMCP_USEFULNESS_FACTOR_RANGE', 0.5),
-    entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'auto') as NeuromcpConfig['entityExtractionMode'],
+    // Default 'regex': the write path must stay LLM-free (store_memory used
+    // to block up to 15s on an Ollama /api/chat call per store). 'auto' and
+    // 'llm' remain available as explicit opt-ins.
+    entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'regex') as NeuromcpConfig['entityExtractionMode'],
     ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
     wikiDir: env('NEUROMCP_WIKI_DIR', resolve(homedir(), '.neuromcp', 'wiki')),
   };

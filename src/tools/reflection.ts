@@ -18,6 +18,8 @@
 import type { Database } from 'better-sqlite3';
 import { randomBytes, createHash } from 'node:crypto';
 import type { Logger } from '../observability/logger.js';
+import type { EmbeddingProvider } from '../embeddings/types.js';
+import type { VectorStore } from '../vectors/types.js';
 
 export interface GenerateReflectionArgs {
   namespace?: string;
@@ -47,11 +49,11 @@ export interface ReflectionResult {
  * in the given window. Returns the new memory id or skipped=true if
  * there isn't enough signal.
  */
-export function generateReflection(
+export async function generateReflection(
   args: GenerateReflectionArgs,
-  deps: { db: Database; logger: Logger },
-): ReflectionResult {
-  const { db, logger } = deps;
+  deps: { db: Database; logger: Logger; embedder: EmbeddingProvider; vecStore: VectorStore },
+): Promise<ReflectionResult> {
+  const { db, logger, embedder, vecStore } = deps;
   const namespace = args.namespace ?? 'default';
   const windowDays = args.window_days ?? 14;
   const minHelpful = args.min_helpful ?? 1;
@@ -133,28 +135,48 @@ export function generateReflection(
   const reflection_id = randomBytes(16).toString('hex');
   const contentHash = createHash('sha256').update(summary).digest('hex');
   const now = new Date().toISOString();
+  const reflectionTags = JSON.stringify(['reflection', 'auto-generated']);
 
   // Store as a memory with category=reflection so it participates in search
-  // but can be filtered out when we don't want meta content.
-  db.prepare(
-    `INSERT INTO memories
-       (id, content_hash, content, namespace, source, source_trust, category, tags, importance, metadata, created_at, updated_at, schema_version, visibility, embedding_model, embedding_dim)
-     VALUES (?, ?, ?, ?, 'consolidation', 'medium', 'reflection', ?, ?, ?, ?, ?, 11, 'namespace', 'none', 0)`,
-  ).run(
-    reflection_id,
-    contentHash,
-    summary,
-    namespace,
-    JSON.stringify(['reflection', 'auto-generated']),
-    0.7,
-    JSON.stringify({
-      source_memories: rows.map((r) => r.id),
-      window_days: windowDays,
-      min_helpful: minHelpful,
-    }),
-    now,
-    now,
-  );
+  // but can be filtered out when we don't want meta content. The row used to
+  // be written with embedding_model='none' and no vec/FTS rows, which made
+  // every reflection invisible to hybrid search — embed first, then write
+  // memories + vec + FTS atomically (same contract as storeMemory).
+  const embedding = await embedder.embed(summary);
+
+  const insertAtomically = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO memories
+         (id, content_hash, content, namespace, source, source_trust, category, tags, importance, metadata, created_at, updated_at, schema_version, visibility, embedding_model, embedding_dim)
+       VALUES (?, ?, ?, ?, 'consolidation', 'medium', 'reflection', ?, ?, ?, ?, ?, 11, 'namespace', ?, ?)`,
+    ).run(
+      reflection_id,
+      contentHash,
+      summary,
+      namespace,
+      reflectionTags,
+      0.7,
+      JSON.stringify({
+        source_memories: rows.map((r) => r.id),
+        window_days: windowDays,
+        min_helpful: minHelpful,
+      }),
+      now,
+      now,
+      embedder.name,
+      embedder.dimensions,
+    );
+
+    vecStore.upsert(reflection_id, embedding);
+
+    const row = db
+      .prepare('SELECT rowid FROM memories WHERE id = ?')
+      .get(reflection_id) as { rowid: number };
+    db.prepare(
+      "INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, 'reflection')",
+    ).run(row.rowid, summary, reflectionTags);
+  });
+  insertAtomically();
 
   logger.info('reflection', 'generated', {
     reflection_id,
