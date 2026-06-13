@@ -1,0 +1,17 @@
+{
+  "_comment": "Predicate classification for contradiction auto-supersede. Default is ADDITIVE: a new memory whose claims do not share a subject + mutually-exclusive predicate with the old memory can never auto-invalidate it — keyword heuristics alone only flag/coexist. False-positive supersedes are a hallucination vector for downstream LLMs. Predicates are matched on the exact lowercased form extracted by claims.ts.",
+  "mutually_exclusive": [
+    "is",
+    "are",
+    "uses",
+    "use",
+    "runs",
+    "run",
+    "requires",
+    "require",
+    "returns",
+    "return",
+    "stores",
+    "store"
+  ]
+}

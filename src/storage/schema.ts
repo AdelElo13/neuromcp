@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -20,6 +20,11 @@ const CREATE_TABLES = `
     category TEXT NOT NULL DEFAULT 'general',
     tags TEXT NOT NULL DEFAULT '[]',
     importance REAL NOT NULL DEFAULT 0.5,
+    -- v14: computed importance (surprise boost, dedup merge, adaptive
+    -- updates, decay). The importance column above is the USER-supplied
+    -- value and is never mutated by the system; readers use
+    -- COALESCE(effective_importance, importance).
+    effective_importance REAL,
     access_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

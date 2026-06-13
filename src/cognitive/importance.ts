@@ -90,15 +90,21 @@ export function updateAdaptiveImportance(
     'SELECT id FROM memories WHERE namespace = ? AND is_deleted = 0'
   ).all(namespace) as Array<{ id: string }>;
 
-  const updateStmt = db.prepare('UPDATE memories SET importance = ? WHERE id = ?');
+  // Writes effective_importance, never the user-supplied importance column.
+  // computeAdaptiveImportance derives from the immutable user base, so
+  // repeated runs are idempotent — the pre-v14 version wrote back into its
+  // own input and ratcheted importance upward on every consolidation run.
+  const updateStmt = db.prepare('UPDATE memories SET effective_importance = ? WHERE id = ?');
   let totalDelta = 0;
   let updated = 0;
 
   const transaction = db.transaction(() => {
     for (const mem of memories) {
       const factors = computeAdaptiveImportance(db, mem.id, config);
-      const oldImportance = db.prepare('SELECT importance FROM memories WHERE id = ?').get(mem.id) as { importance: number };
-      const delta = Math.abs(factors.adjusted - oldImportance.importance);
+      const old = db
+        .prepare('SELECT COALESCE(effective_importance, importance) AS eff FROM memories WHERE id = ?')
+        .get(mem.id) as { eff: number };
+      const delta = Math.abs(factors.adjusted - old.eff);
 
       if (delta > 0.001) { // Only update if meaningful change
         updateStmt.run(factors.adjusted, mem.id);

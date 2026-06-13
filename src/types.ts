@@ -73,6 +73,10 @@ export interface Memory {
   readonly category: string;
   readonly tags: string;
   readonly importance: number;
+  /** v14: computed importance (surprise/dedup/adaptive/decay writers).
+   *  `importance` is the user-supplied value and is never system-mutated;
+   *  read COALESCE(effective_importance, importance). */
+  readonly effective_importance: number | null;
   readonly access_count: number;
   readonly created_at: string;
   readonly updated_at: string;

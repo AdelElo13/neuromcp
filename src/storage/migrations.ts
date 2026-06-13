@@ -304,6 +304,19 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     applySchema(db);
   }
 
+  if (currentVersion < 14) {
+    logger.info('migrations', 'Running v13 to v14 migration: effective_importance split (user importance is never system-mutated)');
+    tryAlterAddColumn(db, 'ALTER TABLE memories ADD COLUMN effective_importance REAL');
+    // Backfill: today's stored importance IS the accumulated computed value
+    // (surprise/dedup/adaptive/decay all wrote into it pre-v14), so it seeds
+    // effective_importance. From here on the importance column only ever
+    // carries user input.
+    db.prepare(
+      'UPDATE memories SET effective_importance = importance WHERE effective_importance IS NULL',
+    ).run();
+    applySchema(db);
+  }
+
   recordVersion(db, SCHEMA_VERSION, `Migration from v${currentVersion} to v${SCHEMA_VERSION}`);
 
   logger.info('migrations', 'Schema migration complete', {

@@ -27,9 +27,13 @@ export function computeDecay(
   const nsClause = isAll ? '1=1' : 'namespace = ?';
   const nsParams = isAll ? [] : [namespace];
 
+  // Decay operates on the COMPUTED importance (v14 split): it reads and the
+  // executor writes effective_importance; the user-supplied importance
+  // column is never system-mutated.
   const rows = db
     .prepare(
-      `SELECT id, importance, access_count, created_at, last_accessed_at, source, source_trust
+      `SELECT id, COALESCE(effective_importance, importance) AS importance,
+              access_count, created_at, last_accessed_at, source, source_trust
        FROM memories
        WHERE is_deleted = 0 AND ${nsClause}`,
     )

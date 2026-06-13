@@ -141,7 +141,7 @@ describe('applySchema', () => {
 });
 
 describe('SCHEMA_VERSION', () => {
-  it('equals 13', () => {
-    expect(SCHEMA_VERSION).toBe(13);
+  it('equals 14', () => {
+    expect(SCHEMA_VERSION).toBe(14);
   });
 });

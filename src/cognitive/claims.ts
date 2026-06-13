@@ -142,6 +142,22 @@ export function searchClaims(
     .all(`%${query}%`, `%${query}%`, `%${query}%`, limit) as Claim[];
 }
 
+/**
+ * Pure (no-DB) triple extraction over free text. Used by contradiction
+ * detection to align claims between two memories before allowing an
+ * auto-supersede.
+ */
+export function extractTriplesFromText(text: string): readonly Triple[] {
+  const triples: Triple[] = [];
+  for (const sentence of splitSentences(text)) {
+    const trimmed = sentence.trim();
+    if (trimmed.length < 10) continue;
+    const triple = extractTriple(trimmed.replace(/\s+/g, ' '));
+    if (triple !== null) triples.push(triple);
+  }
+  return triples;
+}
+
 // ─── Internals ──────────────────────────────────────────────────────
 
 function splitSentences(text: string): string[] {
@@ -167,7 +183,7 @@ function isDeclarative(sentence: string): boolean {
   return true;
 }
 
-interface Triple {
+export interface Triple {
   readonly subject: string;
   readonly predicate: string;
   readonly object: string;

@@ -121,11 +121,13 @@ export async function storeMemory(
     | undefined;
 
   if (exactMatch !== undefined) {
-    const newImportance = Math.max(exactMatch.importance, importance);
+    // User field: last writer wins, so a re-store can LOWER importance.
+    // System signal: effective_importance keeps the historical maximum.
+    // (Pre-v14 this Math.max'ed into the user column — Bug #2.)
     const mergedTags = mergeTags(exactMatch.tags, [...tags]);
     db.prepare(
-      "UPDATE memories SET importance = ?, tags = ?, access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-    ).run(newImportance, mergedTags, exactMatch.id);
+      "UPDATE memories SET importance = ?, effective_importance = MAX(COALESCE(effective_importance, importance), ?), tags = ?, access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+    ).run(importance, importance, mergedTags, exactMatch.id);
 
     logger.info('store', 'exact dedup match', { id: exactMatch.id, namespace });
     metrics.increment('store.dedup_exact');
@@ -165,11 +167,10 @@ export async function storeMemory(
           break;
         }
 
-        const newImportance = Math.max(existing.importance, importance);
         const mergedTags = mergeTags(existing.tags, [...tags]);
         db.prepare(
-          "UPDATE memories SET importance = ?, tags = ?, access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-        ).run(newImportance, mergedTags, existing.id);
+          "UPDATE memories SET importance = ?, effective_importance = MAX(COALESCE(effective_importance, importance), ?), tags = ?, access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        ).run(importance, importance, mergedTags, existing.id);
 
         logger.info('store', 'semantic dedup match', {
           id: existing.id,
@@ -215,8 +216,10 @@ export async function storeMemory(
     });
   }
 
-  // Boost importance based on surprise (novel info is more valuable)
-  const adjustedImportance = Math.min(
+  // Boost importance based on surprise (novel info is more valuable). The
+  // boost lands in effective_importance — the user-supplied importance is
+  // stored verbatim and never system-mutated (Bug #2).
+  const effectiveImportance = Math.min(
     importance + (surpriseScore * 0.2),
     1.0,
   );
@@ -236,12 +239,12 @@ export async function storeMemory(
       `INSERT INTO memories (
         id, content_hash, content, summary, embedding_model, embedding_dim,
         namespace, project_id, agent_id, source, source_trust, visibility,
-        schema_version, category, tags, importance, access_count,
+        schema_version, category, tags, importance, effective_importance, access_count,
         created_at, updated_at, last_accessed_at, expires_at,
         is_deleted, tombstoned_at, supersedes_id, superseded_by_id, metadata,
         valid_from, valid_to, surprise_score, episode_id
       ) VALUES (
-        ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'namespace', 2, ?, ?, ?, 0,
+        ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'namespace', 2, ?, ?, ?, ?, 0,
         ?, ?, NULL, ?, 0, NULL, NULL, NULL, ?,
         ?, ?, ?, ?
       )`,
@@ -258,7 +261,8 @@ export async function storeMemory(
       sourceTrust,
       category,
       tagsJson,
-      adjustedImportance,
+      importance,
+      effectiveImportance,
       now,
       now,
       input.expires_at ?? null,

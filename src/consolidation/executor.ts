@@ -34,8 +34,10 @@ export function executeConsolidationPlan(
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
 
+  // Decay writes the computed column (v14 split) — user importance is
+  // never system-mutated.
   const updateImportance = db.prepare(
-    "UPDATE memories SET importance = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+    "UPDATE memories SET effective_importance = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
   );
 
   const updateWinner = db.prepare(

@@ -325,8 +325,10 @@ export async function searchMemory(
       if (!hasAll) continue;
     }
 
-    // Importance filter
-    if (input.min_importance !== undefined && memory.importance < input.min_importance) {
+    // Importance filter — on the computed value (v14 split), falling back
+    // to the user value for pre-migration rows.
+    const memEffective = memory.effective_importance ?? memory.importance;
+    if (input.min_importance !== undefined && memEffective < input.min_importance) {
       continue;
     }
 
