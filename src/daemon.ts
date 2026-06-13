@@ -117,7 +117,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const httpServer = await startMcpHttpDaemon(
+  const { shutdown } = await startMcpHttpDaemon(
     () => createServer(deps),
     { port, host, extraAllowedHosts },
     deps,
@@ -133,11 +133,21 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info('daemon', 'shutdown', { signal });
     stopScheduler();
-    httpServer.close(() => {
+    // Graceful: closes session transports + SSE sockets, then the server;
+    // finally checkpoint + close the WAL DB so no committed data is lost.
+    void shutdown()
+      .catch((err: unknown) => {
+        logger.warn('daemon', 'graceful shutdown error', { error: err instanceof Error ? err.message : String(err) });
+      })
+      .finally(() => {
+        try { db.close(); } catch { /* already closed */ }
+        process.exit(0);
+      });
+    // Hard exit after 5s if shutdown hangs.
+    setTimeout(() => {
+      try { db.close(); } catch { /* already closed */ }
       process.exit(0);
-    });
-    // Hard exit after 5s if close() hangs.
-    setTimeout(() => process.exit(0), 5000).unref();
+    }, 5000).unref();
   };
   process.on('SIGINT', () => cleanup('SIGINT'));
   process.on('SIGTERM', () => cleanup('SIGTERM'));

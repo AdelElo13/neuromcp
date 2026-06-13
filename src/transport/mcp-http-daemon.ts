@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Socket } from 'node:net';
 import {
   createServer as createHttpServer,
   type Server,
@@ -15,6 +16,19 @@ import type { NeuromcpConfig } from '../config.js';
 import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import { createRestRequestHandler, type HttpDeps } from './http.js';
+import { isAllowedHost } from './host-guard.js';
+
+/** Result of starting the daemon: the server plus a graceful shutdown hook. */
+export interface DaemonHandle {
+  readonly server: Server;
+  /**
+   * Gracefully stop the daemon: close all MCP session transports, stop the
+   * idle sweep, then close the HTTP server — destroying lingering sockets
+   * (open SSE /events streams) that would otherwise pin httpServer.close()
+   * until a hard-exit timer.
+   */
+  readonly shutdown: () => Promise<void>;
+}
 
 export interface McpHttpDaemonOptions {
   readonly port: number;
@@ -86,55 +100,6 @@ const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
  * infrequent enough that the sweep is essentially free.
  */
 const SESSION_SWEEP_INTERVAL_MS = 60 * 1000; // 1 minute
-
-/**
- * Allowed values for the HTTP Host header on the daemon. Anything else is
- * rejected with 421 Misdirected Request. Without this guard a malicious
- * web page could DNS-rebind `attacker.com` to `127.0.0.1` and exfiltrate
- * memories via cross-origin requests — the browser's same-origin policy
- * does not protect us because, from the browser's perspective, the page
- * is still talking to `attacker.com`. The fact that the daemon binds to
- * loopback only is not sufficient mitigation against DNS-rebinding.
- */
-const ALLOWED_HOSTS: ReadonlySet<string> = new Set([
-  '127.0.0.1',
-  '::1',
-  '[::1]',
-  'localhost',
-]);
-
-function isAllowedHost(rawHost: string | undefined, extraAllowed: ReadonlySet<string>): boolean {
-  if (rawHost === undefined || rawHost === '') return false;
-  const lower = rawHost.toLowerCase();
-  let host: string;
-  let portPart = '';
-  if (lower.startsWith('[')) {
-    const closing = lower.indexOf(']');
-    if (closing === -1) return false; // unterminated bracket → bogus
-    host = lower.slice(0, closing + 1);
-    portPart = lower.slice(closing + 1); // either '' or ':<port>'
-  } else {
-    const colon = lower.indexOf(':');
-    if (colon === -1) {
-      host = lower;
-    } else {
-      host = lower.slice(0, colon);
-      portPart = lower.slice(colon);
-    }
-  }
-  // Reject malformed port suffix early so the downstream `new URL(...)`
-  // call in the request dispatcher cannot throw on bad Host headers
-  // (e.g. `Host: localhost:notaport`). An empty portPart is fine — the
-  // request did not specify a port.
-  if (portPart.length > 0) {
-    if (portPart[0] !== ':') return false;
-    const port = portPart.slice(1);
-    if (port.length === 0 || !/^\d{1,5}$/.test(port)) return false;
-    const portNum = Number(port);
-    if (portNum < 1 || portNum > 65535) return false;
-  }
-  return ALLOWED_HOSTS.has(host) || extraAllowed.has(host);
-}
 
 function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -223,7 +188,7 @@ export async function startMcpHttpDaemon(
   options: McpHttpDaemonOptions,
   deps: McpHttpDaemonDeps,
   logger: Logger,
-): Promise<Server> {
+): Promise<DaemonHandle> {
   const sessions = new Map<string, SessionState>();
   // In-flight initialize counter — reserved capacity that has not yet
   // been written into `sessions` because `onsessioninitialized` only
@@ -564,6 +529,15 @@ export async function startMcpHttpDaemon(
     await restHandler(req, res);
   });
 
+  // Track open sockets so graceful shutdown can destroy lingering SSE
+  // streams (GET /mcp, /events) that never close on their own and would
+  // otherwise pin httpServer.close() until a hard-exit timer.
+  const openSockets = new Set<Socket>();
+  httpServer.on('connection', (socket: Socket) => {
+    openSockets.add(socket);
+    socket.on('close', () => openSockets.delete(socket));
+  });
+
   // Idle-session sweep. POST is stateless: when a crashed client never
   // sends DELETE, its session would otherwise persist until daemon restart.
   // We close idle transports here, which triggers their `onclose` handler
@@ -600,7 +574,26 @@ export async function startMcpHttpDaemon(
   // keep the event loop alive past shutdown.
   httpServer.on('close', () => clearInterval(sweepInterval));
 
-  return new Promise<Server>((resolve, reject) => {
+  let shuttingDown = false;
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(sweepInterval);
+    // 1. Close all MCP session transports (ends their SSE streams cleanly).
+    await Promise.allSettled(
+      [...sessions.values()].map((s) => s.transport.close()),
+    );
+    sessions.clear();
+    // 2. Stop accepting new connections + wait for in-flight to drain.
+    const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    // 3. SSE /events connections won't end on their own — destroy lingering
+    //    sockets so close() can complete instead of hanging.
+    for (const socket of openSockets) socket.destroy();
+    openSockets.clear();
+    await closed;
+  };
+
+  return new Promise<DaemonHandle>((resolve, reject) => {
     const onError = (err: Error): void => {
       httpServer.removeListener('listening', onListening);
       clearInterval(sweepInterval);
@@ -608,6 +601,11 @@ export async function startMcpHttpDaemon(
     };
     const onListening = (): void => {
       httpServer.removeListener('error', onError);
+      // Persistent handler so a post-listen accept error is logged rather
+      // than crashing the daemon as an unhandled 'error' event.
+      httpServer.on('error', (err: Error) => {
+        logger.warn('mcp-http', 'daemon HTTP server error after listen', { error: err.message });
+      });
       logger.info('mcp-http', 'neuromcp daemon listening', {
         mcp: `http://${options.host}:${options.port}/mcp`,
         rest: {
@@ -618,7 +616,7 @@ export async function startMcpHttpDaemon(
         },
         idleTimeoutMinutes: SESSION_IDLE_TIMEOUT_MS / 60000,
       });
-      resolve(httpServer);
+      resolve({ server: httpServer, shutdown });
     };
     httpServer.once('error', onError);
     httpServer.once('listening', onListening);

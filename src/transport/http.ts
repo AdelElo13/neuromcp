@@ -11,6 +11,7 @@ import { searchMemory } from '../tools/search.js';
 import { storeMemory } from '../tools/store.js';
 import { storeMemoryBatch } from '../tools/store-batch.js';
 import { eventBus } from './events.js';
+import { isAllowedHost } from './host-guard.js';
 
 // Resolved once at startup from the module's runtime location. The source
 // tree lives in src/transport/ so `../../package.json` is correct for tsx
@@ -114,7 +115,25 @@ export function createRestRequestHandler(
   deps?: HttpDeps,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    // DNS-rebinding guard. Reject any request whose Host header is not an
+    // allowed loopback host BEFORE routing or body parsing. The daemon
+    // applies the same guard in its outer handler; applying it here too
+    // closes the gap for the legacy dual-mode transport (startHttpTransport),
+    // which mounts this handler directly.
+    if (!isAllowedHost(req.headers.host)) {
+      res.writeHead(421, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'misdirected_request' }));
+      return;
+    }
+
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad_request_uri' }));
+      return;
+    }
 
     const allowedOrigin = pickAllowedOrigin(req.headers.origin);
 
@@ -379,8 +398,22 @@ export async function startHttpTransport(
   // connected via stdio. The HTTP server provides REST API endpoints (/api/store,
   // /api/search, /events, /health) that call tool functions directly, not via MCP protocol.
 
-  return new Promise((resolve) => {
-    httpServer.listen(options.port, options.host, () => {
+  // Race 'error' against 'listening' so a bind failure (EADDRINUSE) REJECTS
+  // the Promise instead of emitting an unhandled 'error' event that crashes
+  // the whole process — the listen()-callback-only form left the caller's
+  // try/catch unable to catch it.
+  return new Promise((resolve, reject) => {
+    const onError = (err: Error): void => {
+      httpServer.removeListener('listening', onListening);
+      reject(err);
+    };
+    const onListening = (): void => {
+      httpServer.removeListener('error', onError);
+      // Keep a persistent handler so a post-listen accept error is logged
+      // rather than crashing the process as an unhandled 'error' event.
+      httpServer.on('error', (err: Error) => {
+        logger.warn('http', 'HTTP server error after listen', { error: err.message });
+      });
       logger.info('http', `HTTP API listening on ${options.host}:${options.port}`, {
         endpoints: {
           store: `http://${options.host}:${options.port}/api/store`,
@@ -390,6 +423,9 @@ export async function startHttpTransport(
         },
       });
       resolve(httpServer);
-    });
+    };
+    httpServer.once('error', onError);
+    httpServer.once('listening', onListening);
+    httpServer.listen(options.port, options.host);
   });
 }
