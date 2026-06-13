@@ -27,6 +27,7 @@ import { searchMemory } from '../src/tools/search.js';
 import { createEmbeddingProvider } from '../src/embeddings/factory.js';
 import { loadConfig } from '../src/config.js';
 import { createLogger } from '../src/observability/logger.js';
+import { computeRetrievalMetrics } from './metrics.js';
 
 interface Turn { role: string; content: string; has_answer?: boolean }
 interface LongMemQuestion {
@@ -43,10 +44,17 @@ interface LongMemQuestion {
 interface QuestionResult {
   question_id: string;
   question_type: string;
+  // Honest metrics (see eval/metrics.ts). hit5/hit10 are "any gold in top-k";
+  // recall5/recall10 are the fraction of the gold set retrieved — these
+  // differ on multi-memory gold sets and used to be conflated.
+  hit5: number;
+  hit10: number;
   recall5: number;
   recall10: number;
+  precision5: number;
+  ndcg5: number;
   mrr: number;
-  hit: boolean;
+  latency_ms: number;
 }
 
 function parseArgs(): { limit?: number; type?: string; distractors: number } {
@@ -106,32 +114,29 @@ async function runQuestion(
     for (const mid of mids) goldIds.add(mid);
   }
 
-  // Search — WITHOUT specifying namespace so distractors DO compete
+  // Search — WITHOUT specifying namespace so distractors DO compete.
+  // Latency is measured around the retrieval call only (not the seeding).
+  const t0 = Date.now();
   const results = await searchMemory(
     { query: q.question, limit: 10, hybrid: true },
     { db: ctx.db, vecStore: ctx.vecStore, embedder, logger: ctx.logger, metrics: ctx.metrics, config: ctx.config },
   );
+  const latencyMs = Date.now() - t0;
 
   const resultIds = results.map((r) => r.id);
-
-  // Compute metrics
-  let firstHit = -1;
-  for (let i = 0; i < resultIds.length; i++) {
-    if (goldIds.has(resultIds[i]!)) { firstHit = i; break; }
-  }
-
-  const top5 = resultIds.slice(0, 5);
-  const top10 = resultIds;
-  const hit5 = top5.some((id) => goldIds.has(id));
-  const hit10 = top10.some((id) => goldIds.has(id));
+  const m = computeRetrievalMetrics(resultIds, goldIds);
 
   return {
     question_id: q.question_id,
     question_type: q.question_type,
-    recall5: hit5 ? 1 : 0,
-    recall10: hit10 ? 1 : 0,
-    mrr: firstHit >= 0 ? 1 / (firstHit + 1) : 0,
-    hit: hit10,
+    hit5: m.hit5,
+    hit10: m.hit10,
+    recall5: m.recall5,
+    recall10: m.recall10,
+    precision5: m.precision5,
+    ndcg5: m.ndcg5,
+    mrr: m.mrr,
+    latency_ms: latencyMs,
   };
 }
 
@@ -213,24 +218,40 @@ async function main() {
     byType.get(r.question_type)!.push(r);
   }
 
-  console.log(`## Results with ${opts.distractors} distractors\n`);
-  console.log('| Type | N | R@5 | R@10 | MRR | Hit Rate |');
-  console.log('|------|---|-----|------|-----|----------|');
-  for (const [type, rs] of byType.entries()) {
-    const r5 = (rs.reduce((s, r) => s + r.recall5, 0) / rs.length * 100).toFixed(1);
-    const r10 = (rs.reduce((s, r) => s + r.recall10, 0) / rs.length * 100).toFixed(1);
-    const mrr = (rs.reduce((s, r) => s + r.mrr, 0) / rs.length * 100).toFixed(1);
-    const hr = (rs.filter((r) => r.hit).length / rs.length * 100).toFixed(1);
-    console.log(`| ${type} | ${rs.length} | ${r5}% | ${r10}% | ${mrr}% | ${hr}% |`);
-  }
-  const r5 = (results.reduce((s, r) => s + r.recall5, 0) / results.length * 100).toFixed(1);
-  const r10 = (results.reduce((s, r) => s + r.recall10, 0) / results.length * 100).toFixed(1);
-  const mrr = (results.reduce((s, r) => s + r.mrr, 0) / results.length * 100).toFixed(1);
-  const hr = (results.filter((r) => r.hit).length / results.length * 100).toFixed(1);
-  console.log(`| **OVERALL** | **${results.length}** | **${r5}%** | **${r10}%** | **${mrr}%** | **${hr}%** |`);
+  const pct = (xs: QuestionResult[], sel: (r: QuestionResult) => number): string =>
+    (xs.reduce((s, r) => s + sel(r), 0) / xs.length * 100).toFixed(1);
+  const avg = (xs: QuestionResult[], sel: (r: QuestionResult) => number): number =>
+    xs.reduce((s, r) => s + sel(r), 0) / xs.length;
+  const p95 = (xs: QuestionResult[]): number => {
+    const sorted = xs.map((r) => r.latency_ms).sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] ?? 0;
+  };
 
-  const outPath = resolve(__dirname, 'longmemeval', `distractor-${opts.distractors}-results.json`);
-  writeFileSync(outPath, JSON.stringify({ distractors: opts.distractors, results, overall: { r5, r10, mrr, hr } }, null, 2));
+  const reranker = process.env.NEUROMCP_RERANKER ?? 'none';
+  console.log(`## Results with ${opts.distractors} distractors (reranker=${reranker})\n`);
+  console.log('| Type | N | Hit@5 | R@5(true) | P@5 | nDCG@5 | MRR | Hit@10 | lat ms (avg/p95) |');
+  console.log('|------|---|-------|-----------|-----|--------|-----|--------|------------------|');
+  const row = (label: string, rs: QuestionResult[]): string =>
+    `| ${label} | ${rs.length} | ${pct(rs, (r) => r.hit5)}% | ${pct(rs, (r) => r.recall5)}% | ` +
+    `${pct(rs, (r) => r.precision5)}% | ${pct(rs, (r) => r.ndcg5)}% | ${pct(rs, (r) => r.mrr)}% | ` +
+    `${pct(rs, (r) => r.hit10)}% | ${avg(rs, (r) => r.latency_ms).toFixed(0)}/${p95(rs).toFixed(0)} |`;
+  for (const [type, rs] of byType.entries()) console.log(row(type, rs));
+  console.log(row('**OVERALL**', results));
+
+  const overall = {
+    reranker,
+    hit5: pct(results, (r) => r.hit5),
+    recall5: pct(results, (r) => r.recall5),
+    precision5: pct(results, (r) => r.precision5),
+    ndcg5: pct(results, (r) => r.ndcg5),
+    mrr: pct(results, (r) => r.mrr),
+    hit10: pct(results, (r) => r.hit10),
+    latency_avg_ms: Math.round(avg(results, (r) => r.latency_ms)),
+    latency_p95_ms: Math.round(p95(results)),
+  };
+  const suffix = reranker === 'none' ? '' : `-rerank-${reranker}`;
+  const outPath = resolve(__dirname, 'longmemeval', `distractor-${opts.distractors}${suffix}-results.json`);
+  writeFileSync(outPath, JSON.stringify({ distractors: opts.distractors, results, overall }, null, 2));
   console.log(`\nResults saved to: ${outPath}`);
 }
 
