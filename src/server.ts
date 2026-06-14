@@ -54,7 +54,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 42,
+    tools: 43,
     resources: 13,
     prompts: 3,
   });

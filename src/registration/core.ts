@@ -6,6 +6,7 @@ import { storeMemory } from '../tools/store.js';
 import { ensureAmbientEpisode } from '../tools/episode.js';
 import { activeEpisodeForNamespace } from '../episode/active-state.js';
 import { searchMemory, toCompact } from '../tools/search.js';
+import { recallAnswer } from '../tools/recall-answer.js';
 import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
 import { forgetMemory } from '../tools/forget.js';
@@ -99,6 +100,24 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       logger.warn('search', 'auto-log retrieval failed', { error: err instanceof Error ? err.message : String(err) });
       return textResult(projected);
     }
+  });
+
+  server.registerTool('recall_answer', {
+    description:
+      'Answer a question FROM memory: runs hybrid retrieval, then returns a synthesized, CITED extractive answer (every sentence traces to a stored memory id) PLUS an explicit gap-analysis — what memory does NOT cover and the freshness boundary (stale_since). Returns status "not_in_memory" instead of fabricating when nothing matches. Deterministic, no LLM. Prefer this over search_memory when you need a grounded answer rather than raw chunks.',
+    inputSchema: {
+      query: z.string().describe('The question to answer from memory'),
+      namespace: z.string().optional().describe('Namespace to search (default: config default)'),
+      limit: z.number().int().min(1).max(50).optional().describe('How many memories to synthesize over (default: 8)'),
+      category: z.string().optional().describe('Filter by category'),
+      after: z.string().optional().describe('Only memories created after this ISO timestamp'),
+      before: z.string().optional().describe('Only memories created before this ISO timestamp'),
+      valid_at: z.string().optional().describe('ISO 8601 timestamp — only memories valid at this time'),
+      max_sentences: z.number().int().min(1).max(15).optional().describe('Max sentences in the answer (default: 5)'),
+    },
+  }, async (args) => {
+    const result = await recallAnswer(args, { db, vecStore, embedder, logger, metrics, config, reranker });
+    return textResult(result);
   });
 
   server.registerTool('recall_memory', {
