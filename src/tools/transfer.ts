@@ -13,6 +13,7 @@ export interface TransferableMemory {
 export interface TransferResult {
   readonly transferred: number;
   readonly skipped_duplicates: number;
+  readonly skipped_errors: number;
   readonly target_namespace: string;
 }
 
@@ -116,6 +117,7 @@ export async function transferMemories(
   const adapt = input.adapt !== false;
   let transferred = 0;
   let skippedDuplicates = 0;
+  let skippedErrors = 0;
 
   const targetHashes = new Set(
     (db.prepare('SELECT content_hash FROM memories WHERE namespace = ? AND is_deleted = 0')
@@ -125,29 +127,27 @@ export async function transferMemories(
 
   const now = new Date().toISOString();
 
-  const transaction = db.transaction(() => {
-    for (const memId of input.memory_ids) {
-      const source = db.prepare('SELECT * FROM memories WHERE id = ?').get(memId) as Memory | undefined;
-      if (!source) continue;
-
-      // Skip duplicates
-      if (targetHashes.has(source.content_hash)) {
-        skippedDuplicates++;
-        continue;
-      }
-
-      let content = source.content;
-      if (adapt) {
-        // Strip project-specific paths but keep the knowledge
-        content = content.replace(/\/Users\/\w+\/[^\s,)]+/g, '<path>');
-        content = content.replace(/localhost:\d+/g, '<host>');
-      }
-
-      const newId = createHash('sha256')
-        .update('transfer-' + Date.now() + '-' + Math.random())
-        .digest('hex').slice(0, 32);
-      const contentHash = createHash('sha256').update(content).digest('hex');
-
+  // Per-memory: adapt → dedup on the hash of the content that will actually
+  // be stored → embed (async, outside the transaction) → write memories +
+  // vec + FTS atomically. Dedup used to check the source's ORIGINAL hash
+  // while storing the ADAPTED content's hash, so adapted transfers were
+  // re-inserted on every call; and the embed pass ran after the commit with
+  // no error handling, leaving committed rows invisible to vector search
+  // when the embedder failed.
+  const insertOne = db.transaction(
+    (row: {
+      newId: string;
+      contentHash: string;
+      content: string;
+      sourceTrust: string;
+      category: string;
+      tags: string;
+      importance: number;
+      embeddingModel: string;
+      embeddingDim: number;
+      sourceId: string;
+      embedding: Float32Array;
+    }) => {
       db.prepare(`
         INSERT INTO memories (id, content_hash, content, namespace, source, source_trust,
           category, tags, importance, created_at, updated_at, schema_version,
@@ -155,31 +155,78 @@ export async function transferMemories(
         VALUES (?, ?, ?, ?, 'consolidation', ?, ?, ?, ?, ?, ?, 2, ?, ?,
           json_set('{}', '$.transferred_from', ?))
       `).run(
-        newId, contentHash, content, input.target_namespace,
-        source.source_trust, source.category, source.tags,
-        source.importance * 0.9, // slightly reduce importance for transfers
-        now, now, source.embedding_model, source.embedding_dim,
-        source.id,
+        row.newId, row.contentHash, row.content, input.target_namespace,
+        row.sourceTrust, row.category, row.tags, row.importance,
+        now, now, row.embeddingModel, row.embeddingDim, row.sourceId,
       );
 
-      transferred++;
+      vecStore.upsert(row.newId, row.embedding);
+
+      const inserted = db
+        .prepare('SELECT rowid FROM memories WHERE id = ?')
+        .get(row.newId) as { rowid: number };
+      db.prepare(
+        'INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, ?)',
+      ).run(inserted.rowid, row.content, row.tags, row.category);
+    },
+  );
+
+  for (const memId of input.memory_ids) {
+    const source = db.prepare('SELECT * FROM memories WHERE id = ?').get(memId) as Memory | undefined;
+    if (!source) continue;
+
+    let content = source.content;
+    if (adapt) {
+      // Strip project-specific paths but keep the knowledge
+      content = content.replace(/\/Users\/\w+\/[^\s,)]+/g, '<path>');
+      content = content.replace(/localhost:\d+/g, '<host>');
     }
-  });
 
-  transaction();
+    const contentHash = createHash('sha256').update(content).digest('hex');
 
-  // Embed transferred memories so they appear in vector search
-  const transferredMems = db.prepare(`
-    SELECT id, content FROM memories
-    WHERE namespace = ? AND source = 'consolidation' AND is_deleted = 0
-      AND json_extract(metadata, '$.transferred_from') IS NOT NULL
-      AND created_at = ?
-  `).all(input.target_namespace, now) as Array<{ id: string; content: string }>;
+    // Skip duplicates — keyed on the hash of the stored (possibly adapted)
+    // content, so re-running the same transfer is idempotent.
+    if (targetHashes.has(contentHash)) {
+      skippedDuplicates++;
+      continue;
+    }
 
-  for (const mem of transferredMems) {
-    const embedding = await embedder.embed(mem.content);
-    vecStore.upsert(mem.id, embedding);
+    let embedding: Float32Array;
+    try {
+      embedding = await embedder.embed(content);
+    } catch {
+      // Embedder failure: skip this memory entirely rather than committing
+      // a row that vector search can never find.
+      skippedErrors++;
+      continue;
+    }
+
+    const newId = createHash('sha256')
+      .update('transfer-' + Date.now() + '-' + Math.random())
+      .digest('hex').slice(0, 32);
+
+    insertOne({
+      newId,
+      contentHash,
+      content,
+      sourceTrust: source.source_trust,
+      category: source.category,
+      tags: source.tags,
+      importance: source.importance * 0.9, // slightly reduce importance for transfers
+      embeddingModel: embedder.name,
+      embeddingDim: embedder.dimensions,
+      sourceId: source.id,
+      embedding,
+    });
+
+    targetHashes.add(contentHash);
+    transferred++;
   }
 
-  return { transferred, skipped_duplicates: skippedDuplicates, target_namespace: input.target_namespace };
+  return {
+    transferred,
+    skipped_duplicates: skippedDuplicates,
+    skipped_errors: skippedErrors,
+    target_namespace: input.target_namespace,
+  };
 }

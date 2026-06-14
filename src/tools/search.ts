@@ -16,6 +16,7 @@ import { getUsefulnessCounts, sampleUsefulness } from './attribution.js';
 import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
+import type { RerankProvider } from '../rerank/types.js';
 
 export interface SearchInput {
   readonly query: string;
@@ -80,12 +81,53 @@ export interface SearchDeps {
   readonly logger: Logger;
   readonly metrics: Metrics;
   readonly config: NeuromcpConfig;
+  /**
+   * Optional relevance reranker. When present, search fetches a wider
+   * candidate pool (config.rerankPool), scores each candidate against the
+   * query, and orders by that score before MMR. Absent/null → plain RRF
+   * order (default). Constructed once at startup from config.reranker.
+   */
+  readonly reranker?: RerankProvider | null;
 }
 
 const RRF_K = 60;
 
 function sanitizeFtsQuery(query: string): string {
   return '"' + query.replace(/"/g, '""') + '"';
+}
+
+/**
+ * FTS5 candidate lookup with namespace pushdown. Without the pushdown the
+ * limit*3 candidate budget is consumed by other namespaces' rows (which the
+ * post-filter then discards), starving the FTS leg in multi-tenant DBs —
+ * the keyword-side twin of the vec-side recall collapse fixed in
+ * sqlite-vec.ts. `namespace === undefined` (or '*' resolved by the caller)
+ * searches all namespaces.
+ */
+export function ftsCandidates(
+  db: Database.Database,
+  ftsQuery: string,
+  k: number,
+  namespace?: string,
+): Array<{ id: string }> {
+  if (namespace === undefined) {
+    return db
+      .prepare(
+        `SELECT m.id FROM memories_fts f
+         JOIN memories m ON m.rowid = f.rowid
+         WHERE memories_fts MATCH ? AND m.is_deleted = 0
+         ORDER BY rank LIMIT ?`,
+      )
+      .all(ftsQuery, k) as Array<{ id: string }>;
+  }
+  return db
+    .prepare(
+      `SELECT m.id FROM memories_fts f
+       JOIN memories m ON m.rowid = f.rowid
+       WHERE memories_fts MATCH ? AND m.is_deleted = 0 AND m.namespace = ?
+       ORDER BY rank LIMIT ?`,
+    )
+    .all(ftsQuery, namespace, k) as Array<{ id: string }>;
 }
 
 export async function searchMemory(
@@ -102,32 +144,51 @@ export async function searchMemory(
   const graphBoost = input.graph_boost !== false;
   const explain = input.explain !== false; // default: true
 
-  // Step 1: Generate query embedding
-  const embedding = await embedder.embed(input.query);
+  // '*' means "all namespaces": the vec store and FTS leg express that as
+  // "no namespace filter" (undefined). Passing the literal '*' through would
+  // hit `namespace = '*'` equality filters and silently return zero rows.
+  const scopedNamespace = namespace === '*' ? undefined : namespace;
+
+  // Candidate budget per leg. When a reranker is active it needs at least
+  // rerankPool candidates to choose from — fetch enough up front, otherwise
+  // (e.g. limit=5 → limit*3=15 < pool=30) the reranker can never see the
+  // wider pool the Step-7 truncation promises.
+  const reranker = deps.reranker ?? null;
+  const candidateK = reranker !== null ? Math.max(limit * 3, config.rerankPool) : limit * 3;
+
+  // Step 1: Generate query embedding. When the embedder is down (Ollama not
+  // running, network timeout) a hybrid search degrades LOUDLY to FTS-only
+  // instead of failing the whole call — the user still gets keyword recall,
+  // and the warn + metric make the degradation visible. Vector-only search
+  // (hybrid=false) cannot degrade and keeps failing loudly.
+  let embedding: Float32Array | null = null;
+  try {
+    embedding = await embedder.embed(input.query);
+  } catch (err: unknown) {
+    if (!hybrid) throw err;
+    logger.warn('search', 'Embedder unavailable — DEGRADED to FTS-only results', {
+      error: err instanceof Error ? err.message : String(err),
+      query: input.query,
+    });
+    metrics.increment('search.degraded_fts_only');
+  }
 
   // Step 2: Vector search — push namespace into the vec query so we don't
   // waste the top-k budget on other tenants' data (see sqlite-vec.ts for
   // the recall-collapse story).
-  const vecResults = vecStore.search(embedding, limit * 3, namespace);
+  const vecResults = embedding !== null ? vecStore.search(embedding, candidateK, scopedNamespace) : [];
 
   const vecRanks = new Map<string, number>();
   vecResults.forEach((r, i) => {
     vecRanks.set(r.id, i + 1);
   });
 
-  // Step 3: FTS search (best-effort)
+  // Step 3: FTS search (best-effort), namespace pushed down like the vec leg
   const ftsRanks = new Map<string, number>();
   if (hybrid) {
     try {
       const ftsQuery = sanitizeFtsQuery(input.query);
-      const ftsRows = db
-        .prepare(
-          `SELECT m.id FROM memories_fts f
-           JOIN memories m ON m.rowid = f.rowid
-           WHERE memories_fts MATCH ? AND m.is_deleted = 0
-           ORDER BY rank LIMIT ?`,
-        )
-        .all(ftsQuery, limit * 3) as Array<{ id: string }>;
+      const ftsRows = ftsCandidates(db, ftsQuery, candidateK, scopedNamespace);
 
       ftsRows.forEach((row, i) => {
         ftsRanks.set(row.id, i + 1);
@@ -243,12 +304,17 @@ export async function searchMemory(
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Step 7: Fetch full rows, apply post-filters
+  // Step 7: Fetch full rows, apply post-filters. When a reranker is active
+  // we fetch a WIDER pool (rerankPool) so the reranker can promote a
+  // candidate that RRF ranked outside the top `limit` — truncating to
+  // `limit` here first would make the reranker a no-op (it could only
+  // reorder within the top-`limit`, never pull #11 into the top-10).
+  const pool = reranker !== null ? Math.max(limit, config.rerankPool) : limit;
   const nsFilter = namespaceFilter(input.namespace, config.defaultNamespace);
   const results: MemoryWithScore[] = [];
 
   for (const candidate of scored) {
-    if (results.length >= limit) break;
+    if (results.length >= pool) break;
 
     const memory = db
       .prepare('SELECT * FROM memories WHERE id = ?')
@@ -279,8 +345,10 @@ export async function searchMemory(
       if (!hasAll) continue;
     }
 
-    // Importance filter
-    if (input.min_importance !== undefined && memory.importance < input.min_importance) {
+    // Importance filter — on the computed value (v14 split), falling back
+    // to the user value for pre-migration rows.
+    const memEffective = memory.effective_importance ?? memory.importance;
+    if (input.min_importance !== undefined && memEffective < input.min_importance) {
       continue;
     }
 
@@ -321,8 +389,42 @@ export async function searchMemory(
     results.push({ ...memory, similarity_score: finalScore });
   }
 
-  // Step 9: MMR re-ranking for diversity
-  const mmrResults = mmrRerank(results, config.mmrLambda, limit);
+  // Step 8: Re-sort by final score. The adaptive multiplier in Step 7 can
+  // reorder candidates relative to the RRF order, and MMR assumes its input
+  // is sorted by relevance.
+  results.sort((a, b) => b.similarity_score - a.similarity_score);
+
+  // Step 8.5: Cross-encoder rerank (v0.26). Score each candidate against the
+  // query, store a normalized rerank_score (sigmoid of the raw logit, so
+  // MMR's relevance ratio stays positive) WITHOUT touching similarity_score,
+  // then order by it. Best-effort: any reranker failure falls back to the
+  // RRF order, consistent with every other boost stage.
+  let ranked: MemoryWithScore[] = results;
+  let mmrScoreOf: (m: MemoryWithScore) => number = (m) => m.similarity_score;
+  if (reranker !== null && results.length > 1) {
+    try {
+      const rerankStart = Date.now();
+      const rawScores = await reranker.rerank(input.query, results.map((r) => r.content));
+      ranked = results
+        .map((r, i) => {
+          const logit = rawScores[i] ?? 0;
+          const rerankScore = 1 / (1 + Math.exp(-logit)); // sigmoid → (0,1)
+          return { ...r, rerank_score: rerankScore };
+        })
+        .sort((a, b) => (b.rerank_score ?? 0) - (a.rerank_score ?? 0));
+      mmrScoreOf = (m) => m.rerank_score ?? m.similarity_score;
+      metrics.increment('search.reranked');
+      metrics.record('search.rerank_ms', Date.now() - rerankStart);
+    } catch (err: unknown) {
+      logger.warn('search', 'Reranker failed, falling back to RRF order', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      ranked = results;
+    }
+  }
+
+  // Step 9: MMR re-ranking for diversity, over the (possibly reranked) pool.
+  const mmrResults = mmrRerank(ranked, config.mmrLambda, limit, mmrScoreOf);
   const finalResults = [...mmrResults];
 
   // Step 10: Record co-retrieval patterns for attention learning

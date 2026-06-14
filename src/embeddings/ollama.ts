@@ -5,14 +5,20 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   dimensions: number;
   readonly maxTokens: number;
   private readonly host: string;
+  private readonly timeoutMs: number;
   private dimensionsDetected = false;
 
-  constructor(host: string = 'http://localhost:11434', model: string = 'nomic-embed-text') {
+  constructor(
+    host: string = 'http://localhost:11434',
+    model: string = 'nomic-embed-text',
+    options: { timeoutMs?: number } = {},
+  ) {
     this.host = host.replace(/\/$/, '');
     this.name = model;
     // Default — will be overwritten on first embed or isAvailable probe
     this.dimensions = 768;
     this.maxTokens = 8192;
+    this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -40,6 +46,8 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: this.name, input: text }),
+      // A hung Ollama must not block store/search indefinitely.
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!res.ok) {
@@ -64,11 +72,13 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embedBatch(texts: string[]): Promise<Float32Array[]> {
-    // Ollama /api/embed supports batch input
+    // Ollama /api/embed supports batch input. Batches embed more tokens, so
+    // give them double the single-embed budget.
     const res = await fetch(`${this.host}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: this.name, input: texts }),
+      signal: AbortSignal.timeout(this.timeoutMs * 2),
     });
 
     if (!res.ok) {

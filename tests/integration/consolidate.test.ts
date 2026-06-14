@@ -134,11 +134,14 @@ describe('consolidate', () => {
       expect(output.result.decayed).toBeGreaterThanOrEqual(1);
     }
 
-    // Check that importance was reduced
+    // v14: decay writes effective_importance; the user importance column is
+    // never system-mutated.
     const row = ctx.db
-      .prepare('SELECT importance FROM memories WHERE content = ?')
-      .get('old memory') as { importance: number };
-    expect(row.importance).toBeLessThan(0.8);
+      .prepare('SELECT importance, effective_importance FROM memories WHERE content = ?')
+      .get('old memory') as { importance: number; effective_importance: number | null };
+    expect(row.importance).toBe(0.8);
+    expect(row.effective_importance).not.toBeNull();
+    expect(row.effective_importance!).toBeLessThan(0.8);
   });
 
   it('logs consolidation actions', () => {

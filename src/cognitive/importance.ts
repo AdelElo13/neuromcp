@@ -26,7 +26,7 @@ export interface ImportanceFactors {
 export function computeAdaptiveImportance(
   db: Database.Database,
   memoryId: string,
-  config: { accessBoost?: number; recencyBoost?: number; centralityBoost?: number } = {},
+  config: { accessBoost?: number; recencyBoost?: number; centralityBoost?: number; baseImportance?: number } = {},
 ): ImportanceFactors {
   const accessBoost = config.accessBoost ?? 0.05;
   const recencyBoost = config.recencyBoost ?? 0.1;
@@ -40,7 +40,11 @@ export function computeAdaptiveImportance(
     return { base: 0, access_boost: 0, recency_boost: 0, centrality_boost: 0, adjusted: 0 };
   }
 
-  const base = memory.importance;
+  // `baseImportance` override lets the persisting caller
+  // (updateAdaptiveImportance) compose ON TOP of the already-decayed
+  // effective_importance instead of resetting from the user column — running
+  // decay then adaptive-from-base used to silently undo the decay.
+  const base = config.baseImportance ?? memory.importance;
 
   // Access frequency boost: log(1 + count) * weight
   const accessComponent = accessBoost * Math.log(1 + memory.access_count);
@@ -84,21 +88,39 @@ export function computeAdaptiveImportance(
 export function updateAdaptiveImportance(
   db: Database.Database,
   namespace: string,
-  config: { accessBoost?: number; recencyBoost?: number; centralityBoost?: number } = {},
+  config: { accessBoost?: number; recencyBoost?: number; centralityBoost?: number; decayLambda?: number } = {},
 ): { updated: number; avg_delta: number } {
+  const decayLambda = config.decayLambda ?? 0.01;
   const memories = db.prepare(
-    'SELECT id FROM memories WHERE namespace = ? AND is_deleted = 0'
-  ).all(namespace) as Array<{ id: string }>;
+    `SELECT id, importance, last_accessed_at, created_at,
+            COALESCE(effective_importance, importance) AS eff
+       FROM memories WHERE namespace = ? AND is_deleted = 0`,
+  ).all(namespace) as Array<{
+    id: string;
+    importance: number;
+    last_accessed_at: string | null;
+    created_at: string;
+    eff: number;
+  }>;
 
-  const updateStmt = db.prepare('UPDATE memories SET importance = ? WHERE id = ?');
+  // effective_importance = clamp(userBase·decay + boosts), recomputed from the
+  // IMMUTABLE user base every run. This is the single authority for the
+  // computed column: it is idempotent (the pre-v14 version ratcheted by
+  // re-adding boosts to its own output) AND decay-respecting (a decayed,
+  // unaccessed memory stays decayed instead of being reset toward the user
+  // base by the boosts — the regression Codex caught). The user importance
+  // column is never written here.
+  const updateStmt = db.prepare('UPDATE memories SET effective_importance = ? WHERE id = ?');
   let totalDelta = 0;
   let updated = 0;
 
   const transaction = db.transaction(() => {
     for (const mem of memories) {
-      const factors = computeAdaptiveImportance(db, mem.id, config);
-      const oldImportance = db.prepare('SELECT importance FROM memories WHERE id = ?').get(mem.id) as { importance: number };
-      const delta = Math.abs(factors.adjusted - oldImportance.importance);
+      const lastAccess = mem.last_accessed_at ?? mem.created_at;
+      const daysSinceAccess = (Date.now() - new Date(lastAccess).getTime()) / (1000 * 60 * 60 * 24);
+      const decayedBase = mem.importance * Math.exp(-decayLambda * Math.max(0, daysSinceAccess));
+      const factors = computeAdaptiveImportance(db, mem.id, { ...config, baseImportance: decayedBase });
+      const delta = Math.abs(factors.adjusted - mem.eff);
 
       if (delta > 0.001) { // Only update if meaningful change
         updateStmt.run(factors.adjusted, mem.id);

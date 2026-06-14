@@ -25,6 +25,8 @@ import { openDatabase } from './storage/database.js';
 import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
 import { createEmbeddingProvider } from './embeddings/factory.js';
+import { validateEmbeddingCompatibility } from './embeddings/validate.js';
+import { createRerankProvider } from './rerank/factory.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
 import { startMcpHttpDaemon, type McpHttpDaemonDeps } from './transport/mcp-http-daemon.js';
@@ -89,10 +91,14 @@ async function main(): Promise<void> {
   runMigrations(db, config.dbPath, logger);
 
   const embedder = await createEmbeddingProvider(config, logger);
+  // Fail loudly if the provider is incompatible with stored embeddings
+  // (dimension or model mismatch silently corrupts recall otherwise).
+  validateEmbeddingCompatibility(db, embedder, logger);
   const vecStore = new SqliteVecStore(embedder.dimensions);
   vecStore.initialize(db);
+  const reranker = await createRerankProvider(config, logger);
 
-  const deps: McpHttpDaemonDeps = { db, vecStore, embedder, config, logger, metrics };
+  const deps: McpHttpDaemonDeps = { db, vecStore, embedder, config, logger, metrics, reranker };
   const stopScheduler = startScheduler(deps);
 
   // When the operator opted into a non-loopback bind via
@@ -113,7 +119,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const httpServer = await startMcpHttpDaemon(
+  const { shutdown } = await startMcpHttpDaemon(
     () => createServer(deps),
     { port, host, extraAllowedHosts },
     deps,
@@ -129,11 +135,21 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info('daemon', 'shutdown', { signal });
     stopScheduler();
-    httpServer.close(() => {
+    // Graceful: closes session transports + SSE sockets, then the server;
+    // finally checkpoint + close the WAL DB so no committed data is lost.
+    void shutdown()
+      .catch((err: unknown) => {
+        logger.warn('daemon', 'graceful shutdown error', { error: err instanceof Error ? err.message : String(err) });
+      })
+      .finally(() => {
+        try { db.close(); } catch { /* already closed */ }
+        process.exit(0);
+      });
+    // Hard exit after 5s if shutdown hangs.
+    setTimeout(() => {
+      try { db.close(); } catch { /* already closed */ }
       process.exit(0);
-    });
-    // Hard exit after 5s if close() hangs.
-    setTimeout(() => process.exit(0), 5000).unref();
+    }, 5000).unref();
   };
   process.on('SIGINT', () => cleanup('SIGINT'));
   process.on('SIGTERM', () => cleanup('SIGTERM'));

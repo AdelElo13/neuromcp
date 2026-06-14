@@ -5,6 +5,7 @@ import type { EmbeddingProvider } from './embeddings/types.js';
 import type { NeuromcpConfig } from './config.js';
 import type { Logger } from './observability/logger.js';
 import type { Metrics } from './observability/metrics.js';
+import type { RerankProvider } from './rerank/types.js';
 import { registerCoreTools } from './registration/core.js';
 import { registerGraphTools } from './registration/graph.js';
 import { registerEpisodeTools } from './registration/episodes.js';
@@ -23,6 +24,8 @@ export interface ServerDeps {
   readonly config: NeuromcpConfig;
   readonly logger: Logger;
   readonly metrics: Metrics;
+  /** Optional cross-encoder reranker (v0.26); null/absent → plain RRF order. */
+  readonly reranker?: RerankProvider | null;
 }
 
 export function createServer(deps: ServerDeps): McpServer {
@@ -51,7 +54,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerPrompts(server, deps);
 
   logger.info('server', 'MCP server created', {
-    tools: 42,
+    tools: 43,
     resources: 13,
     prompts: 3,
   });

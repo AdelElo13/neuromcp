@@ -6,6 +6,7 @@ import { storeMemory } from '../tools/store.js';
 import { ensureAmbientEpisode } from '../tools/episode.js';
 import { activeEpisodeForNamespace } from '../episode/active-state.js';
 import { searchMemory, toCompact } from '../tools/search.js';
+import { recallAnswer } from '../tools/recall-answer.js';
 import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
 import { forgetMemory } from '../tools/forget.js';
@@ -16,7 +17,7 @@ import { backfillEmbeddings } from '../tools/backfill.js';
 import { logRetrieval } from '../tools/attribution.js';
 
 export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
-  const { db, vecStore, embedder, config, logger, metrics } = deps;
+  const { db, vecStore, embedder, config, logger, metrics, reranker } = deps;
 
   server.registerTool('store_memory', {
     description: 'Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found, surprise score, and extracted entities.',
@@ -78,7 +79,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       compact: z.boolean().optional().describe('Return a reduced 7-field projection per result (id, content, similarity_score, category, tags, importance, created_at) instead of all 37 DB fields. Default FALSE in 0.19 for semver-safe upgrade; will default TRUE in 1.0. Pass `compact: true` to opt in now.'),
     },
   }, async (args) => {
-    const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });
+    const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config, reranker });
     // sprint4 Codex Q2 fix: compact defaults to FALSE in 0.19 to honour
     // semver for existing users on ^0.18 ranges. Opt-in via compact:true.
     // 1.0 will flip the default to true (documented in CHANGELOG).
@@ -99,6 +100,24 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       logger.warn('search', 'auto-log retrieval failed', { error: err instanceof Error ? err.message : String(err) });
       return textResult(projected);
     }
+  });
+
+  server.registerTool('recall_answer', {
+    description:
+      'Answer a question FROM memory: runs hybrid retrieval, then returns a synthesized, CITED extractive answer (every sentence traces to a stored memory id) PLUS an explicit gap-analysis — what memory does NOT cover and the freshness boundary (stale_since). Returns status "not_in_memory" instead of fabricating when nothing matches. Deterministic, no LLM. Prefer this over search_memory when you need a grounded answer rather than raw chunks.',
+    inputSchema: {
+      query: z.string().describe('The question to answer from memory'),
+      namespace: z.string().optional().describe('Namespace to search (default: config default)'),
+      limit: z.number().int().min(1).max(50).optional().describe('How many memories to synthesize over (default: 8)'),
+      category: z.string().optional().describe('Filter by category'),
+      after: z.string().optional().describe('Only memories created after this ISO timestamp'),
+      before: z.string().optional().describe('Only memories created before this ISO timestamp'),
+      valid_at: z.string().optional().describe('ISO 8601 timestamp — only memories valid at this time'),
+      max_sentences: z.number().int().min(1).max(15).optional().describe('Max sentences in the answer (default: 5)'),
+    },
+  }, async (args) => {
+    const result = await recallAnswer(args, { db, vecStore, embedder, logger, metrics, config, reranker });
+    return textResult(result);
   });
 
   server.registerTool('recall_memory', {
@@ -203,7 +222,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
     const [memoryResults, verbatimResults] = await Promise.all([
       searchMemory(
         { query: args.query, namespace: args.namespace, limit: perSourceLimit, after: args.after, before: args.before, episode_id: args.episode_id },
-        { db, vecStore, embedder, logger, metrics, config },
+        { db, vecStore, embedder, logger, metrics, config, reranker },
       ),
       Promise.resolve(searchVerbatim(
         { query: args.query, namespace: args.namespace, limit: perSourceLimit, after: args.after, before: args.before, episode_id: args.episode_id },

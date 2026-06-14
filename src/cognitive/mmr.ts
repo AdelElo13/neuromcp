@@ -17,13 +17,17 @@ export function mmrRerank(
   candidates: readonly MemoryWithScore[],
   lambda: number = 0.7,
   limit: number = 10,
+  scoreOf: (m: MemoryWithScore) => number = (m) => m.similarity_score,
 ): readonly MemoryWithScore[] {
   if (candidates.length <= 1) return candidates;
 
   const selected: MemoryWithScore[] = [];
   const remaining = [...candidates];
 
-  // Always select the most relevant result first
+  // Always select the most relevant result first. `scoreOf` lets the caller
+  // drive relevance off the reranker score (when a reranker ran) instead of
+  // the RRF similarity_score, while keeping similarity_score intact for
+  // explain.ts.
   selected.push(remaining.shift()!);
 
   while (selected.length < limit && remaining.length > 0) {
@@ -34,8 +38,8 @@ export function mmrRerank(
       const candidate = remaining[i]!;
 
       // Relevance component (normalized to 0-1 range)
-      const maxScore = candidates[0]!.similarity_score;
-      const relevance = maxScore > 0 ? candidate.similarity_score / maxScore : 0;
+      const maxScore = scoreOf(candidates[0]!);
+      const relevance = maxScore > 0 ? scoreOf(candidate) / maxScore : 0;
 
       // Diversity component: max similarity to any already-selected result
       let maxSimilarityToSelected = 0;

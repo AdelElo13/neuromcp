@@ -53,10 +53,12 @@ export function traverseGraph(
     // Don't expand beyond maxDepth
     if (item.depth >= maxDepth) continue;
 
-    // Get relations
+    // Get relations — honor the full relation_types array; passing only the
+    // first entry made query_graph's published array filter return wrong
+    // results for every call with 2+ types.
     const relations = getRelationsForEntity(db, item.entityId, {
       direction: 'both',
-      relation_type: options?.relation_types?.[0],
+      relation_types: options?.relation_types,
       valid_at: options?.valid_at,
     });
 

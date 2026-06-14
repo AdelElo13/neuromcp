@@ -40,6 +40,7 @@ export interface MergeResult {
   readonly proposed: readonly MergePair[];
   readonly merged: number;
   readonly relinked_memory_entities: number;
+  readonly relinked_relations: number;
 }
 
 /**
@@ -123,10 +124,11 @@ export function mergeEntitiesInNamespace(
   }
 
   if (dryRun || proposed.length === 0) {
-    return { proposed, merged: 0, relinked_memory_entities: 0 };
+    return { proposed, merged: 0, relinked_memory_entities: 0, relinked_relations: 0 };
   }
 
   let relinked = 0;
+  let relinkedRelations = 0;
   const tx = db.transaction(() => {
     const relinkStmt = db.prepare(
       `INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, role)
@@ -134,6 +136,19 @@ export function mergeEntitiesInNamespace(
     );
     const dropOldLinksStmt = db.prepare(
       `DELETE FROM memory_entities WHERE entity_id = ?`,
+    );
+    // Relations used to be left pointing at the soft-deleted loser, orphaning
+    // every edge the loser participated in (traversal filters deleted
+    // entities, so those edges silently vanished from the graph).
+    const repointSourceStmt = db.prepare(
+      `UPDATE relations SET source_entity_id = ? WHERE source_entity_id = ? AND is_deleted = 0`,
+    );
+    const repointTargetStmt = db.prepare(
+      `UPDATE relations SET target_entity_id = ? WHERE target_entity_id = ? AND is_deleted = 0`,
+    );
+    // A merge can turn an alias→canonical edge into a self-loop; drop those.
+    const dropSelfLoopStmt = db.prepare(
+      `UPDATE relations SET is_deleted = 1 WHERE source_entity_id = ? AND target_entity_id = ? AND is_deleted = 0`,
     );
     const softDeleteStmt = db.prepare(
       `UPDATE entities SET is_deleted = 1,
@@ -144,6 +159,9 @@ export function mergeEntitiesInNamespace(
       const info = relinkStmt.run(p.canonicalId, p.mergedId);
       relinked += info.changes;
       dropOldLinksStmt.run(p.mergedId);
+      relinkedRelations += repointSourceStmt.run(p.canonicalId, p.mergedId).changes;
+      relinkedRelations += repointTargetStmt.run(p.canonicalId, p.mergedId).changes;
+      dropSelfLoopStmt.run(p.canonicalId, p.canonicalId);
       softDeleteStmt.run(p.mergedId);
     }
   });
@@ -153,6 +171,7 @@ export function mergeEntitiesInNamespace(
     proposed,
     merged: proposed.length,
     relinked_memory_entities: relinked,
+    relinked_relations: relinkedRelations,
   };
 }
 

@@ -73,7 +73,7 @@ export function startScheduler(deps: SchedulerDeps): () => void {
       }
 
       // Purge old tombstones
-      const purged = purgeTombstones(db, config.tombstoneTtlDays, logger);
+      const purged = purgeTombstones(db, config.tombstoneTtlDays, logger, vecStore);
       if (purged > 0) {
         logger.info('scheduler', 'Tombstone purge complete', { purged });
       }

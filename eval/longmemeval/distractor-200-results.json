@@ -4,48 +4,73 @@
     {
       "question_id": "gpt4_2655b836",
       "question_type": "temporal-reasoning",
-      "recall5": 1,
-      "recall10": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "recall5": 0.15151515151515152,
+      "recall10": 0.2727272727272727,
+      "precision5": 1,
+      "ndcg5": 1,
       "mrr": 1,
-      "hit": true
+      "latency_ms": 41
     },
     {
       "question_id": "gpt4_2487a7cb",
       "question_type": "temporal-reasoning",
-      "recall5": 1,
-      "recall10": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "recall5": 0.22727272727272727,
+      "recall10": 0.4090909090909091,
+      "precision5": 1,
+      "ndcg5": 1,
       "mrr": 1,
-      "hit": true
+      "latency_ms": 36
     },
     {
       "question_id": "gpt4_76048e76",
       "question_type": "temporal-reasoning",
-      "recall5": 1,
-      "recall10": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "recall5": 0.17391304347826086,
+      "recall10": 0.391304347826087,
+      "precision5": 0.8,
+      "ndcg5": 0.7860137352654724,
       "mrr": 1,
-      "hit": true
+      "latency_ms": 34
     },
     {
       "question_id": "gpt4_2312f94c",
       "question_type": "temporal-reasoning",
-      "recall5": 1,
-      "recall10": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "recall5": 0.20833333333333334,
+      "recall10": 0.375,
+      "precision5": 1,
+      "ndcg5": 1,
       "mrr": 1,
-      "hit": true
+      "latency_ms": 39
     },
     {
       "question_id": "0bb5a684",
       "question_type": "temporal-reasoning",
-      "recall5": 1,
-      "recall10": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "recall5": 0.20833333333333334,
+      "recall10": 0.4166666666666667,
+      "precision5": 1,
+      "ndcg5": 1,
       "mrr": 1,
-      "hit": true
+      "latency_ms": 36
     }
   ],
   "overall": {
-    "r5": "100.0",
-    "r10": "100.0",
+    "reranker": "none",
+    "hit5": "100.0",
+    "recall5": "19.4",
+    "precision5": "96.0",
+    "ndcg5": "95.7",
     "mrr": "100.0",
-    "hr": "100.0"
+    "hit10": "100.0",
+    "latency_avg_ms": 37,
+    "latency_p95_ms": 41
   }
 }

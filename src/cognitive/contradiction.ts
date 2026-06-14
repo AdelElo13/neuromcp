@@ -2,6 +2,51 @@ import type Database from 'better-sqlite3';
 import type { VectorStore } from '../vectors/types.js';
 import type { EmbeddingProvider } from '../embeddings/types.js';
 import type { Contradiction } from '../types.js';
+import { extractTriplesFromText } from './claims.js';
+// resolveJsonModule default import; tsup/esbuild inlines the JSON into the
+// bundle so there is no runtime ESM JSON-attribute requirement.
+import predicateClasses from '../config/predicate-classes.json';
+
+// Predicates that express a single-valued fact: a new claim with the same
+// subject and a different object genuinely SUPERSEDES the old one. Anything
+// not on this list defaults to ADDITIVE (coexist) — keyword heuristics alone
+// must never auto-invalidate a memory, since a false supersede silently
+// deletes a true fact and becomes a hallucination vector downstream.
+const MUTUALLY_EXCLUSIVE_PREDICATES = new Set(
+  (predicateClasses.mutually_exclusive as readonly string[]).map((p) => p.toLowerCase()),
+);
+
+function normalizeSubject(s: string): string {
+  return s.toLowerCase().trim().replace(/^(the|a|an)\s+/, '').replace(/\s+/g, ' ');
+}
+
+/**
+ * Gate for auto-supersede: returns true only when the new and existing
+ * content share a claim with the same subject and a mutually-exclusive
+ * predicate but a DIFFERENT object — i.e. a real single-valued-fact update.
+ */
+export function predicatesAllowSupersede(newContent: string, existingContent: string): boolean {
+  const newTriples = extractTriplesFromText(newContent);
+  if (newTriples.length === 0) return false;
+  const oldTriples = extractTriplesFromText(existingContent);
+  if (oldTriples.length === 0) return false;
+
+  for (const nt of newTriples) {
+    if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(nt.predicate.toLowerCase())) continue;
+    const ns = normalizeSubject(nt.subject);
+    if (ns.length === 0) continue;
+    for (const ot of oldTriples) {
+      if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(ot.predicate.toLowerCase())) continue;
+      const os = normalizeSubject(ot.subject);
+      const subjectsAlign = ns === os || ns.includes(os) || os.includes(ns);
+      if (!subjectsAlign) continue;
+      if (nt.object.toLowerCase().trim() !== ot.object.toLowerCase().trim()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * Detect potential contradictions between new content and existing memories.
@@ -61,9 +106,18 @@ export async function detectContradictions(
 
     if (signals.score > 0.3) {
       // Resolution ladder: strong signal → supersede, medium → coexist, weak → flag
-      const resolution: 'supersede' | 'coexist' | 'flag' =
+      let resolution: 'supersede' | 'coexist' | 'flag' =
         signals.score > 0.5 ? 'supersede' :
         signals.score > 0.35 ? 'coexist' : 'flag';
+
+      // Predicate-class gate: keyword heuristics alone (negation words,
+      // numeric diffs) are NOT enough to invalidate a memory. Auto-supersede
+      // requires claim-level evidence — same subject, mutually-exclusive
+      // predicate, different object. Otherwise downgrade to coexist so both
+      // memories survive and a human/LLM can adjudicate.
+      if (resolution === 'supersede' && !predicatesAllowSupersede(content, existing.content)) {
+        resolution = 'coexist';
+      }
 
       contradictions.push({
         existing_id: existing.id,

@@ -14,7 +14,9 @@ export async function createEmbeddingProvider(
   // 1. Try Ollama first (if auto or explicitly requested) — real semantic quality
   if (requested === 'auto' || requested === 'ollama') {
     const model = config.embeddingModel === 'auto' ? 'nomic-embed-text' : config.embeddingModel;
-    const ollama = new OllamaEmbeddingProvider(config.ollamaHost, model);
+    const ollama = new OllamaEmbeddingProvider(config.ollamaHost, model, {
+      timeoutMs: config.embedTimeoutMs,
+    });
     if (await ollama.isAvailable()) {
       logger.info('embeddings', `Using Ollama provider: ${ollama.name}`, {
         host: config.ollamaHost,
@@ -31,10 +33,21 @@ export async function createEmbeddingProvider(
     logger.debug('embeddings', 'Ollama not available, trying OpenAI');
   }
 
-  // 2. Try OpenAI (if auto or explicitly requested)
+  // 2. Try OpenAI (if auto or explicitly requested). In the auto-cascade an
+  // explicitly-set NEUROMCP_EMBEDDING_MODEL is almost certainly an Ollama
+  // model name (e.g. nomic-embed-text) — passing it through would create an
+  // OpenAI provider for a model that does not exist, with guessed
+  // dimensions. Only honor the explicit model here when it looks like an
+  // OpenAI embedding model or when OpenAI was explicitly requested.
   if (requested === 'auto' || requested === 'openai') {
-    const model = config.embeddingModel === 'auto' ? 'text-embedding-3-small' : config.embeddingModel;
-    const openai = new OpenAIEmbeddingProvider(model, undefined, config.embeddingUrl ?? undefined);
+    const model =
+      config.embeddingModel === 'auto' ||
+      (requested === 'auto' && !config.embeddingModel.startsWith('text-embedding'))
+        ? 'text-embedding-3-small'
+        : config.embeddingModel;
+    const openai = new OpenAIEmbeddingProvider(model, undefined, config.embeddingUrl ?? undefined, {
+      timeoutMs: config.embedTimeoutMs,
+    });
     if (await openai.isAvailable()) {
       logger.info('embeddings', `Using OpenAI provider: ${openai.name}`, {
         dimensions: openai.dimensions,

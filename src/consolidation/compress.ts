@@ -131,11 +131,14 @@ export async function compressMemories(
         embedder.name, embedder.dimensions, now,
       );
 
-      // Tombstone originals
+      // Tombstone originals. Also drop their vectors: the KNN index has no
+      // notion of is_deleted, so compressed members would keep consuming
+      // top-k candidate slots that searchMemory then discards post-fetch.
       for (const mem of members) {
         db.prepare(`
           UPDATE memories SET is_deleted = 1, tombstoned_at = ?, superseded_by_id = ? WHERE id = ?
         `).run(now, digestId, mem.id);
+        vecStore.remove(mem.id);
       }
 
       digestsCreated++;

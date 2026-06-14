@@ -3,6 +3,112 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.26.0] — 2026-06-14
+
+Recall-quality release: two new retrieval capabilities plus a sweep of P1
+correctness fixes from a full-codebase audit. All changes test-first; full
+suite green under node@22.
+
+### Added
+
+- **`recall_answer` MCP tool — synthesis recall with citations + gap-analysis.**
+  Answers a question FROM memory instead of returning raw chunks: a
+  deterministic, LLM-free EXTRACTIVE answer where every sentence traces to a
+  stored memory id, plus an explicit gap-analysis (thin-coverage + staleness
+  notes + a freshness boundary `stale_since`). Returns `status:"not_in_memory"`
+  with a reason instead of fabricating when nothing matches. A relevance floor
+  (`relevanceFloor`, default 0.3) gates BOTH answer paths on a single contract:
+  only sentences (or, for sub-sentence-length memories, only whole memories)
+  whose own query cosine clears the floor are eligible to appear in the
+  answer — an off-topic retrieval can never leak a below-floor sentence into a
+  confident answer. (`src/cognitive/synthesize.ts`, `src/tools/recall-answer.ts`)
+- **Optional local cross-encoder reranker** (`NEUROMCP_RERANKER`, default
+  `none`). A second-stage relevance reranker over the fused RRF pool, fully
+  local via onnxruntime-node (cross-encoder/ms-marco-MiniLM-L-6-v2 + a real
+  dependency-free BERT WordPiece tokenizer); 0 cloud API. `scripts/download-reranker.mjs`
+  fetches the model. NOTE: it ships **default-off** because an honest A/B on
+  LongMemEval showed it does not help that workload (the hybrid first stage
+  already lands a gold memory at rank-1; the MS-MARCO model then reorders
+  ranks 2-5 by topical relevance and drops precision at ~18× latency). It is
+  correct and useful for web-style query→passage workloads; kept as a tested,
+  opt-in capability.
+- **Honest eval metrics** (`eval/metrics.ts`): Hit@k vs **true** Recall@k
+  (the distractor runner previously reported Hit@5 as "R@5"), plus P@5,
+  nDCG@5, and per-query latency (avg + p95).
+
+### Fixed
+
+- **FIX: the write path is LLM-free again.** `NEUROMCP_ENTITY_EXTRACTION`
+  defaults to `regex` (was `auto`, which ran a synchronous ≤15s Ollama chat
+  call on every `store_memory`).
+- **FIX: atomic writes.** `store_memory`, reflections, and `transfer_memories`
+  write the memories row + vector + FTS row in one transaction; a vec/FTS
+  failure no longer commits a memory that hybrid search can never find.
+  Reflections and transfers were previously invisible to search.
+- **FIX: search legs.** `namespace="*"` no longer kills the vector leg (it was
+  passed as a literal SQL filter → zero rows); FTS gets namespace pushdown;
+  results are re-sorted by final score before MMR.
+- **FIX: purge is transactional + FK-safe.** `purgeTombstones` deletes children
+  (entities/clusters/claims/co-retrievals/usefulness) + vector + FTS in one
+  transaction (it previously failed permanently on FK constraints once the
+  graph linked entities, and left stale external-content FTS rows that
+  recycled rowids could inherit).
+- **FIX: entity dedup canonical key** is `(LOWER(TRIM(name)), namespace)` (no
+  longer fragmented by `entity_type`); entity-merge re-points relations (not
+  just memory links); `traverse`/`query_graph` honor the full `relation_types`
+  array (only the first was applied). `bin/dedup-entity-names.mjs` migrates
+  pre-existing duplicates (dry-run by default).
+- **FIX: embedding safety.** Startup validates the active provider's dimension
+  AND model against the stored vectors and fails loudly (dimension/model
+  mismatch silently corrupted recall); embed calls carry a timeout; a downed
+  embedder degrades hybrid search loudly to FTS-only instead of failing.
+- **FIX: user importance is never system-mutated** (schema v14
+  `effective_importance`). Surprise boost, dedup-merge, adaptive updates, and
+  decay all move to the computed column; the user `importance` value is stored
+  verbatim. `updateAdaptiveImportance` is now idempotent (was a ratchet).
+- **FIX: contradiction auto-supersede requires a predicate-class match**
+  (`src/config/predicate-classes.json`): same subject + mutually-exclusive
+  predicate + different object. Keyword heuristics alone downgrade to
+  `coexist`, closing a false-supersede hallucination vector.
+- **FIX: transport.** A port-bind failure (EADDRINUSE) rejects the start
+  Promise instead of crashing the process via an unhandled `error` event; the
+  legacy dual-mode REST surface gets the same DNS-rebinding Host-header guard
+  the daemon has (memory exfiltration via `/api/search`); the daemon shuts
+  down gracefully (closes session transports + SSE sockets, then closes the
+  WAL DB).
+- **FIX: migrations fail loud.** `tryAlterAddColumn` swallows only
+  duplicate-column errors (SQLITE_BUSY / I/O / missing-table now abort BEFORE
+  the schema version is stamped); pre-migration backup uses `VACUUM INTO` (a
+  consistent WAL snapshot) instead of `copyFileSync`; `co_retrievals` is in the
+  canonical schema (it only existed in the v8 migration block, so
+  applySchema-initialized DBs silently swallowed every co-retrieval write).
+- **FIX: consolidation rejection storm + infinite retry** (`scripts/consolidate-sessions.py`):
+  evidence-grounding clauses restore generator↔auditor symmetry (the wiki page
+  is de-dup context only), the auditor ignores the date/section-header label,
+  content-free tool-call checkpoints are skipped, and exhausted/skipped batches
+  advance the ledger (terminal — parked in `review-queue/exhausted/`) instead
+  of re-burning tokens every 4h. Auto-capture hook reads `NEUROMCP_DAEMON_PORT`.
+
+### Internal
+
+- BREAKING(schema): migration **v13 → v14** adds `memories.effective_importance`
+  (backfilled from `importance`).
+- Audit: a full read-only codebase audit (10 subsystems, adversarial
+  verification of every P0/P1) grounded this release; remaining P2/P3 finds are
+  logged in `FOUND-DURING-FIX.md`.
+- Codex-review hardening (6 adversarial rounds, ending in AGREE 9/10): each
+  round's finding fixed test-first with a regression proven RED on the prior
+  code. Findings closed: adaptive-importance decay was undone by the refresh
+  (now recomputed from the immutable user base, idempotent); consolidation
+  merge wrote the user `importance` column (now writes `effective_importance`);
+  `recall_answer` could fabricate from off-topic memories via the no-sentence
+  fallback AND via a gate/selection score mismatch (both closed — gate and
+  answer selection now share one per-sentence / per-memory floor contract);
+  `purgeTombstones` left stale `retrieval_event_memories` + `semantic_card_evidence`
+  rows; daemon shutdown truncated in-flight requests (now drains through a grace
+  window before closing transports); rerank candidate pool couldn't fill; REST
+  host-guard ignored `extraAllowedHosts`.
+
 ## [0.25.1] — 2026-06-11
 
 ### Fixed

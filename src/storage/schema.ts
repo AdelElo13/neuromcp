@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS memories (
@@ -20,6 +20,11 @@ const CREATE_TABLES = `
     category TEXT NOT NULL DEFAULT 'general',
     tags TEXT NOT NULL DEFAULT '[]',
     importance REAL NOT NULL DEFAULT 0.5,
+    -- v14: computed importance (surprise boost, dedup merge, adaptive
+    -- updates, decay). The importance column above is the USER-supplied
+    -- value and is never mutated by the system; readers use
+    -- COALESCE(effective_importance, importance).
+    effective_importance REAL,
     access_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -263,6 +268,20 @@ const CREATE_INDEXES = `
   );
   CREATE INDEX IF NOT EXISTS idx_memory_usefulness_namespace ON memory_usefulness(namespace);
   CREATE INDEX IF NOT EXISTS idx_memory_usefulness_score ON memory_usefulness(usefulness_score);
+
+  -- Attention-based co-retrieval pairs (v8). Lived only in the v8 migration
+  -- block until v0.26, so applySchema-initialized databases lacked it and
+  -- every co-retrieval write was silently swallowed by search's best-effort
+  -- catch.
+  CREATE TABLE IF NOT EXISTS co_retrievals (
+    memory_a TEXT NOT NULL,
+    memory_b TEXT NOT NULL,
+    co_count INTEGER NOT NULL DEFAULT 1,
+    last_co_retrieved_at TEXT NOT NULL,
+    PRIMARY KEY (memory_a, memory_b)
+  );
+  CREATE INDEX IF NOT EXISTS idx_co_retrievals_a ON co_retrievals(memory_a);
+  CREATE INDEX IF NOT EXISTS idx_co_retrievals_b ON co_retrievals(memory_b);
 
   -- v11: normalised retrieval-memory join + FK cascade for usefulness.
   CREATE TABLE IF NOT EXISTS retrieval_event_memories (

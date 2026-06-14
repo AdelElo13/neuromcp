@@ -87,6 +87,7 @@ const MCP_ACCEPT = 'application/json, text/event-stream';
 describe('MCP HTTP daemon E2E (Streamable HTTP transport)', () => {
   let ctx: TestContext;
   let server: Server;
+  let shutdown: () => Promise<void>;
   let baseUrl: string;
   let sessionId: string | undefined;
 
@@ -102,20 +103,20 @@ describe('MCP HTTP daemon E2E (Streamable HTTP transport)', () => {
       metrics: ctx.metrics,
     };
 
-    server = await startMcpHttpDaemon(
+    ({ server, shutdown } = await startMcpHttpDaemon(
       () => createMcpServer(deps),
       { port: 0, host: '127.0.0.1' },
       deps,
       ctx.logger,
-    );
+    ));
 
     const addr = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${addr.port}`;
   });
 
   afterAll(async () => {
-    if (server) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (shutdown) {
+      await shutdown();
     }
     teardownTestDb(ctx);
   });

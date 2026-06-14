@@ -73,6 +73,10 @@ export interface Memory {
   readonly category: string;
   readonly tags: string;
   readonly importance: number;
+  /** v14: computed importance (surprise/dedup/adaptive/decay writers).
+   *  `importance` is the user-supplied value and is never system-mutated;
+   *  read COALESCE(effective_importance, importance). */
+  readonly effective_importance: number | null;
   readonly access_count: number;
   readonly created_at: string;
   readonly updated_at: string;
@@ -96,6 +100,12 @@ export interface Memory {
 
 export interface MemoryWithScore extends Memory {
   readonly similarity_score: number;
+  /**
+   * v0.26: cross-encoder relevance score when a reranker ran. Kept SEPARATE
+   * from similarity_score (which stays on the RRF scale that explain.ts is
+   * calibrated to); the final ordering is by rerank_score when present.
+   */
+  readonly rerank_score?: number;
 }
 
 export interface StoreResult {

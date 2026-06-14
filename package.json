@@ -1,6 +1,6 @@
 {
   "name": "neuromcp",
-  "version": "0.25.1",
+  "version": "0.26.0",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
@@ -16,6 +16,7 @@
     "scripts/com.neuromcp.daemon.plist.template",
     "scripts/com.neuromcp.zombie-cleanup.plist.template",
     "scripts/download-model.mjs",
+    "scripts/download-reranker.mjs",
     "scripts/download-model.ts",
     "scripts/index-wiki.mjs",
     "scripts/launcher.sh",

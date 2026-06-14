@@ -42,9 +42,18 @@ export interface NeuromcpConfig {
   // the prior is a tiebreaker rather than a dominator.
   readonly usefulnessExplorationThreshold: number;
   readonly usefulnessFactorRange: number;
+  // Embedding HTTP timeout (ms) — a hung Ollama/OpenAI must not block
+  // store/search (and startup) indefinitely.
+  readonly embedTimeoutMs: number;
   // Entity extraction
   readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
   readonly ollamaChatModel: string;
+  // Relevance reranker (v0.26). 'none' (default) keeps plain RRF order.
+  // 'onnx' loads the local cross-encoder (models/<reranker>); 'auto' uses it
+  // when present and falls back to 'none' silently. rerankPool is how many
+  // RRF candidates are fetched + scored before truncating to `limit`.
+  readonly reranker: 'none' | 'auto' | 'onnx';
+  readonly rerankPool: number;
   // Wiki
   readonly wikiDir: string;
 }
@@ -101,8 +110,14 @@ export function loadConfig(): NeuromcpConfig {
     blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),
     usefulnessExplorationThreshold: envNum('NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD', 3),
     usefulnessFactorRange: envNum('NEUROMCP_USEFULNESS_FACTOR_RANGE', 0.5),
-    entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'auto') as NeuromcpConfig['entityExtractionMode'],
+    embedTimeoutMs: envNum('NEUROMCP_EMBED_TIMEOUT_MS', 30_000),
+    // Default 'regex': the write path must stay LLM-free (store_memory used
+    // to block up to 15s on an Ollama /api/chat call per store). 'auto' and
+    // 'llm' remain available as explicit opt-ins.
+    entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'regex') as NeuromcpConfig['entityExtractionMode'],
     ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
+    reranker: env('NEUROMCP_RERANKER', 'none') as NeuromcpConfig['reranker'],
+    rerankPool: envNum('NEUROMCP_RERANK_POOL', 30),
     wikiDir: env('NEUROMCP_WIKI_DIR', resolve(homedir(), '.neuromcp', 'wiki')),
   };
 }

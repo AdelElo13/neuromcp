@@ -9,7 +9,7 @@ function generateId(): string {
     .slice(0, 32);
 }
 
-/** Find or create an entity by name + type + namespace (case-insensitive name match). */
+/** Find or create an entity by name + namespace (case-insensitive name match). */
 export function upsertEntity(
   db: Database.Database,
   name: string,
@@ -19,12 +19,16 @@ export function upsertEntity(
 ): Entity {
   const normalizedName = name.trim().toLowerCase();
 
-  // Check for existing entity (case-insensitive)
+  // Canonical dedup key is (LOWER(TRIM(name)), namespace) — deliberately
+  // WITHOUT entity_type. Including the type let the same real-world entity
+  // accumulate one row per extractor-assigned type ("NeuroMCP" as project +
+  // concept + tool), fragmenting the graph and its boosts. First writer's
+  // type wins; metadata still merges on later upserts.
   const existing = db
     .prepare(
-      'SELECT * FROM entities WHERE LOWER(name) = ? AND entity_type = ? AND namespace = ? AND is_deleted = 0 LIMIT 1',
+      'SELECT * FROM entities WHERE LOWER(name) = ? AND namespace = ? AND is_deleted = 0 LIMIT 1',
     )
-    .get(normalizedName, entityType, namespace) as Entity | undefined;
+    .get(normalizedName, namespace) as Entity | undefined;
 
   if (existing !== undefined) {
     // Merge metadata if provided

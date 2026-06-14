@@ -6,16 +6,19 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   readonly maxTokens = 8191;
   private readonly apiKey: string;
   private readonly baseUrl: string;
+  private readonly timeoutMs: number;
 
   constructor(
     model: string = 'text-embedding-3-small',
     apiKey?: string,
     baseUrl: string = 'https://api.openai.com/v1',
+    options: { timeoutMs?: number } = {},
   ) {
     this.name = model;
     this.dimensions = model.includes('3-large') ? 3072 : 1536;
     this.apiKey = apiKey ?? process.env['OPENAI_API_KEY'] ?? '';
     this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -39,6 +42,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({ model: this.name, input: text }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!res.ok) {
@@ -66,6 +70,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({ model: this.name, input: texts }),
+      signal: AbortSignal.timeout(this.timeoutMs * 2),
     });
 
     if (!res.ok) {

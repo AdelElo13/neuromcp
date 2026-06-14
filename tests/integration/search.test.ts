@@ -176,8 +176,11 @@ describe('searchMemory', () => {
       searchDeps,
     );
 
+    // v14: min_importance filters on the COMPUTED value (effective_importance,
+    // falling back to the user importance for pre-migration rows).
     for (const r of results) {
-      expect(r.importance).toBeGreaterThanOrEqual(0.7);
+      const effective = r.effective_importance ?? r.importance;
+      expect(effective).toBeGreaterThanOrEqual(0.7);
     }
   });
 

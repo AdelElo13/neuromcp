@@ -390,7 +390,12 @@ function getAssistantText(entry) {
 
 // ─── Memory Writer (HTTP-first, raw SQL fallback) ──────────────────
 
-const HTTP_URL = `http://127.0.0.1:${process.env.NEUROMCP_HTTP_PORT || 3200}/api/store`;
+// Read the SAME port the daemon binds. The daemon uses NEUROMCP_DAEMON_PORT
+// (e.g. the launchd plist sets 33200); accept it AND the legacy
+// NEUROMCP_HTTP_PORT so the capture pipeline does not silently target the
+// wrong port when the daemon runs on a non-default port.
+const NEUROMCP_PORT = process.env.NEUROMCP_DAEMON_PORT || process.env.NEUROMCP_HTTP_PORT || 3200;
+const HTTP_URL = `http://127.0.0.1:${NEUROMCP_PORT}/api/store`;
 
 /**
  * Try HTTP first (goes through full store pipeline: dedup, contradiction,
