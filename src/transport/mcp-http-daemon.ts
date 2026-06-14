@@ -582,22 +582,29 @@ export async function startMcpHttpDaemon(
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(sweepInterval);
-    // 1. Close all MCP session transports (ends their SSE streams cleanly).
-    await Promise.allSettled(
-      [...sessions.values()].map((s) => s.transport.close()),
-    );
-    sessions.clear();
-    // 2. Stop accepting new connections + wait for in-flight to drain.
+    // 1. Stop accepting NEW connections. In-flight requests keep their sockets
+    //    and continue running — httpServer.close() only blocks new accepts.
     const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
-    // 3. Free idle keep-alive connections immediately; give genuine in-flight
-    //    requests a brief grace to finish before forcibly destroying what is
-    //    left (the long-lived /events SSE streams that never end on their own
-    //    and would otherwise pin close() until the hard-exit timer).
+    // 2. Free idle keep-alive connections immediately (they hold no in-flight
+    //    request). Genuine in-flight requests are untouched here.
     httpServer.closeIdleConnections();
+    // 3. Grace window: let in-flight MCP requests — e.g. a POST still awaiting
+    //    a tool result on its SSE stream — FINISH before we touch their
+    //    transports. The previous order closed transports first, which ended
+    //    the active stream and cleared pending-response state mid-flight,
+    //    truncating the request. Drain first, force second.
     await new Promise<void>((resolve) => {
       const t = setTimeout(resolve, graceMs);
       t.unref();
     });
+    // 4. Now close the MCP session transports. They own the long-lived SSE
+    //    streams that never end on their own and would otherwise pin
+    //    httpServer.close() open until the hard-exit timer.
+    await Promise.allSettled(
+      [...sessions.values()].map((s) => s.transport.close()),
+    );
+    sessions.clear();
+    // 5. Destroy whatever sockets survive (e.g. the /events SSE streams).
     for (const socket of openSockets) socket.destroy();
     openSockets.clear();
     await closed;

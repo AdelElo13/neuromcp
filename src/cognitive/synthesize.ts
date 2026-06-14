@@ -129,6 +129,25 @@ export async function synthesizeAnswer(
   }
   gaps.push(`Boundary: nothing is stored about this topic after ${staleSince.slice(0, 10)}.`);
 
+  // Relevance gate — runs BEFORE any answer path (including the short-content
+  // fallback below). Embed the query and each retrieved memory's CONTENT (not
+  // its sentences: a memory too short to yield an extractable sentence still
+  // has content to score). If the best query↔memory cosine is under the floor,
+  // the retrieval was off-topic noise — return not_in_memory rather than
+  // fabricate. This closes the hole where a sub-16-char off-topic memory
+  // (e.g. "billing") skipped the gate via the no-sentence fallback.
+  const queryEmbedding = await embedder.embed(query);
+  const contentEmbeddings = await embedder.embedBatch(memories.map((m) => m.content));
+  const bestContentCosine = contentEmbeddings.reduce(
+    (max, e) => Math.max(max, cosine(queryEmbedding, e)),
+    0,
+  );
+  if (bestContentCosine < relevanceFloor) {
+    return notInMemory(
+      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestContentCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
+    );
+  }
+
   if (sentences.length === 0) {
     // Memories matched but have no extractable sentences (very short content).
     // Fall back to the raw memory contents as the answer, still cited.
@@ -149,8 +168,8 @@ export async function synthesizeAnswer(
   }
 
   // Rank sentences by relevance to the QUERY (a question wants query-relevant
-  // sentences, not corpus-central ones), then embedding-dedup.
-  const queryEmbedding = await embedder.embed(query);
+  // sentences, not corpus-central ones), then embedding-dedup. `queryEmbedding`
+  // is already computed above for the relevance gate — reuse it.
   const sentenceEmbeddings = await embedder.embedBatch(sentences.map((s) => s.text));
   const scored = sentences.map((s, i) => {
     const rank = memoryRank.get(s.memoryId) ?? 0;
@@ -165,15 +184,6 @@ export async function synthesizeAnswer(
       score: rawCosine * memWeight,
     };
   });
-
-  // Relevance gate: if NOTHING clears the floor, the retrieval was off-topic.
-  // Say not_in_memory instead of fabricating an answer from noise.
-  const bestRaw = scored.reduce((m, s) => Math.max(m, s.rawCosine), 0);
-  if (bestRaw < relevanceFloor) {
-    return notInMemory(
-      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestRaw.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
-    );
-  }
 
   scored.sort((a, b) => b.score - a.score);
 

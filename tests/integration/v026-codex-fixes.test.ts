@@ -177,5 +177,44 @@ describe('v0.26 Codex-review fixes', () => {
       expect(result.answer).toBeNull();
       expect(result.gaps[0]!.toLowerCase()).toContain('relevant');
     });
+
+    it('gates short off-topic memories that yield no extractable sentence (no-sentence fallback hole)', async () => {
+      // Codex round-2: a memory too short to split into a sentence (<16 chars)
+      // used to skip the relevance gate via the raw-content fallback and
+      // fabricate an answer. The gate now scores memory CONTENT, so it fires
+      // even when there are zero sentences.
+      class OrthoEmbedder implements EmbeddingProvider {
+        readonly name = 'ortho';
+        readonly dimensions = DIMS;
+        readonly maxTokens = 512;
+        async embed(text: string): Promise<Float32Array> {
+          const v = new Float32Array(DIMS);
+          if (text.includes('kubernetes')) v[0] = 1;
+          else v[1] = 1;
+          return v;
+        }
+        async embedBatch(texts: string[]): Promise<Float32Array[]> {
+          return Promise.all(texts.map((t) => this.embed(t)));
+        }
+        async isAvailable(): Promise<boolean> {
+          return true;
+        }
+      }
+      const shortMemory = {
+        id: 'm-short',
+        content: 'billing', // 7 chars → splitSentences() yields nothing
+        created_at: '2026-06-01T00:00:00.000Z',
+        similarity_score: 0.01,
+      } as MemoryWithScore;
+
+      const result = await synthesizeAnswer(
+        'how do I configure the kubernetes autoscaler',
+        [shortMemory],
+        new OrthoEmbedder(),
+      );
+      expect(result.status).toBe('not_in_memory');
+      expect(result.answer).toBeNull();
+      expect(result.citations.length).toBe(0);
+    });
   });
 });
