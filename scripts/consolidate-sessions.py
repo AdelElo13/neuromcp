@@ -198,6 +198,8 @@ Output ONLY a single JSON object, no prose. Schema:
 
 Rules:
 - approved=true only if zero unsupported factual claims.
+- The `## [<date>]` or `## [<date> batch N/M]` SECTION HEADER is a label, NOT a
+  factual claim — never list the date/label as unsupported.
 - "Beslissing: X vs Y. Waarom: Z" style = one atomic claim, verify the decision + reason.
 - Paraphrases of source sentences are OK. Invented causes, versions, names, numbers are NOT.
 - If SUMMARY is essentially empty ("no technical substance" etc.), approved=true.
@@ -608,6 +610,22 @@ STRICT INSTRUCTIONS:
 - DO NOT write: "I'll ...", "Let me ...", "Based on ...", or any narration before/after the fence.
 - DO NOT attempt tool use (no Edit/Write). Only return text.
 - If there is nothing substantive: a single bullet inside the fence, e.g. "## [{label}]\\n- No technical substance this window." — nothing else.
+
+EVIDENCE RULES (a strict auditor re-checks every claim against ONLY the
+SESSIONS — claims it cannot trace are rejected and the whole batch is dropped):
+- The CURRENT WIKI PAGE above is context for de-duplication ONLY. NEVER restate
+  or rely on a claim that appears only on the wiki page — the auditor does not
+  see it and will reject it. Every factual claim MUST be traceable to a line in
+  SESSIONS.
+- DO NOT invent: causal mechanisms ("X caused Y" when sessions show X and Y
+  separately), commit dates, version numbers, file names, or fix details the
+  sessions do not explicitly state.
+- DO NOT conflate a user's question with an answer: if a session shows
+  "[USER]: how does X work?" with no follow-up explanation, do not write the
+  answer.
+- WHEN IN DOUBT, WRITE LESS. A correct sparse summary ("No technical substance
+  this window.") is accepted; a confident wrong one is rejected and wastes the
+  whole batch.
 """
     # Retry-loop: on audit rejection (count hallucinations, unsupported claims,
     # missing fence) regenerate the summary with a higher-tier model and re-audit.
@@ -683,13 +701,47 @@ STRICT INSTRUCTIONS:
             print(f"  ⟳ {project} batch {batch_idx}/{batch_total} rejected ({attempt_tag}), retrying with {RETRY_MODEL}")
             print(f"    {reason[:200]}")
 
-    # All attempts exhausted — queue to dedicated subfolder, do not advance ledger.
+    # All attempts exhausted — park in exhausted/ for human review AND mark the
+    # batch terminal (return it as processed) so the ledger advances. Without
+    # this the same doomed batch was re-generated + re-audited every 4h for
+    # days, burning tokens and never converging. The exhausted/ copy preserves
+    # it for inspection / manual reprocessing.
     if not last_summary:
         last_summary = "(no summary produced — all attempts failed before audit)"
     path = queue_for_review(project, batch_idx, last_summary, last_reason, exhausted=True)
-    print(f"  ✗ {project} batch {batch_idx}/{batch_total} EXHAUSTED after {MAX_AUDIT_ATTEMPTS + 1} attempts — queued: exhausted/{path.name}")
+    print(f"  ✗ {project} batch {batch_idx}/{batch_total} EXHAUSTED after {MAX_AUDIT_ATTEMPTS + 1} attempts — queued: exhausted/{path.name} (terminal; ledger advanced)")
     print(f"    Final rejection: {last_reason[:200]}")
-    return False, []
+    return False, list(batch)
+
+
+# A pure tool-call checkpoint line, e.g.
+#   "- 2026-06-14T00:10:54.232Z | 8110 tool calls | last: Read | cwd: /Users/a"
+_TOOLCALL_LINE = re.compile(r"^\s*-\s*\d{4}-\d{2}-\d{2}T[\dT:.Z+\-]+\s*\|\s*\d+\s*tool calls\s*\|")
+
+
+def is_content_free(path: Path) -> bool:
+    """True if a raw session has no user/assistant content — a pure tool-call
+    checkpoint or an empty Stop-hook artifact (only headers / recycled wiki
+    activity). These burn LLM tokens and poison audits with unverifiable
+    claims, so they are skipped (and the ledger advanced so they never re-run).
+
+    Conservative by design: returns True ONLY when every non-blank line is a
+    tool-call-log entry or a markdown header — never risks dropping a session
+    that contains real prose.
+    """
+    try:
+        lines = [ln for ln in path.read_text(errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return False
+    if not lines:
+        return True
+    for ln in lines:
+        if _TOOLCALL_LINE.match(ln):
+            continue
+        if ln.lstrip().startswith("#"):
+            continue
+        return False
+    return True
 
 
 def consolidate_project(
@@ -698,20 +750,31 @@ def consolidate_project(
     dry_run: bool = False,
     max_sessions: int = 15,
 ) -> tuple[bool, list[Path]]:
-    batches = [sessions[i : i + max_sessions] for i in range(0, len(sessions), max_sessions)]
+    # Empty-session guard: skip content-free sessions but mark them processed
+    # so the ledger advances and they are not re-attempted every run.
+    substantive = [s for s in sessions if not is_content_free(s)]
+    skipped = [s for s in sessions if is_content_free(s)]
+    if skipped:
+        print(f"  · {project}: skipping {len(skipped)} content-free session(s) (tool-call checkpoints)")
+
+    batches = [substantive[i : i + max_sessions] for i in range(0, len(substantive), max_sessions)]
     if dry_run:
         print(
-            f"  [DRY RUN] {project}: {len(sessions)} sessions → "
-            f"{len(batches)} batch(es) of max {max_sessions}"
+            f"  [DRY RUN] {project}: {len(substantive)} substantive sessions "
+            f"(+{len(skipped)} skipped) → {len(batches)} batch(es) of max {max_sessions}"
         )
         return True, []
     any_ok = False
-    processed: list[Path] = []
+    # Skipped sessions are terminal (advance the ledger immediately).
+    processed: list[Path] = list(skipped)
     for idx, batch in enumerate(batches, 1):
         ok, done = consolidate_batch(project, batch, idx, len(batches))
-        if ok:
-            any_ok = True
-            processed.extend(done)
+        any_ok = any_ok or ok
+        # `done` carries written sessions on success AND exhausted-terminal
+        # sessions on failure — both advance the ledger so a permanently
+        # failing batch is parked in exhausted/ instead of re-burning tokens
+        # every run.
+        processed.extend(done)
     return any_ok, processed
 
 
@@ -753,9 +816,13 @@ def main() -> None:
             dry_run=args.dry_run,
             max_sessions=args.max_sessions,
         )
+        # Advance the ledger for every TERMINAL session — written, skipped, or
+        # exhausted — not just successful ones, so permanently-failing or
+        # content-free batches do not re-run forever. ok_count still counts
+        # only projects where something was actually written to the wiki.
+        if not args.dry_run and done:
+            ledger.update(s.name for s in done)
         if success:
-            if not args.dry_run:
-                ledger.update(s.name for s in done)
             ok_count += 1
 
     if not args.dry_run:
