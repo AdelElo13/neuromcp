@@ -16,6 +16,7 @@
     "scripts/com.neuromcp.daemon.plist.template",
     "scripts/com.neuromcp.zombie-cleanup.plist.template",
     "scripts/download-model.mjs",
+    "scripts/download-reranker.mjs",
     "scripts/download-model.ts",
     "scripts/index-wiki.mjs",
     "scripts/launcher.sh",

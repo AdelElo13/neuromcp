@@ -16,7 +16,7 @@ import { backfillEmbeddings } from '../tools/backfill.js';
 import { logRetrieval } from '../tools/attribution.js';
 
 export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
-  const { db, vecStore, embedder, config, logger, metrics } = deps;
+  const { db, vecStore, embedder, config, logger, metrics, reranker } = deps;
 
   server.registerTool('store_memory', {
     description: 'Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found, surprise score, and extracted entities.',
@@ -78,7 +78,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       compact: z.boolean().optional().describe('Return a reduced 7-field projection per result (id, content, similarity_score, category, tags, importance, created_at) instead of all 37 DB fields. Default FALSE in 0.19 for semver-safe upgrade; will default TRUE in 1.0. Pass `compact: true` to opt in now.'),
     },
   }, async (args) => {
-    const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config });
+    const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config, reranker });
     // sprint4 Codex Q2 fix: compact defaults to FALSE in 0.19 to honour
     // semver for existing users on ^0.18 ranges. Opt-in via compact:true.
     // 1.0 will flip the default to true (documented in CHANGELOG).
@@ -203,7 +203,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
     const [memoryResults, verbatimResults] = await Promise.all([
       searchMemory(
         { query: args.query, namespace: args.namespace, limit: perSourceLimit, after: args.after, before: args.before, episode_id: args.episode_id },
-        { db, vecStore, embedder, logger, metrics, config },
+        { db, vecStore, embedder, logger, metrics, config, reranker },
       ),
       Promise.resolve(searchVerbatim(
         { query: args.query, namespace: args.namespace, limit: perSourceLimit, after: args.after, before: args.before, episode_id: args.episode_id },

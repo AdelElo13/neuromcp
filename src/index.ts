@@ -8,6 +8,7 @@ import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
 import { createEmbeddingProvider } from './embeddings/factory.js';
 import { validateEmbeddingCompatibility } from './embeddings/validate.js';
+import { createRerankProvider } from './rerank/factory.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
 import { startHttpTransport } from './transport/http.js';
@@ -40,8 +41,11 @@ async function main(): Promise<void> {
   const vecStore = new SqliteVecStore(embedder.dimensions);
   vecStore.initialize(db);
 
+  // Optional cross-encoder reranker (v0.26). null on default 'none'.
+  const reranker = await createRerankProvider(config, logger);
+
   // Create MCP server with all tools, resources, and prompts
-  const server = createServer({ db, vecStore, embedder, config, logger, metrics });
+  const server = createServer({ db, vecStore, embedder, config, logger, metrics, reranker });
 
   // Start auto-consolidation scheduler
   const stopScheduler = startScheduler({ db, vecStore, embedder, config, logger, metrics });

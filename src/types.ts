@@ -100,6 +100,12 @@ export interface Memory {
 
 export interface MemoryWithScore extends Memory {
   readonly similarity_score: number;
+  /**
+   * v0.26: cross-encoder relevance score when a reranker ran. Kept SEPARATE
+   * from similarity_score (which stays on the RRF scale that explain.ts is
+   * calibrated to); the final ordering is by rerank_score when present.
+   */
+  readonly rerank_score?: number;
 }
 
 export interface StoreResult {

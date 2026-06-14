@@ -53,6 +53,7 @@ export interface McpHttpDaemonDeps {
   readonly config: NeuromcpConfig;
   readonly logger: Logger;
   readonly metrics: Metrics;
+  readonly reranker?: import('../rerank/types.js').RerankProvider | null;
 }
 
 interface SessionState {

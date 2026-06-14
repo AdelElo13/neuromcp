@@ -13,3 +13,5 @@ models/*.onnx
 coverage/
 release-artifacts/
 .mcpb-staging/
+models/
+eval/longmemeval/distractor-*-results.json

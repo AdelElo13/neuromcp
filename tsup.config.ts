@@ -22,6 +22,8 @@ export default defineConfig({
     'src/storage/migrations.ts',
     'src/storage/schema.ts',
     'src/embeddings/factory.ts',
+    'src/rerank/factory.ts',
+    'src/rerank/types.ts',
     'src/embeddings/types.ts',
     'src/governance/namespace.ts',
     'src/vectors/sqlite-vec.ts',

@@ -25,6 +25,8 @@ const __dirname = dirname(__filename);
 import { storeMemory } from '../src/tools/store.js';
 import { searchMemory } from '../src/tools/search.js';
 import { createEmbeddingProvider } from '../src/embeddings/factory.js';
+import { createRerankProvider } from '../src/rerank/factory.js';
+import type { RerankProvider } from '../src/rerank/types.js';
 import { loadConfig } from '../src/config.js';
 import { createLogger } from '../src/observability/logger.js';
 import { computeRetrievalMetrics } from './metrics.js';
@@ -73,6 +75,7 @@ async function runQuestion(
   q: LongMemQuestion,
   distractorPool: Array<{ text: string; sessionId: string }>,
   embedder: TestContext['embedder'],
+  reranker: RerankProvider | null,
 ): Promise<QuestionResult> {
 
   // Pre-load distractors FIRST (they're just memories that shouldn't match)
@@ -119,7 +122,7 @@ async function runQuestion(
   const t0 = Date.now();
   const results = await searchMemory(
     { query: q.question, limit: 10, hybrid: true },
-    { db: ctx.db, vecStore: ctx.vecStore, embedder, logger: ctx.logger, metrics: ctx.metrics, config: ctx.config },
+    { db: ctx.db, vecStore: ctx.vecStore, embedder, logger: ctx.logger, metrics: ctx.metrics, config: ctx.config, reranker },
   );
   const latencyMs = Date.now() - t0;
 
@@ -192,7 +195,9 @@ async function main() {
   const config = loadConfig();
   const logger = createLogger(config);
   const embedder = await createEmbeddingProvider(config, logger);
+  const reranker = await createRerankProvider(config, logger);
   console.log(`Embedder: ${embedder.name} (dim=${embedder.dimensions})`);
+  console.log(`Reranker: ${reranker ? reranker.name : 'none'}`);
   console.log('');
 
   const distractorPool = buildDistractorPool(questions, opts.distractors);
@@ -203,7 +208,7 @@ async function main() {
     process.stdout.write(`  Progress: ${i + 1}/${filtered.length}\r`);
     const ctx = await setupTestDb({ dimensions: embedder.dimensions });
     try {
-      const result = await runQuestion(ctx, filtered[i]!, distractorPool, embedder);
+      const result = await runQuestion(ctx, filtered[i]!, distractorPool, embedder, reranker);
       results.push(result);
     } finally {
       await teardownTestDb(ctx);
@@ -227,8 +232,8 @@ async function main() {
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] ?? 0;
   };
 
-  const reranker = process.env.NEUROMCP_RERANKER ?? 'none';
-  console.log(`## Results with ${opts.distractors} distractors (reranker=${reranker})\n`);
+  const rerankerLabel = reranker ? reranker.name : 'none';
+  console.log(`## Results with ${opts.distractors} distractors (reranker=${rerankerLabel})\n`);
   console.log('| Type | N | Hit@5 | R@5(true) | P@5 | nDCG@5 | MRR | Hit@10 | lat ms (avg/p95) |');
   console.log('|------|---|-------|-----------|-----|--------|-----|--------|------------------|');
   const row = (label: string, rs: QuestionResult[]): string =>
@@ -239,7 +244,7 @@ async function main() {
   console.log(row('**OVERALL**', results));
 
   const overall = {
-    reranker,
+    reranker: rerankerLabel,
     hit5: pct(results, (r) => r.hit5),
     recall5: pct(results, (r) => r.recall5),
     precision5: pct(results, (r) => r.precision5),
@@ -249,7 +254,7 @@ async function main() {
     latency_avg_ms: Math.round(avg(results, (r) => r.latency_ms)),
     latency_p95_ms: Math.round(p95(results)),
   };
-  const suffix = reranker === 'none' ? '' : `-rerank-${reranker}`;
+  const suffix = reranker === null ? '' : `-rerank-${rerankerLabel}`;
   const outPath = resolve(__dirname, 'longmemeval', `distractor-${opts.distractors}${suffix}-results.json`);
   writeFileSync(outPath, JSON.stringify({ distractors: opts.distractors, results, overall }, null, 2));
   console.log(`\nResults saved to: ${outPath}`);

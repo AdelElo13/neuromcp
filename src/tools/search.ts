@@ -16,6 +16,7 @@ import { getUsefulnessCounts, sampleUsefulness } from './attribution.js';
 import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
+import type { RerankProvider } from '../rerank/types.js';
 
 export interface SearchInput {
   readonly query: string;
@@ -80,6 +81,13 @@ export interface SearchDeps {
   readonly logger: Logger;
   readonly metrics: Metrics;
   readonly config: NeuromcpConfig;
+  /**
+   * Optional relevance reranker. When present, search fetches a wider
+   * candidate pool (config.rerankPool), scores each candidate against the
+   * query, and orders by that score before MMR. Absent/null → plain RRF
+   * order (default). Constructed once at startup from config.reranker.
+   */
+  readonly reranker?: RerankProvider | null;
 }
 
 const RRF_K = 60;
@@ -289,12 +297,18 @@ export async function searchMemory(
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Step 7: Fetch full rows, apply post-filters
+  // Step 7: Fetch full rows, apply post-filters. When a reranker is active
+  // we fetch a WIDER pool (rerankPool) so the reranker can promote a
+  // candidate that RRF ranked outside the top `limit` — truncating to
+  // `limit` here first would make the reranker a no-op (it could only
+  // reorder within the top-`limit`, never pull #11 into the top-10).
+  const reranker = deps.reranker ?? null;
+  const pool = reranker !== null ? Math.max(limit, config.rerankPool) : limit;
   const nsFilter = namespaceFilter(input.namespace, config.defaultNamespace);
   const results: MemoryWithScore[] = [];
 
   for (const candidate of scored) {
-    if (results.length >= limit) break;
+    if (results.length >= pool) break;
 
     const memory = db
       .prepare('SELECT * FROM memories WHERE id = ?')
@@ -371,12 +385,40 @@ export async function searchMemory(
 
   // Step 8: Re-sort by final score. The adaptive multiplier in Step 7 can
   // reorder candidates relative to the RRF order, and MMR assumes its input
-  // is sorted by relevance (it seeds with candidates[0] and normalizes
-  // against candidates[0].similarity_score).
+  // is sorted by relevance.
   results.sort((a, b) => b.similarity_score - a.similarity_score);
 
-  // Step 9: MMR re-ranking for diversity
-  const mmrResults = mmrRerank(results, config.mmrLambda, limit);
+  // Step 8.5: Cross-encoder rerank (v0.26). Score each candidate against the
+  // query, store a normalized rerank_score (sigmoid of the raw logit, so
+  // MMR's relevance ratio stays positive) WITHOUT touching similarity_score,
+  // then order by it. Best-effort: any reranker failure falls back to the
+  // RRF order, consistent with every other boost stage.
+  let ranked: MemoryWithScore[] = results;
+  let mmrScoreOf: (m: MemoryWithScore) => number = (m) => m.similarity_score;
+  if (reranker !== null && results.length > 1) {
+    try {
+      const rerankStart = Date.now();
+      const rawScores = await reranker.rerank(input.query, results.map((r) => r.content));
+      ranked = results
+        .map((r, i) => {
+          const logit = rawScores[i] ?? 0;
+          const rerankScore = 1 / (1 + Math.exp(-logit)); // sigmoid → (0,1)
+          return { ...r, rerank_score: rerankScore };
+        })
+        .sort((a, b) => (b.rerank_score ?? 0) - (a.rerank_score ?? 0));
+      mmrScoreOf = (m) => m.rerank_score ?? m.similarity_score;
+      metrics.increment('search.reranked');
+      metrics.record('search.rerank_ms', Date.now() - rerankStart);
+    } catch (err: unknown) {
+      logger.warn('search', 'Reranker failed, falling back to RRF order', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      ranked = results;
+    }
+  }
+
+  // Step 9: MMR re-ranking for diversity, over the (possibly reranked) pool.
+  const mmrResults = mmrRerank(ranked, config.mmrLambda, limit, mmrScoreOf);
   const finalResults = [...mmrResults];
 
   // Step 10: Record co-retrieval patterns for attention learning

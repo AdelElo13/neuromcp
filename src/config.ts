@@ -48,6 +48,12 @@ export interface NeuromcpConfig {
   // Entity extraction
   readonly entityExtractionMode: 'auto' | 'llm' | 'regex';
   readonly ollamaChatModel: string;
+  // Relevance reranker (v0.26). 'none' (default) keeps plain RRF order.
+  // 'onnx' loads the local cross-encoder (models/<reranker>); 'auto' uses it
+  // when present and falls back to 'none' silently. rerankPool is how many
+  // RRF candidates are fetched + scored before truncating to `limit`.
+  readonly reranker: 'none' | 'auto' | 'onnx';
+  readonly rerankPool: number;
   // Wiki
   readonly wikiDir: string;
 }
@@ -110,6 +116,8 @@ export function loadConfig(): NeuromcpConfig {
     // 'llm' remain available as explicit opt-ins.
     entityExtractionMode: env('NEUROMCP_ENTITY_EXTRACTION', 'regex') as NeuromcpConfig['entityExtractionMode'],
     ollamaChatModel: env('NEUROMCP_OLLAMA_CHAT_MODEL', 'llama3.2:3b'),
+    reranker: env('NEUROMCP_RERANKER', 'none') as NeuromcpConfig['reranker'],
+    rerankPool: envNum('NEUROMCP_RERANK_POOL', 30),
     wikiDir: env('NEUROMCP_WIKI_DIR', resolve(homedir(), '.neuromcp', 'wiki')),
   };
 }

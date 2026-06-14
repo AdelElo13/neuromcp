@@ -26,6 +26,7 @@ import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
 import { createEmbeddingProvider } from './embeddings/factory.js';
 import { validateEmbeddingCompatibility } from './embeddings/validate.js';
+import { createRerankProvider } from './rerank/factory.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
 import { startMcpHttpDaemon, type McpHttpDaemonDeps } from './transport/mcp-http-daemon.js';
@@ -95,8 +96,9 @@ async function main(): Promise<void> {
   validateEmbeddingCompatibility(db, embedder, logger);
   const vecStore = new SqliteVecStore(embedder.dimensions);
   vecStore.initialize(db);
+  const reranker = await createRerankProvider(config, logger);
 
-  const deps: McpHttpDaemonDeps = { db, vecStore, embedder, config, logger, metrics };
+  const deps: McpHttpDaemonDeps = { db, vecStore, embedder, config, logger, metrics, reranker };
   const stopScheduler = startScheduler(deps);
 
   // When the operator opted into a non-loopback bind via
