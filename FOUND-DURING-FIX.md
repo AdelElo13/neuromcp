@@ -437,3 +437,20 @@ modules.
 **Severity:** P3 — environment-only, zero production impact, but it masks
 real regressions behind a wall of fake failures. Worth a one-line note in
 the README/CONTRIBUTING test section so it doesn't burn an hour next time.
+
+## P3: `recall_answer` `sources` lists all retrieved memories, incl. below-floor
+
+**Discovered during the Codex round-6 review (2026-06-14).** `synthesizeAnswer`
+populates `sources` from every retrieved memory (`src/cognitive/synthesize.ts`,
+the `memories.map(...)` near the top), including memories below the
+`relevanceFloor` that are correctly EXCLUDED from `citations`/`answer`. Codex
+confirmed this is **not** an answer/citation leak — the answer only ever cites
+eligible (above-floor) memories — but the `sources` field is documented as "the
+source memories that backed the answer," which is mildly misleading when it also
+lists candidates that backed nothing.
+
+**Proposed fix:** filter `sources` to the memories that actually contributed a
+selected sentence (or eligible content), or rename/redocument the field as
+"retrieved candidates." Cosmetic; no correctness impact.
+
+**Severity:** P3 — transparency/labeling only, no fabrication risk.

@@ -16,8 +16,12 @@ suite green under node@22.
   deterministic, LLM-free EXTRACTIVE answer where every sentence traces to a
   stored memory id, plus an explicit gap-analysis (thin-coverage + staleness
   notes + a freshness boundary `stale_since`). Returns `status:"not_in_memory"`
-  with a reason instead of fabricating when nothing matches.
-  (`src/cognitive/synthesize.ts`, `src/tools/recall-answer.ts`)
+  with a reason instead of fabricating when nothing matches. A relevance floor
+  (`relevanceFloor`, default 0.3) gates BOTH answer paths on a single contract:
+  only sentences (or, for sub-sentence-length memories, only whole memories)
+  whose own query cosine clears the floor are eligible to appear in the
+  answer — an off-topic retrieval can never leak a below-floor sentence into a
+  confident answer. (`src/cognitive/synthesize.ts`, `src/tools/recall-answer.ts`)
 - **Optional local cross-encoder reranker** (`NEUROMCP_RERANKER`, default
   `none`). A second-stage relevance reranker over the fused RRF pool, fully
   local via onnxruntime-node (cross-encoder/ms-marco-MiniLM-L-6-v2 + a real
@@ -92,6 +96,18 @@ suite green under node@22.
 - Audit: a full read-only codebase audit (10 subsystems, adversarial
   verification of every P0/P1) grounded this release; remaining P2/P3 finds are
   logged in `FOUND-DURING-FIX.md`.
+- Codex-review hardening (6 adversarial rounds, ending in AGREE 9/10): each
+  round's finding fixed test-first with a regression proven RED on the prior
+  code. Findings closed: adaptive-importance decay was undone by the refresh
+  (now recomputed from the immutable user base, idempotent); consolidation
+  merge wrote the user `importance` column (now writes `effective_importance`);
+  `recall_answer` could fabricate from off-topic memories via the no-sentence
+  fallback AND via a gate/selection score mismatch (both closed — gate and
+  answer selection now share one per-sentence / per-memory floor contract);
+  `purgeTombstones` left stale `retrieval_event_memories` + `semantic_card_evidence`
+  rows; daemon shutdown truncated in-flight requests (now drains through a grace
+  window before closing transports); rerank candidate pool couldn't fill; REST
+  host-guard ignored `extraAllowedHosts`.
 
 ## [0.25.1] — 2026-06-11
 

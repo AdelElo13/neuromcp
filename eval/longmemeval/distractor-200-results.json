@@ -11,7 +11,7 @@
       "precision5": 1,
       "ndcg5": 1,
       "mrr": 1,
-      "latency_ms": 39
+      "latency_ms": 41
     },
     {
       "question_id": "gpt4_2487a7cb",
@@ -23,7 +23,7 @@
       "precision5": 1,
       "ndcg5": 1,
       "mrr": 1,
-      "latency_ms": 34
+      "latency_ms": 36
     },
     {
       "question_id": "gpt4_76048e76",
@@ -35,7 +35,7 @@
       "precision5": 0.8,
       "ndcg5": 0.7860137352654724,
       "mrr": 1,
-      "latency_ms": 37
+      "latency_ms": 34
     },
     {
       "question_id": "gpt4_2312f94c",
@@ -47,7 +47,7 @@
       "precision5": 1,
       "ndcg5": 1,
       "mrr": 1,
-      "latency_ms": 37
+      "latency_ms": 39
     },
     {
       "question_id": "0bb5a684",
@@ -59,7 +59,7 @@
       "precision5": 1,
       "ndcg5": 1,
       "mrr": 1,
-      "latency_ms": 38
+      "latency_ms": 36
     }
   ],
   "overall": {
@@ -71,6 +71,6 @@
     "mrr": "100.0",
     "hit10": "100.0",
     "latency_avg_ms": 37,
-    "latency_p95_ms": 39
+    "latency_p95_ms": 41
   }
 }
