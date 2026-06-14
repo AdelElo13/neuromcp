@@ -113,14 +113,17 @@ function pickAllowedOrigin(originHeader: string | string[] | undefined): string 
 export function createRestRequestHandler(
   logger: Logger,
   deps?: HttpDeps,
+  extraAllowedHosts: ReadonlySet<string> = new Set(),
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
     // DNS-rebinding guard. Reject any request whose Host header is not an
-    // allowed loopback host BEFORE routing or body parsing. The daemon
-    // applies the same guard in its outer handler; applying it here too
-    // closes the gap for the legacy dual-mode transport (startHttpTransport),
-    // which mounts this handler directly.
-    if (!isAllowedHost(req.headers.host)) {
+    // allowed loopback host (or an operator-opted-in extra host) BEFORE
+    // routing or body parsing. The daemon applies the same guard in its outer
+    // handler; applying it here too closes the gap for the legacy dual-mode
+    // transport (startHttpTransport), which mounts this handler directly.
+    // `extraAllowedHosts` is forwarded by the daemon so a non-loopback bind
+    // does not 421 its own /health and /api/* while /mcp works.
+    if (!isAllowedHost(req.headers.host, extraAllowedHosts)) {
       res.writeHead(421, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'misdirected_request' }));
       return;

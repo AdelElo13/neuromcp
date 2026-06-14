@@ -23,7 +23,7 @@ export interface RecallAnswerInput {
 export async function recallAnswer(
   input: RecallAnswerInput,
   deps: SearchDeps,
-  options: { now?: number } = {},
+  options: { now?: number; relevanceFloor?: number } = {},
 ): Promise<SynthesisResult> {
   const memories = (await searchMemory(
     {
@@ -43,5 +43,6 @@ export async function recallAnswer(
   return synthesizeAnswer(input.query, memories, deps.embedder, {
     maxSentences: input.max_sentences,
     now: options.now,
+    relevanceFloor: options.relevanceFloor,
   });
 }

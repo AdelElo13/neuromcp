@@ -62,24 +62,36 @@ export async function synthesizeAnswer(
   query: string,
   memories: readonly MemoryWithScore[],
   embedder: EmbeddingProvider,
-  options: { maxSentences?: number; maxLength?: number; staleDays?: number; now?: number } = {},
+  options: {
+    maxSentences?: number;
+    maxLength?: number;
+    staleDays?: number;
+    now?: number;
+    relevanceFloor?: number;
+  } = {},
 ): Promise<SynthesisResult> {
   const maxSentences = options.maxSentences ?? 5;
   const maxLength = options.maxLength ?? 700;
   const staleDays = options.staleDays ?? 30;
   const now = options.now ?? Date.now();
+  // Minimum query↔sentence cosine for a match to count as an answer. Below
+  // this the retrieved memories are off-topic noise — return not_in_memory
+  // rather than synthesize a confident-but-irrelevant answer.
+  const relevanceFloor = options.relevanceFloor ?? 0.3;
+
+  const notInMemory = (reason: string): SynthesisResult => ({
+    status: 'not_in_memory',
+    answer: null,
+    citations: [],
+    sources: [],
+    gaps: [reason],
+    stale_since: null,
+  });
 
   if (memories.length === 0) {
-    return {
-      status: 'not_in_memory',
-      answer: null,
-      citations: [],
-      sources: [],
-      gaps: [
-        `No stored memory matched "${query}". It may never have been recorded, or may be phrased differently than the query.`,
-      ],
-      stale_since: null,
-    };
+    return notInMemory(
+      `No stored memory matched "${query}". It may never have been recorded, or may be phrased differently than the query.`,
+    );
   }
 
   const sources = memories.map((m) => ({
@@ -145,12 +157,24 @@ export async function synthesizeAnswer(
     // Gentle decay: nudges sentences from lower-ranked (less relevant)
     // memories down without nuking genuinely-relevant ones.
     const memWeight = 1 / (1 + 0.25 * rank); // rank 0 → 1.0, rank 3 → 0.57
+    const rawCosine = cosine(queryEmbedding, sentenceEmbeddings[i]!);
     return {
       ...s,
       embedding: sentenceEmbeddings[i]!,
-      score: cosine(queryEmbedding, sentenceEmbeddings[i]!) * memWeight,
+      rawCosine,
+      score: rawCosine * memWeight,
     };
   });
+
+  // Relevance gate: if NOTHING clears the floor, the retrieval was off-topic.
+  // Say not_in_memory instead of fabricating an answer from noise.
+  const bestRaw = scored.reduce((m, s) => Math.max(m, s.rawCosine), 0);
+  if (bestRaw < relevanceFloor) {
+    return notInMemory(
+      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestRaw.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
+    );
+  }
+
   scored.sort((a, b) => b.score - a.score);
 
   // Relevance floor: drop sentences far below the most-relevant one so an

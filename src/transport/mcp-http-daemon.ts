@@ -197,6 +197,10 @@ export async function startMcpHttpDaemon(
   // can bypass MAX_MCP_SESSIONS.
   let pendingInits = 0;
 
+  const extraAllowed: ReadonlySet<string> = new Set(
+    (options.extraAllowedHosts ?? []).map((h) => h.toLowerCase()),
+  );
+
   const restDeps: HttpDeps = {
     db: deps.db,
     vecStore: deps.vecStore,
@@ -205,7 +209,9 @@ export async function startMcpHttpDaemon(
     logger: deps.logger,
     metrics: deps.metrics,
   };
-  const restHandler = createRestRequestHandler(logger, restDeps);
+  // Forward the operator's extra allowed hosts so REST endpoints accept the
+  // same non-loopback Host the outer /mcp guard does.
+  const restHandler = createRestRequestHandler(logger, restDeps, extraAllowed);
 
   const handleMcpRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const method = req.method ?? 'GET';
@@ -452,10 +458,6 @@ export async function startMcpHttpDaemon(
     writeJsonError(res, 400, 'Bad Request: No valid session ID provided');
   };
 
-  const extraAllowed: ReadonlySet<string> = new Set(
-    (options.extraAllowedHosts ?? []).map((h) => h.toLowerCase()),
-  );
-
   // Pick the ACAO value to mirror for /mcp responses. /mcp is the MCP
   // Streamable HTTP transport; browser-based clients (e.g. an MCP
   // inspector served from another loopback port) will send a preflight
@@ -576,7 +578,7 @@ export async function startMcpHttpDaemon(
   httpServer.on('close', () => clearInterval(sweepInterval));
 
   let shuttingDown = false;
-  const shutdown = async (): Promise<void> => {
+  const shutdown = async (graceMs = 250): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(sweepInterval);
@@ -587,8 +589,15 @@ export async function startMcpHttpDaemon(
     sessions.clear();
     // 2. Stop accepting new connections + wait for in-flight to drain.
     const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
-    // 3. SSE /events connections won't end on their own — destroy lingering
-    //    sockets so close() can complete instead of hanging.
+    // 3. Free idle keep-alive connections immediately; give genuine in-flight
+    //    requests a brief grace to finish before forcibly destroying what is
+    //    left (the long-lived /events SSE streams that never end on their own
+    //    and would otherwise pin close() until the hard-exit timer).
+    httpServer.closeIdleConnections();
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, graceMs);
+      t.unref();
+    });
     for (const socket of openSockets) socket.destroy();
     openSockets.clear();
     await closed;

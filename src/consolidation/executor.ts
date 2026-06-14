@@ -40,10 +40,12 @@ export function executeConsolidationPlan(
     "UPDATE memories SET effective_importance = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
   );
 
+  // Merge updates the winner's COMPUTED importance (effective_importance);
+  // the user importance column is never system-mutated (v14).
   const updateWinner = db.prepare(
     `UPDATE memories
        SET tags = ?,
-           importance = ?,
+           effective_importance = ?,
            supersedes_id = ?,
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE id = ?`,

@@ -80,6 +80,7 @@ describe('v0.26 synthesis recall (recall_answer)', () => {
     const result = await recallAnswer(
       { query: 'how does the deploy pipeline work', namespace: 'default' },
       searchDeps,
+      { relevanceFloor: 0 }, // FakeEmbedder cosines are artificially low; gate tested separately
     );
 
     expect(result.status).toBe('answered');
@@ -124,7 +125,7 @@ describe('v0.26 synthesis recall (recall_answer)', () => {
       { query: 'billing cron schedule', namespace: 'default' },
       // fixed "now" well after the memory so staleness fires deterministically
       searchDeps,
-      { now: new Date('2026-06-01T00:00:00.000Z').getTime() },
+      { now: new Date('2026-06-01T00:00:00.000Z').getTime(), relevanceFloor: 0 },
     );
 
     expect(result.status).toBe('answered');

@@ -149,6 +149,13 @@ export async function searchMemory(
   // hit `namespace = '*'` equality filters and silently return zero rows.
   const scopedNamespace = namespace === '*' ? undefined : namespace;
 
+  // Candidate budget per leg. When a reranker is active it needs at least
+  // rerankPool candidates to choose from — fetch enough up front, otherwise
+  // (e.g. limit=5 → limit*3=15 < pool=30) the reranker can never see the
+  // wider pool the Step-7 truncation promises.
+  const reranker = deps.reranker ?? null;
+  const candidateK = reranker !== null ? Math.max(limit * 3, config.rerankPool) : limit * 3;
+
   // Step 1: Generate query embedding. When the embedder is down (Ollama not
   // running, network timeout) a hybrid search degrades LOUDLY to FTS-only
   // instead of failing the whole call — the user still gets keyword recall,
@@ -169,7 +176,7 @@ export async function searchMemory(
   // Step 2: Vector search — push namespace into the vec query so we don't
   // waste the top-k budget on other tenants' data (see sqlite-vec.ts for
   // the recall-collapse story).
-  const vecResults = embedding !== null ? vecStore.search(embedding, limit * 3, scopedNamespace) : [];
+  const vecResults = embedding !== null ? vecStore.search(embedding, candidateK, scopedNamespace) : [];
 
   const vecRanks = new Map<string, number>();
   vecResults.forEach((r, i) => {
@@ -181,7 +188,7 @@ export async function searchMemory(
   if (hybrid) {
     try {
       const ftsQuery = sanitizeFtsQuery(input.query);
-      const ftsRows = ftsCandidates(db, ftsQuery, limit * 3, scopedNamespace);
+      const ftsRows = ftsCandidates(db, ftsQuery, candidateK, scopedNamespace);
 
       ftsRows.forEach((row, i) => {
         ftsRanks.set(row.id, i + 1);
@@ -302,7 +309,6 @@ export async function searchMemory(
   // candidate that RRF ranked outside the top `limit` — truncating to
   // `limit` here first would make the reranker a no-op (it could only
   // reorder within the top-`limit`, never pull #11 into the top-10).
-  const reranker = deps.reranker ?? null;
   const pool = reranker !== null ? Math.max(limit, config.rerankPool) : limit;
   const nsFilter = namespaceFilter(input.namespace, config.defaultNamespace);
   const results: MemoryWithScore[] = [];

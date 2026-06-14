@@ -65,6 +65,11 @@ export function purgeTombstones(
   const delClaims = db.prepare('DELETE FROM claims WHERE memory_id = ?');
   const delCoRetrievals = db.prepare('DELETE FROM co_retrievals WHERE memory_a = ? OR memory_b = ?');
   const delUsefulness = db.prepare('DELETE FROM memory_usefulness WHERE memory_id = ?');
+  // Recall/attribution join rows carry memory_id WITHOUT a FK to memories, so
+  // they survive a memories DELETE and would let citeMemories() resurrect
+  // usefulness for a purged id. Clean them here too.
+  const delRetrievalJoin = db.prepare('DELETE FROM retrieval_event_memories WHERE memory_id = ?');
+  const delCardEvidence = db.prepare('DELETE FROM semantic_card_evidence WHERE memory_id = ?');
   const delMemory = db.prepare('DELETE FROM memories WHERE id = ?');
 
   const purgeAll = db.transaction(() => {
@@ -74,6 +79,8 @@ export function purgeTombstones(
       delClaims.run(row.id);
       delCoRetrievals.run(row.id, row.id);
       delUsefulness.run(row.id);
+      delRetrievalJoin.run(row.id);
+      delCardEvidence.run(row.id);
       if (vecStore !== undefined) {
         vecStore.remove(row.id);
       }

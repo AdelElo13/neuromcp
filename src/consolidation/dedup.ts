@@ -21,13 +21,14 @@ export function findDuplicates(
 
   const rows = db
     .prepare(
-      `SELECT id, content, tags, importance, source_trust FROM memories WHERE is_deleted = 0 AND ${nsClause}`,
+      `SELECT id, content, tags, importance, effective_importance, source_trust FROM memories WHERE is_deleted = 0 AND ${nsClause}`,
     )
     .all(...nsParams) as Array<{
     id: string;
     content: string;
     tags: string;
     importance: number;
+    effective_importance: number | null;
     source_trust: string;
   }>;
 
@@ -72,7 +73,7 @@ export function findDuplicates(
       // Verify the neighbor is active and in the same namespace
       const neighborRow = db
         .prepare(
-          'SELECT id, content, tags, importance, source_trust FROM memories WHERE id = ? AND is_deleted = 0',
+          'SELECT id, content, tags, importance, effective_importance, source_trust FROM memories WHERE id = ? AND is_deleted = 0',
         )
         .get(neighbor.id) as
         | {
@@ -80,6 +81,7 @@ export function findDuplicates(
             content: string;
             tags: string;
             importance: number;
+            effective_importance: number | null;
             source_trust: string;
           }
         | undefined;
@@ -105,8 +107,11 @@ export function findDuplicates(
       const loseTags: string[] = JSON.parse(loser.tags);
       const mergedTags = [...new Set([...keepTags, ...loseTags])];
 
-      // Max importance
-      const mergedImportance = Math.max(winner.importance, loser.importance);
+      // Max of the COMPUTED (effective) importances — the merge updates
+      // the winner's effective_importance, never its user importance column.
+      const winnerEff = winner.effective_importance ?? winner.importance;
+      const loserEff = loser.effective_importance ?? loser.importance;
+      const mergedImportance = Math.max(winnerEff, loserEff);
 
       merges.push({
         keep_id: keepId,
@@ -125,8 +130,8 @@ export function findDuplicates(
 }
 
 function pickWinner(
-  a: { id: string; content: string; tags: string; importance: number; source_trust: string },
-  b: { id: string; content: string; tags: string; importance: number; source_trust: string },
+  a: { id: string; content: string; tags: string; importance: number; effective_importance: number | null; source_trust: string },
+  b: { id: string; content: string; tags: string; importance: number; effective_importance: number | null; source_trust: string },
 ): {
   keepId: string;
   tombstoneId: string;
