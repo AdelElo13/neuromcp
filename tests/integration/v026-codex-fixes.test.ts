@@ -316,5 +316,55 @@ describe('v0.26 Codex-review fixes', () => {
       expect(result.citations.length).toBeGreaterThan(0);
       expect(result.citations.every((c) => c.memory_id === 'm1-relevant')).toBe(true);
     });
+
+    it('applies the same per-memory floor in the no-sentence fallback (short memories)', async () => {
+      // Codex round-5: with zero extractable sentences, the fallback gated on
+      // the BEST content cosine but cited memories in retrieval order, so a
+      // below-floor short memory could be cited when a DIFFERENT memory opened
+      // the gate. The fallback now filters memories by their OWN content cosine.
+      class MarkerEmbedder implements EmbeddingProvider {
+        readonly name = 'marker';
+        readonly dimensions = DIMS;
+        readonly maxTokens = 512;
+        async embed(text: string): Promise<Float32Array> {
+          let f = 0;
+          if (text.includes('QUERYMARK')) f = 1;
+          else if (text.includes('SCORE29')) f = 0.29; // below floor
+          else if (text.includes('SCORE31')) f = 0.31; // above floor
+          const v = new Float32Array(DIMS);
+          v[0] = f;
+          v[1] = Math.sqrt(Math.max(0, 1 - f * f));
+          return v;
+        }
+        async embedBatch(texts: string[]): Promise<Float32Array[]> {
+          return Promise.all(texts.map((t) => this.embed(t)));
+        }
+        async isAvailable(): Promise<boolean> {
+          return true;
+        }
+      }
+      // Both contents are too short to split into a sentence (no '.', <16 chars
+      // of sentence material) → the no-sentence fallback path. m0 (rank 0) is
+      // below floor; m1 (rank 1) is above floor and opens the gate.
+      const m0 = {
+        id: 'm0-offtopic-short',
+        content: 'SCORE29',
+        created_at: '2026-06-01T00:00:00.000Z',
+        similarity_score: 0.9,
+      } as MemoryWithScore;
+      const m1 = {
+        id: 'm1-relevant-short',
+        content: 'SCORE31',
+        created_at: '2026-06-01T00:00:00.000Z',
+        similarity_score: 0.5,
+      } as MemoryWithScore;
+
+      const result = await synthesizeAnswer('QUERYMARK', [m0, m1], new MarkerEmbedder());
+      expect(result.status).toBe('answered');
+      expect(result.citations.length).toBeGreaterThan(0);
+      // Below-floor m0 must never be cited, even with maxSentences large enough
+      // to include it in retrieval order.
+      expect(result.citations.every((c) => c.memory_id === 'm1-relevant-short')).toBe(true);
+    });
   });
 });

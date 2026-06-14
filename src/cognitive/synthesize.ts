@@ -129,28 +129,27 @@ export async function synthesizeAnswer(
   }
   gaps.push(`Boundary: nothing is stored about this topic after ${staleSince.slice(0, 10)}.`);
 
-  // Per-memory CONTENT cosine, computed up front. This is the ONLY relevance
-  // signal available for memories too short to yield an extractable sentence
-  // (the no-sentence fallback below).
   const queryEmbedding = await embedder.embed(query);
-  const contentEmbeddings = await embedder.embedBatch(memories.map((m) => m.content));
-  const bestContentCosine = contentEmbeddings.reduce(
-    (max, e) => Math.max(max, cosine(queryEmbedding, e)),
-    0,
-  );
 
   if (sentences.length === 0) {
     // Memories matched but have no extractable sentences (very short content).
-    // Gate on the raw-content cosine: if even that is off-topic, do not
-    // fabricate (closes the hole where a sub-16-char off-topic memory — e.g.
-    // "billing" — skipped the gate via this fallback).
-    if (bestContentCosine < relevanceFloor) {
+    // The content cosine is the only relevance signal here. Gate AND select on
+    // PER-MEMORY content cosine — only memories whose own content clears the
+    // floor are eligible to be cited. (Gating on the best cosine but then
+    // slicing memories in retrieval order let a below-floor short memory get
+    // cited when a different, above-floor memory opened the gate — the round-5
+    // fallback mismatch. Same one-contract rule as the sentence path below.)
+    const contentEmbeddings = await embedder.embedBatch(memories.map((m) => m.content));
+    const contentCosines = contentEmbeddings.map((e) => cosine(queryEmbedding, e));
+    const eligibleMemories = memories.filter((_, i) => contentCosines[i]! >= relevanceFloor);
+    if (eligibleMemories.length === 0) {
+      const best = contentCosines.reduce((m, c) => Math.max(m, c), 0);
       return notInMemory(
-        `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestContentCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
+        `Nothing in memory is relevant enough to answer "${query}" (best match scored ${best.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
       );
     }
-    // Fall back to the raw memory contents as the answer, still cited.
-    const cites: Citation[] = memories.slice(0, maxSentences).map((m) => ({
+    // Cite the eligible memories (already in retrieval-relevance order).
+    const cites: Citation[] = eligibleMemories.slice(0, maxSentences).map((m) => ({
       text: m.content.trim(),
       memory_id: m.id,
       created_at: m.created_at,
