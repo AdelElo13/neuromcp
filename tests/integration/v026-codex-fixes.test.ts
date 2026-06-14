@@ -216,5 +216,51 @@ describe('v0.26 Codex-review fixes', () => {
       expect(result.answer).toBeNull();
       expect(result.citations.length).toBe(0);
     });
+
+    it('still answers a long mixed memory whose ONE relevant sentence is diluted by filler (no false-negative)', async () => {
+      // Codex round-3: gating on whole-content cosine ALONE would false-negative
+      // here — the filler drags the full-content cosine under the floor even
+      // though one sentence is strongly on-topic. The gate now takes
+      // max(contentCosine, bestSentenceCosine), so the sentence rescues it.
+      // Embedder models real dilution: cosine to the query == fraction of words
+      // containing "deploy".
+      class FractionEmbedder implements EmbeddingProvider {
+        readonly name = 'frac';
+        readonly dimensions = DIMS;
+        readonly maxTokens = 512;
+        async embed(text: string): Promise<Float32Array> {
+          const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+          const rel = words.filter((w) => w.includes('deploy')).length;
+          const f = words.length > 0 ? rel / words.length : 0;
+          const v = new Float32Array(DIMS);
+          v[0] = f;
+          v[1] = Math.sqrt(Math.max(0, 1 - f * f));
+          return v;
+        }
+        async embedBatch(texts: string[]): Promise<Float32Array[]> {
+          return Promise.all(texts.map((t) => this.embed(t)));
+        }
+        async isAvailable(): Promise<boolean> {
+          return true;
+        }
+      }
+      // 3 sentences; only the last is about "deploy". Full-content deploy
+      // fraction = 5/21 ≈ 0.24 (< 0.3 floor); the relevant sentence alone =
+      // 5/6 ≈ 0.83 (>= floor).
+      const mixed = {
+        id: 'm-mixed',
+        content:
+          'gardening tips about tomatoes and sunshine today. ' +
+          'cats and coffee make mornings calmer somehow always. ' +
+          'deploy deploy deploy deploy deploy works.',
+        created_at: '2026-06-01T00:00:00.000Z',
+        similarity_score: 0.5,
+      } as MemoryWithScore;
+
+      const result = await synthesizeAnswer('deploy', [mixed], new FractionEmbedder());
+      expect(result.status).toBe('answered');
+      expect(result.answer).toBeTruthy();
+      expect(result.citations.some((c) => c.memory_id === 'm-mixed')).toBe(true);
+    });
   });
 });

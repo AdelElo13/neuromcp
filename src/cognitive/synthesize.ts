@@ -129,27 +129,26 @@ export async function synthesizeAnswer(
   }
   gaps.push(`Boundary: nothing is stored about this topic after ${staleSince.slice(0, 10)}.`);
 
-  // Relevance gate — runs BEFORE any answer path (including the short-content
-  // fallback below). Embed the query and each retrieved memory's CONTENT (not
-  // its sentences: a memory too short to yield an extractable sentence still
-  // has content to score). If the best query↔memory cosine is under the floor,
-  // the retrieval was off-topic noise — return not_in_memory rather than
-  // fabricate. This closes the hole where a sub-16-char off-topic memory
-  // (e.g. "billing") skipped the gate via the no-sentence fallback.
+  // Per-memory CONTENT cosine, computed up front. This is the ONLY relevance
+  // signal available for memories too short to yield an extractable sentence
+  // (the no-sentence fallback below).
   const queryEmbedding = await embedder.embed(query);
   const contentEmbeddings = await embedder.embedBatch(memories.map((m) => m.content));
   const bestContentCosine = contentEmbeddings.reduce(
     (max, e) => Math.max(max, cosine(queryEmbedding, e)),
     0,
   );
-  if (bestContentCosine < relevanceFloor) {
-    return notInMemory(
-      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestContentCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
-    );
-  }
 
   if (sentences.length === 0) {
     // Memories matched but have no extractable sentences (very short content).
+    // Gate on the raw-content cosine: if even that is off-topic, do not
+    // fabricate (closes the hole where a sub-16-char off-topic memory — e.g.
+    // "billing" — skipped the gate via this fallback).
+    if (bestContentCosine < relevanceFloor) {
+      return notInMemory(
+        `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestContentCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
+      );
+    }
     // Fall back to the raw memory contents as the answer, still cited.
     const cites: Citation[] = memories.slice(0, maxSentences).map((m) => ({
       text: m.content.trim(),
@@ -169,7 +168,7 @@ export async function synthesizeAnswer(
 
   // Rank sentences by relevance to the QUERY (a question wants query-relevant
   // sentences, not corpus-central ones), then embedding-dedup. `queryEmbedding`
-  // is already computed above for the relevance gate — reuse it.
+  // is already computed above — reuse it.
   const sentenceEmbeddings = await embedder.embedBatch(sentences.map((s) => s.text));
   const scored = sentences.map((s, i) => {
     const rank = memoryRank.get(s.memoryId) ?? 0;
@@ -184,6 +183,19 @@ export async function synthesizeAnswer(
       score: rawCosine * memWeight,
     };
   });
+
+  // Relevance gate (sentence OR content): gate on the BEST of the per-sentence
+  // and whole-content cosines. A long, mixed memory may carry one strongly
+  // relevant sentence even when its full-content cosine is dragged down by
+  // unrelated surrounding text — the sentence signal rescues it. If NEITHER
+  // clears the floor, the retrieval was off-topic noise → not_in_memory.
+  const bestSentenceCosine = scored.reduce((m, s) => Math.max(m, s.rawCosine), 0);
+  const bestCosine = Math.max(bestContentCosine, bestSentenceCosine);
+  if (bestCosine < relevanceFloor) {
+    return notInMemory(
+      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
+    );
+  }
 
   scored.sort((a, b) => b.score - a.score);
 
