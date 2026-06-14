@@ -80,7 +80,7 @@ describe('v0.26 synthesis recall (recall_answer)', () => {
     const result = await recallAnswer(
       { query: 'how does the deploy pipeline work', namespace: 'default' },
       searchDeps,
-      { relevanceFloor: 0 }, // FakeEmbedder cosines are artificially low; gate tested separately
+      { relevanceFloor: -1 }, // gate fully off; FakeEmbedder cosines (incl. negatives) are artificial — gate tested separately
     );
 
     expect(result.status).toBe('answered');
@@ -125,7 +125,10 @@ describe('v0.26 synthesis recall (recall_answer)', () => {
       { query: 'billing cron schedule', namespace: 'default' },
       // fixed "now" well after the memory so staleness fires deterministically
       searchDeps,
-      { now: new Date('2026-06-01T00:00:00.000Z').getTime(), relevanceFloor: 0 },
+      // relevanceFloor: -1 fully disables the relevance gate — this test checks
+      // gap/staleness messaging, not relevance, and the FakeEmbedder's char-code
+      // vectors give the single sentence a negative cosine to the query.
+      { now: new Date('2026-06-01T00:00:00.000Z').getTime(), relevanceFloor: -1 },
     );
 
     expect(result.status).toBe('answered');

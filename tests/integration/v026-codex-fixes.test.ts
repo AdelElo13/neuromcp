@@ -262,5 +262,59 @@ describe('v0.26 Codex-review fixes', () => {
       expect(result.answer).toBeTruthy();
       expect(result.citations.some((c) => c.memory_id === 'm-mixed')).toBe(true);
     });
+
+    it('never selects a below-floor sentence even when the gate is opened by a different memory (gate/selection contract)', async () => {
+      // Codex round-4: the gate opened on the single best sentence, but
+      // selection ranked by rawCosine·memWeight and always kept the top
+      // candidate — so a below-floor off-topic sentence from a higher-ranked
+      // (higher memWeight) memory could win over the above-floor sentence that
+      // actually opened the gate. Embedder maps marker substrings to exact
+      // cosines so we can reproduce the precise interleaving.
+      class MarkerEmbedder implements EmbeddingProvider {
+        readonly name = 'marker';
+        readonly dimensions = DIMS;
+        readonly maxTokens = 512;
+        async embed(text: string): Promise<Float32Array> {
+          let f = 0;
+          if (text.includes('QUERYMARK')) f = 1;
+          else if (text.includes('SCORE29')) f = 0.29; // below the 0.3 floor
+          else if (text.includes('SCORE31')) f = 0.31; // above the floor
+          const v = new Float32Array(DIMS);
+          v[0] = f;
+          v[1] = Math.sqrt(Math.max(0, 1 - f * f));
+          return v;
+        }
+        async embedBatch(texts: string[]): Promise<Float32Array[]> {
+          return Promise.all(texts.map((t) => this.embed(t)));
+        }
+        async isAvailable(): Promise<boolean> {
+          return true;
+        }
+      }
+      // m0 is rank 0 (memWeight 1.0) and off-topic: its sentence scores 0.29
+      //   (below floor) but 0.29·1.0 = 0.29 by selection score.
+      // m1 is rank 1 (memWeight 0.8) and relevant: its sentence scores 0.31
+      //   (above floor) but 0.31·0.8 = 0.248 by selection score — it OPENS the
+      //   gate yet LOSES the old accept-the-top selection.
+      const m0 = {
+        id: 'm0-offtopic',
+        content: 'this off-topic sentence carries SCORE29 marker and is long enough to split.',
+        created_at: '2026-06-01T00:00:00.000Z',
+        similarity_score: 0.9,
+      } as MemoryWithScore;
+      const m1 = {
+        id: 'm1-relevant',
+        content: 'this relevant sentence carries SCORE31 marker and is also long enough here.',
+        created_at: '2026-06-01T00:00:00.000Z',
+        similarity_score: 0.5,
+      } as MemoryWithScore;
+
+      const result = await synthesizeAnswer('QUERYMARK', [m0, m1], new MarkerEmbedder());
+      // Answered (m1 is genuinely relevant), but the off-topic m0 sentence must
+      // NOT leak into the answer — every citation comes from the above-floor m1.
+      expect(result.status).toBe('answered');
+      expect(result.citations.length).toBeGreaterThan(0);
+      expect(result.citations.every((c) => c.memory_id === 'm1-relevant')).toBe(true);
+    });
   });
 });

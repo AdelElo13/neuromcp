@@ -184,29 +184,40 @@ export async function synthesizeAnswer(
     };
   });
 
-  // Relevance gate (sentence OR content): gate on the BEST of the per-sentence
-  // and whole-content cosines. A long, mixed memory may carry one strongly
-  // relevant sentence even when its full-content cosine is dragged down by
-  // unrelated surrounding text — the sentence signal rescues it. If NEITHER
-  // clears the floor, the retrieval was off-topic noise → not_in_memory.
+  // Relevance gate AND answer selection share ONE contract on the sentence
+  // path: a sentence is eligible to appear in the answer iff its OWN query
+  // cosine clears the relevanceFloor. `eligible` is that set.
+  //
+  // Why a single contract: the gate used to open on the single best sentence
+  // (or the whole-content cosine), but selection then ranked by
+  // rawCosine·memWeight and always kept the top candidate — so a DIFFERENT,
+  // below-floor off-topic sentence with a higher memWeight could win and be
+  // returned (the round-4 fabrication). Filtering to `eligible` first makes
+  // that impossible: nothing below the floor can ever be selected.
+  //
+  // A long mixed memory whose one relevant sentence clears the floor is still
+  // answered (that sentence is eligible). The whole-content cosine is NOT used
+  // to rescue the sentence path — it only gates the no-sentence fallback above,
+  // where there are no sentences to score. If no single sentence clears the
+  // floor here, we conservatively say not_in_memory rather than answer from a
+  // below-floor sentence.
   const bestSentenceCosine = scored.reduce((m, s) => Math.max(m, s.rawCosine), 0);
-  const bestCosine = Math.max(bestContentCosine, bestSentenceCosine);
-  if (bestCosine < relevanceFloor) {
+  const eligible = scored.filter((s) => s.rawCosine >= relevanceFloor);
+  if (eligible.length === 0) {
     return notInMemory(
-      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
+      `Nothing in memory is relevant enough to answer "${query}" (best match scored ${bestSentenceCosine.toFixed(2)} < ${relevanceFloor}). The topic may not have been recorded.`,
     );
   }
 
-  scored.sort((a, b) => b.score - a.score);
+  eligible.sort((a, b) => b.score - a.score);
 
-  // Relevance floor: drop sentences far below the most-relevant one so an
-  // off-topic sentence from a loosely-matched memory does not leak into the
-  // answer. Relative (0.45× the top score) with a small absolute guard.
-  const topScore = scored[0]!.score;
+  // Among the eligible sentences, drop those far below the most-relevant one
+  // (relative 0.45× the top score, small absolute guard) for answer focus.
+  const topScore = eligible[0]!.score;
   const floor = Math.max(0.1, 0.45 * topScore);
 
-  const selected: typeof scored = [];
-  for (const cand of scored) {
+  const selected: typeof eligible = [];
+  for (const cand of eligible) {
     if (selected.length >= maxSentences) break;
     if (cand.score < floor && selected.length > 0) break; // keep at least the best one
     const dup = selected.some((s) => cosine(s.embedding, cand.embedding) > 0.9);
