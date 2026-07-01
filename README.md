@@ -9,11 +9,15 @@ neuromcp is the first **Sovereign Memory** layer for AI: an open-source MCP serv
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![npm downloads](https://img.shields.io/npm/dw/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![license: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
-[![tests](https://img.shields.io/badge/tests-297%20passing-brightgreen)](./tests)
+[![tests](https://img.shields.io/badge/tests-471%20passing-brightgreen)](./tests)
 
 ```bash
-npx neuromcp
+npx neuromcp-init   # one command: detects your MCP clients, writes configs, sets up the wiki
 ```
+
+Or run the bare server without any setup: `npx neuromcp`. Something not
+working? `npx neuromcp-doctor` diagnoses the daemon, Ollama, embeddings
+and the database in one run.
 
 ## Why neuromcp
 
@@ -169,19 +173,32 @@ Last session             → What happened last time
 
 ## Quick Start
 
-### 1. Start the MCP server
+### One command (recommended)
+
+```bash
+npx neuromcp-init
+```
+
+Detects your installed MCP clients (Claude Desktop, Claude Code, Cursor,
+Windsurf), writes the `neuromcp` entry into each config (with a backup of
+the original), initializes the wiki + hooks, and checks whether Ollama is
+available. `--dry-run` previews everything without writing.
+
+### Manual steps (what init does under the hood)
+
+**1. Start the MCP server**
 
 ```bash
 npx neuromcp
 ```
 
-### 2. Initialize the wiki + hooks (**required** for closed-loop attribution)
+**2. Initialize the wiki + hooks** (**required** for closed-loop attribution)
 
 ```bash
 npx neuromcp-init-wiki
 ```
 
-This creates the wiki structure, installs hooks (Claude Code) and rules (other editors), and configures everything automatically. **Without this step**, `npx neuromcp` still runs as a plain MCP server with 42 tools, but the critic hook that closes the attribution loop is not installed — retrieval works but usefulness scores never accumulate. Safe to run multiple times — won't overwrite existing config.
+This creates the wiki structure, installs hooks (Claude Code) and rules (other editors), and configures everything automatically. **Without this step**, `npx neuromcp` still runs as a plain MCP server with [46 tools](docs/TOOLS.md), but the critic hook that closes the attribution loop is not installed — retrieval works but usefulness scores never accumulate. Safe to run multiple times — won't overwrite existing config.
 
 ### Editor Compatibility
 
@@ -189,7 +206,7 @@ neuromcp works with any MCP-compatible editor. Two tiers of integration:
 
 | Feature | Claude Code | Cursor / Windsurf / Cline / Copilot / JetBrains / Zed |
 |---------|-------------|-------------------------------------------------------|
-| MCP tools (40+) | Full | Full |
+| MCP tools ([46](docs/TOOLS.md)) | Full | Full |
 | Context at session start | Hooks (automatic) | Rules (LLM-driven, best-effort) |
 | Persist at session end | Hooks (automatic) | Rules (LLM-driven, best-effort) |
 | Wiki reminders | Every 8 tool calls | No |
@@ -251,7 +268,44 @@ neuromcp auto-detects it. No config needed.
 
 ### Cursor / Windsurf / Cline
 
-Same format — add to your editor's MCP settings.
+Same format — add to your editor's MCP settings. Copy-paste configs for
+every client live in [`examples/`](examples/).
+
+### Shared daemon (recommended when you run multiple clients)
+
+By default each client spawns its own `neuromcp` process. One shared
+background daemon serves them all instead — one database connection, one
+embedding pipeline, no cold start per client:
+
+```bash
+npx neuromcp-enable-daemon --port 3200   # macOS launchd agent; verify with: curl -s http://127.0.0.1:3200/health
+```
+
+Then point clients at the daemon:
+
+```jsonc
+// Claude Code (~/.claude.json) — native HTTP transport
+{ "neuromcp": { "type": "http", "url": "http://127.0.0.1:3200/mcp" } }
+
+// Claude Desktop — stdio-only, bridge via neuromcp-connect.
+// The bridge waits for the daemon on cold boot (plain mcp-remote exits
+// fatally when the client starts before the daemon has bound its port,
+// leaving a permanent "Server disconnected").
+{ "neuromcp": { "command": "npx", "args": ["-y", "--package=neuromcp", "neuromcp-connect", "http://127.0.0.1:3200/mcp"] } }
+```
+
+The daemon binds loopback only, rejects non-allowlisted `Host` and
+`Origin` headers (DNS-rebinding defense), and is unauthenticated by
+design inside that boundary. Uninstall: `npx neuromcp-enable-daemon --uninstall`.
+
+### Platform support
+
+| Component | macOS | Linux | Windows |
+|-----------|-------|-------|---------|
+| MCP server (stdio + HTTP) | ✅ | ✅ (CI) | ⚠️ untested — native deps ship win-x64 prebuilds, reports welcome |
+| Shared daemon autostart (`enable-daemon`) | ✅ launchd | manual systemd | ❌ |
+| Auto-consolidation (`enable-consolidation`) | ✅ launchd | cron snippet | ❌ |
+| Claude Code hooks | ✅ | ✅ | ⚠️ untested |
 
 ### Per-project isolation
 
@@ -274,27 +328,26 @@ Same format — add to your editor's MCP settings.
 
 ## MCP Surface
 
-### Core Tools
+**46 tools** across 8 families — the full auto-generated reference with
+every parameter lives in [`docs/TOOLS.md`](docs/TOOLS.md) (regenerated
+from the actual registrations on every change; CI fails when it drifts).
 
-| Tool | Description |
-|------|-------------|
-| `store_memory` | Store with semantic dedup, contradiction detection, surprise scoring, entity extraction. |
-| `search_memory` | Hybrid vector + FTS search with RRF ranking, graph boost, cognitive priming. Returns explain metadata (trust, contradictions, claims, confidence). |
-| `recall_memory` | Retrieve by ID, namespace, category, or tags — no semantic search. |
-| `forget_memory` | Soft-delete (tombstone). Supports `dry_run`. |
-| `consolidate` | Dedup, decay, prune, sweep. `commit=false` for preview, `true` to apply. |
-| `memory_stats` | Counts, categories, trust distribution, DB size. |
-| `export_memories` | Export as JSONL or JSON. |
-| `import_memories` | Import with content-hash dedup. |
-| `search_all` | Unified search across extracted memories and verbatim text with source labels. |
+| Family | Tools | Highlights |
+|--------|-------|-----------|
+| Core memory | 11 | `store_memory` (dedup + contradiction detection + surprise scoring), `search_memory` (hybrid RRF + explain metadata), `recall_answer` (extractive cited answers with gap-analysis), `search_all` |
+| Knowledge graph | 6 | `create_entity`, `create_relation`, `query_graph`, `compute_centrality` (PageRank) |
+| Episodes | 10 | `start_episode`/`end_episode`, clustering, `memory_timeline` |
+| Multi-agent | 9 | `register_agent`, `find_expert`, review queues, memory transfer |
+| Verbatim store | 3 | exact-recall FTS on raw text, never summarized or pruned |
+| Wiki | 3 | `wiki_ingest`, `wiki_lint`, `wiki_briefing` |
+| Attribution & usefulness | 3 | `log_retrieval`, `cite_memories` — closes the usefulness-prior loop |
+| Reflection | 1 | `generate_reflection` |
 
-### Verbatim Tools
-
-| Tool | Description |
-|------|-------------|
-| `store_verbatim` | Store raw conversation text — no summarization, never pruned. |
-| `search_verbatim` | Full-text search (FTS5) on verbatim entries for exact recall. |
-| `verbatim_stats` | Stats on verbatim storage: total entries, size, distribution. |
+**Picking the right retrieval tool:** `search_memory` returns ranked raw
+memories; `recall_answer` synthesizes a cited extractive answer (or
+honestly says `not_in_memory`); `recall_memory` is a plain ID/filter
+lookup with no semantics; `search_all` adds the verbatim store to the
+sweep.
 
 ### Resources (13)
 
@@ -453,32 +506,24 @@ All via environment variables. Defaults work for most setups.
 | `NEUROMCP_TOMBSTONE_TTL_DAYS` | `30` | Days before permanent sweep |
 | `NEUROMCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
-## What's New in v0.9
+## What's new
 
-### Auto-Capture (v0.9.0)
+Full history in [CHANGELOG.md](CHANGELOG.md). Recent highlights:
 
-Session hooks automatically extract high-signal events — no manual `store_memory` calls needed:
+- **v0.27** — security release: CWE-22 path-traversal fix in `wiki_ingest`,
+  MCP-spec `Origin` validation on the daemon, `neuromcp-connect`
+  boot-race-safe Claude Desktop bridge, runtime health-check hook.
+- **v0.26** — `recall_answer` (deterministic extractive answers with
+  citations + gap-analysis, no LLM on the read path), optional local
+  cross-encoder reranker (ships default-off after an honest A/B),
+  recall-quality correctness sweep.
+- **v0.20–0.25** — shared HTTP daemon, session isolation, critic hook,
+  entity dedup canonicalization, distractor benchmark hardening.
 
-| Detected | Category | How |
-|----------|----------|-----|
-| CronCreate / ScheduleWakeup calls | `intent` | Regex on transcript |
-| "Remember this" / "Onthoud dit" | `decision` | Pattern matching |
-| Domain monitoring (whois checks) | `intent` | Command detection |
-| Key decisions ("we decided...") | `decision` | Language patterns |
-| Deployments (npm publish, etc.) | `event` | Command detection |
+### Explain mode
 
-### Full Pipeline Auto-Capture (v0.9.1)
-
-Auto-captured memories now go through the full store pipeline: dedup, contradiction detection, embeddings, entity extraction, and claims — via HTTP endpoint (`POST /api/store`). Falls back to raw SQL when HTTP is unavailable.
-
-Contradiction resolution now has three tiers:
-- **Supersede** (score > 0.5): old memory invalidated, new one takes over
-- **Coexist** (score 0.35–0.5): both kept, linked via `contradicts` edge in knowledge graph
-- **Flag** (score 0.3–0.35): reported for review
-
-### Explain Mode (v0.9.2)
-
-Every `search_memory` result includes an `explain` field:
+Every `search_memory` result includes an `explain` field so you can audit
+what the system remembers and why it surfaced:
 
 ```json
 {
@@ -486,13 +531,28 @@ Every `search_memory` result includes an `explain` field:
     "source_trust": { "level": "high", "reason": "Directly provided by user" },
     "temporal_validity": { "currently_valid": true, "superseded_by": null },
     "contradictions": [{ "memory_id": "abc", "content_preview": "...", "resolution": "coexist" }],
-    "claims": [{ "subject": "neuromcp", "predicate": "version", "object": "0.9.2" }],
+    "claims": [{ "subject": "neuromcp", "predicate": "version", "object": "0.26.0" }],
     "confidence": { "retrieval_score": 0.016, "source_trust_score": 1.0, "overall": 0.85 }
   }
 }
 ```
 
-We publish all of this — schema versions, consolidation math, critic output, benchmark numbers with CIs — so you can audit exactly what the system remembers and how. If another local-first system publishes the same or better, link welcome.
+Contradiction resolution is three-tier: **supersede** (score > 0.5, old
+memory invalidated), **coexist** (0.35–0.5, both kept + linked via a
+`contradicts` graph edge), **flag** (0.3–0.35, reported for review).
+
+## Troubleshooting
+
+```bash
+npx neuromcp-doctor
+```
+
+One run checks: Node version, native modules actually loadable
+(`better-sqlite3`, `sqlite-vec`), database openable, shared daemon
+`/health`, Ollama reachable + `nomic-embed-text` pulled, ONNX fallback
+model present. Exit codes: `0` healthy, `1` degraded (e.g. no Ollama —
+ONNX fallback active), `2` broken. Start every bug report with its
+output.
 
 ## Comparison
 

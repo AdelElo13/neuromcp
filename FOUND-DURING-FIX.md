@@ -463,3 +463,4 @@ selected sentence (or eligible content), or rename/redocument the field as
 - **P3 — `readJsonBody`/`readBoundedBody` gedupliceerd** in mcp-http-daemon.ts en http.ts (verschillende caps, zelfde logica). Extraheer naar `transport/body.ts`.
 - **P3 — geen timeout op request-body-inlezen** (slow-loris) in beide body-readers; relevant zodra `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1` gebruikt wordt.
 - **P3 — geen concurrency-test voor multi-client SQLite writes** (N parallelle store_memory tegen één daemon-DB); WAL+busy_timeout is geconfigureerd maar onbewezen onder contentie.
+- **P3 — flaky test onder volle suite-load:** `tests/integration/release-014-regressions.test.ts` › "embed.mjs returns {ok:false} for unknown memory id" faalde 1× met lege stdout (JSON parse error) tijdens parallelle full-suite run; geïsoleerd en bij herhaalde full run groen. Vermoedelijk subprocess-spawn contention. Overweeg retry of ruimere timeout op de runNode-helper.

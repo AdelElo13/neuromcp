@@ -22,6 +22,10 @@
     "scripts/launcher.sh",
     "scripts/run-consolidation.sh",
     "templates",
+    "examples",
+    "docs/QUICKSTART.md",
+    "docs/TOOLS.md",
+    "docs/BENCHMARK.md",
     "README.md",
     "LICENSE",
     "LICENSE-EXAMPLES"
@@ -63,6 +67,7 @@
   "bin": {
     "neuromcp": "bin/neuromcp.mjs",
     "neuromcp-daemon": "bin/neuromcp-daemon.mjs",
+    "neuromcp-init": "bin/init.mjs",
     "neuromcp-init-wiki": "bin/init-wiki.mjs",
     "neuromcp-enable-consolidation": "bin/enable-consolidation.mjs",
     "neuromcp-enable-zombie-cleanup": "bin/enable-zombie-cleanup.mjs",
@@ -81,6 +86,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src/ && tsc --noEmit",
+    "docs:tools": "tsx scripts/generate-tools-doc.ts",
+    "docs:tools:check": "tsx scripts/generate-tools-doc.ts --check",
     "eval": "tsx eval/runner.ts",
     "eval:baseline": "tsx eval/runner.ts --update-baseline",
     "postinstall": "node scripts/download-model.mjs || true"
