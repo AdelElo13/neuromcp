@@ -20,10 +20,13 @@
  *     { "type": "http", "url": "http://127.0.0.1:<PORT>/mcp" }
  *
  *   Claude Desktop (~/Library/Application Support/Claude/claude_desktop_config.json):
- *     stdio-only client — bridge via mcp-remote:
- *     { "command": "npx", "args": ["-y", "mcp-remote", "http://127.0.0.1:<PORT>/mcp"] }
- *     (Desktop's MCP runtime does not yet accept the native "type":"http" shape;
- *      mcp-remote translates HTTP/SSE → stdio for the desktop client.)
+ *     stdio-only client — bridge via neuromcp-connect (waits for the daemon
+ *     on cold boot, then hands off to mcp-remote):
+ *     { "command": "npx", "args": ["-y", "--package=neuromcp", "neuromcp-connect", "http://127.0.0.1:<PORT>/mcp"] }
+ *     (Desktop's MCP runtime does not yet accept the native "type":"http" shape.
+ *      A bare mcp-remote bridge works too, but exits fatally on ECONNREFUSED
+ *      when Desktop starts before the daemon has bound its port — see
+ *      bin/neuromcp-connect.mjs for the boot-race details.)
  *
  * The script does NOT mutate any client configs — those are for the user
  * to update intentionally. It only installs the daemon plist + loads it.
@@ -400,6 +403,8 @@ console.log(`  2. Update each MCP client to use http transport at http://${host}
 console.log(`     - Claude Code (~/.claude.json):`);
 console.log(`         "neuromcp": { "type": "http", "url": "http://${host}:${port}/mcp" }`);
 console.log(`     - Claude Desktop (~/Library/Application Support/Claude/claude_desktop_config.json):`);
-console.log(`         "neuromcp": { "command": "npx", "args": ["-y", "mcp-remote", "http://${host}:${port}/mcp"] }`);
-console.log(`         (Desktop is stdio-only; mcp-remote bridges to the daemon over HTTP.)`);
+console.log(`         "neuromcp": { "command": "npx", "args": ["-y", "--package=neuromcp", "neuromcp-connect", "http://${host}:${port}/mcp"] }`);
+console.log(`         (Desktop is stdio-only; neuromcp-connect waits for the daemon on cold`);
+console.log(`          boot — plain mcp-remote exits fatally if Desktop starts first — then`);
+console.log(`          bridges to the daemon over HTTP via mcp-remote.)`);
 console.log(`  3. Restart each client.\n`);
