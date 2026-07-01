@@ -6,12 +6,12 @@
     "url": "https://github.com/AdelElo13/neuromcp",
     "source": "github"
   },
-  "version": "0.27.0",
+  "version": "0.28.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "neuromcp",
-      "version": "0.27.0",
+      "version": "0.28.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

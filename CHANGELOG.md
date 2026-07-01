@@ -3,7 +3,7 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.28.0] — 2026-07-02
 
 DX release: the five-command setup becomes one command, the docs stop
 lying about what's shipped, and every published number gets a
