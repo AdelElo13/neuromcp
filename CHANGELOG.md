@@ -3,7 +3,12 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.27.0] — 2026-07-02
+
+Security + reliability release: a CRITICAL path-traversal fix in
+`wiki_ingest`, MCP-spec Origin validation on the daemon, the
+`neuromcp-connect` boot-race-safe Desktop bridge, and the runtime
+health-check SessionStart hook.
 
 ### Security
 
