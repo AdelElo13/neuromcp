@@ -5,24 +5,32 @@ This is the tight version. The [README](../README.md) has the deep details.
 ## 1. Install
 
 ```bash
-# Claude Code
-claude mcp add neuromcp -- npx -y neuromcp@latest
-
-# Claude Desktop / Cursor / Windsurf — any MCP client
-# Add to your MCP config:
-{
-  "mcpServers": {
-    "neuromcp": {
-      "command": "npx",
-      "args": ["-y", "neuromcp@latest"]
-    }
-  }
-}
+npx neuromcp-init
 ```
 
-That's it. First run creates `~/.neuromcp/memory.db` automatically.
+Detects your MCP clients (Claude Desktop, Claude Code, Cursor, Windsurf),
+writes the config for each (backing up the originals), and initializes
+the wiki + hooks. Prefer manual? Copy a config from
+[`examples/`](../examples/), e.g.:
 
-## 2. First store → first search
+```bash
+# Claude Code
+claude mcp add neuromcp -- npx -y neuromcp@latest
+```
+
+First run creates `~/.neuromcp/memory.db` automatically.
+
+## 2. Initialize the wiki + hooks (skip if you used neuromcp-init)
+
+```bash
+npx neuromcp-init-wiki
+```
+
+Required for the full experience on Claude Code: session-start context
+injection, session-end persistence, and the critic hook that closes the
+usefulness-attribution loop (step 5).
+
+## 3. First store → first search
 
 Inside a Claude Code session:
 
@@ -38,7 +46,7 @@ No setup, no API keys, no embeddings to configure. Default provider
 is Ollama (`nomic-embed-text`) if you have it running locally; it
 falls back to a built-in ONNX model otherwise.
 
-## 3. Optional: turn on local semantic search
+## 4. Optional: turn on local semantic search
 
 If Ollama is installed and running:
 
@@ -49,9 +57,9 @@ ollama pull nomic-embed-text
 neuromcp auto-detects it on next start. 768-dim embeddings, fully
 local, no data leaves your machine.
 
-## 4. The critic loop (auto-installed)
+## 5. The critic loop (auto-installed)
 
-`npx neuromcp-init-wiki` (from step 2) installs and registers the
+`npx neuromcp-init-wiki` (step 2) installs and registers the
 Stop hook `neuromcp-critic.cjs` automatically. After each Claude
 Code session, this scans the transcript, finds which memories Claude
 actually cited in its replies, and updates the usefulness prior so
@@ -68,7 +76,7 @@ For strict per-session isolation set `NEUROMCP_SESSION_ID` in your
 MCP server env (otherwise the critic falls back to temporal-only
 scoping, which is still correct — just less paranoid).
 
-## 5. See what's working
+## 6. See what's working
 
 ```
 User: what do you remember about me?
@@ -95,13 +103,23 @@ node scripts/ab-sweep.mjs                      # retrospective A/B
   graph + Kimi AttnRes-style attention all in one ranker
 - **Thompson sampling exploration** (v0.17.0): no rich-get-richer
   feedback loops
-- **41+ MCP tools**: episodes, clusters, spaced repetition,
+- **[46 MCP tools](TOOLS.md)**: episodes, clusters, spaced repetition,
   consolidation, reflection — everything an agent needs to reason
   over persistent context
+
+## Something broken?
+
+```bash
+npx neuromcp-doctor
+```
+
+Checks Node, native modules, the database, the shared daemon, Ollama and
+the ONNX fallback in one run, with a fix-hint per failure.
 
 ## Where to go next
 
 - `README.md` — the full feature tour
+- `docs/TOOLS.md` — all 46 MCP tools, auto-generated from the registrations
 - `CHANGELOG.md` — what's new in the latest release
 - `ROADMAP.md` — what's planned
 - `eval/longmemeval-runner.ts` — run the benchmark on your machine

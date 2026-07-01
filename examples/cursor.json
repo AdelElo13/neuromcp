@@ -1,0 +1,9 @@
+{
+  "$comment": "Cursor — ~/.cursor/mcp.json (global) or .cursor/mcp.json in a project.",
+  "mcpServers": {
+    "neuromcp": {
+      "command": "npx",
+      "args": ["-y", "neuromcp"]
+    }
+  }
+}

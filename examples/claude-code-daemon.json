@@ -1,0 +1,9 @@
+{
+  "$comment": "Claude Code with the shared daemon — native HTTP transport, no bridge process needed. Requires `npx neuromcp-enable-daemon --port 3200` once.",
+  "mcpServers": {
+    "neuromcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:3200/mcp"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "$comment": "Claude Code — add under mcpServers in ~/.claude.json (global) or a project-local .mcp.json.",
+  "mcpServers": {
+    "neuromcp": {
+      "command": "npx",
+      "args": ["-y", "neuromcp"]
+    }
+  }
+}

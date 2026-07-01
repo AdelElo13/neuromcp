@@ -1,0 +1,9 @@
+{
+  "$comment": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — shared-daemon setup. Requires `npx neuromcp-enable-daemon --port 3200` once. neuromcp-connect waits for the daemon on cold boot, then bridges stdio to HTTP.",
+  "mcpServers": {
+    "neuromcp": {
+      "command": "npx",
+      "args": ["-y", "--package=neuromcp", "neuromcp-connect", "http://127.0.0.1:3200/mcp"]
+    }
+  }
+}

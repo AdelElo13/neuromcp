@@ -3,6 +3,52 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+DX release: the five-command setup becomes one command, the docs stop
+lying about what's shipped, and every published number gets a
+reproduction path.
+
+### Added
+
+- **`neuromcp-init` — one-command setup.** Detects installed MCP clients
+  (Claude Desktop, Claude Code, Cursor, Windsurf), writes the `neuromcp`
+  entry into each config (merge-only, `.bak-<date>` backup first, never
+  touches other servers), runs the wiki init, and probes Ollama with an
+  honest ONNX-fallback notice. `--dry-run` previews, `--client` targets,
+  `--yes` overwrites. 32 unit tests against temp dirs.
+  (`bin/init.mjs`, `tests/unit/init-cli.test.ts`)
+- **`docs/TOOLS.md` — auto-generated tool reference.** Generated from the
+  actual `register*Tools` registrations (46 tools, 8 families) so names,
+  descriptions and parameters are exactly what an MCP client sees. CI
+  fails when it drifts (`npm run docs:tools:check`). Kills the
+  42-vs-40+-vs-41+ tool-count drift for good.
+  (`scripts/generate-tools-doc.ts`)
+- **`docs/BENCHMARK.md` — reproduction guide.** Every published number
+  with its exact command, sample size, CI, and an explicit
+  "what we do NOT claim" section.
+- **`examples/`** — copy-paste client configs (Desktop stdio + daemon
+  bridge, Claude Code stdio + native HTTP, Cursor), MIT-licensed; the
+  directory the LICENSE carve-out referenced now actually exists.
+
+### Changed
+
+- **`neuromcp-doctor` rebuilt as real triage** (25 unit tests): probes
+  daemon `/health`, Ollama + `nomic-embed-text` presence, ONNX fallback
+  model, and opens the database read-only with a `quick_check` — each
+  failure with a concrete fix-hint. The better-sqlite3 check now actually
+  loads the module instead of testing a hardcoded path (which produced
+  false negatives on hoisted npm installs). Exit codes: 0 healthy /
+  1 degraded / 2 broken. (`bin/doctor.mjs`)
+- **README refresh to v0.27 reality**: shared-daemon + `neuromcp-connect`
+  section (previously undocumented outside code comments), platform
+  support matrix (honest about Windows being untested), MCP surface
+  table linking the generated TOOLS.md, retrieval tool disambiguation
+  (`search_memory` vs `recall_answer` vs `recall_memory` vs
+  `search_all`), stale "What's New in v0.9" replaced, tests badge
+  297 → 528. QUICKSTART step numbering and init-wiki cross-references
+  fixed.
+
 ## [0.27.0] — 2026-07-02
 
 Security + reliability release: a CRITICAL path-traversal fix in

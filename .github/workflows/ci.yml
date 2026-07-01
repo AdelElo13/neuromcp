@@ -28,6 +28,9 @@ jobs:
       - name: Type check
         run: npm run lint
 
+      - name: Tool docs up to date
+        run: npm run docs:tools:check
+
       - name: Download ONNX model
         run: npx tsx scripts/download-model.ts
 
