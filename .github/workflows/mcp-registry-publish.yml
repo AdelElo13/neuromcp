@@ -1,0 +1,78 @@
+name: Publish to MCP Registry
+
+# Publishes server.json to registry.modelcontextprotocol.io using GitHub
+# OIDC — no stored tokens, no interactive device flow. OIDC proves this
+# workflow runs in AdelElo13's repo, which authorizes the
+# io.github.AdelElo13/* namespace.
+#
+# IMPORTANT ordering: the registry validates that the referenced npm
+# package version exists on npmjs.org AND carries the matching "mcpName"
+# field — so `npm publish` must have happened first. Run this workflow
+# after the npm release is live (automatically on GitHub release publish,
+# or manually via workflow_dispatch with an explicit version).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (must already exist on npm), e.g. 0.27.0'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${REF_NAME#v}"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' is not a valid semver version"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Verify the npm package version exists (registry validates against it)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          MCPNAME=$(npm view "neuromcp@$VERSION" mcpName 2>/dev/null || true)
+          if [ "$MCPNAME" != "io.github.AdelElo13/neuromcp" ]; then
+            echo "::error::neuromcp@$VERSION is not on npm (or lacks mcpName) — publish to npm first."
+            exit 1
+          fi
+
+      - name: Patch server.json to the release version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          jq --arg v "$VERSION" '.version = $v | .packages[].version = $v' server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+
+      - name: Login (GitHub OIDC) and publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
