@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`templates/hooks/neuromcp-health-check.cjs` — runtime health surface.**
+  New SessionStart hook that probes 5 dimensions of pipeline health (DB
+  intact, wiki freshness, consolidation backlog, last consolidation
+  result, `claude -p` subprocess auth). One-liner when healthy, full
+  report + remediation hints when degraded (exit 0/1/2 = healthy /
+  warnings / broken). Closes the silent-failure gap where a degraded
+  install (stalled wiki, broken cron auth) went unnoticed for days.
+  `bin/init-wiki.mjs` copies the hook and auto-registers it under
+  `SessionStart:health-check` in `~/.claude/settings.json` — idempotent.
 - **`neuromcp-connect` bin — boot-race-safe stdio bridge to the daemon.**
   On a cold boot, stdio-only clients (Claude Desktop) spawn their MCP
   bridges within seconds of login, while the launchd daemon can take
