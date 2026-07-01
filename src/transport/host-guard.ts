@@ -53,3 +53,30 @@ export function isAllowedHost(
   }
   return ALLOWED_HOSTS.has(host) || extraAllowed.has(host);
 }
+
+/**
+ * Origin validation for the MCP Streamable HTTP endpoint, per the MCP spec's
+ * DNS-rebinding guidance — a REJECTION layer, not just a CORS-echo decision.
+ *
+ * Policy:
+ *  - Absent/empty Origin → allowed. curl and native MCP clients send no
+ *    Origin; rebinding attacks originate in browsers, which always send one.
+ *  - Loopback origins (any scheme/port) or `extraAllowed` hosts → allowed.
+ *  - Everything else — foreign hosts, the literal "null" origin (sandboxed
+ *    iframe / file://), malformed values — → rejected.
+ */
+export function isAllowedOrigin(
+  rawOrigin: string | string[] | undefined,
+  extraAllowed: ReadonlySet<string> = new Set(),
+): boolean {
+  const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+  if (origin === undefined || origin === '') return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false; // covers "null" and garbage values
+  }
+  const host = parsed.hostname.toLowerCase();
+  return ALLOWED_HOSTS.has(host) || extraAllowed.has(host);
+}

@@ -454,3 +454,12 @@ selected sentence (or eligible content), or rename/redocument the field as
 "retrieved candidates." Cosmetic; no correctness impact.
 
 **Severity:** P3 — transparency/labeling only, no fabrication risk.
+
+## [2026-07-02] Gevonden tijdens security-fix (path traversal + Origin)
+
+- **P2 — `scripts/__pycache__/consolidate-sessions.cpython-312.pyc` is git-tracked.** Compiled Python cache hoort niet in git; blokkeerde vandaag een branch-switch. Fix: `git rm --cached`, `__pycache__/` in .gitignore.
+- **P2 — `wiki.ts` god-file (665+ regels, 3 onafhankelijke tools).** Split naar `wiki/ingest.ts`, `wiki/lint.ts`, `wiki/briefing.ts`, `wiki/shared.ts`. Lage cohesie was mede-oorzaak dat de traversal-bug onopgemerkt bleef.
+- **P2 — `/api/store-batch` lekt rauwe error-details (`detail: msg`) naar de client** terwijl `/api/store` bewust filtert (src/transport/http.ts:348-356 vs 321-329). Consolideer naar één patroon.
+- **P3 — `readJsonBody`/`readBoundedBody` gedupliceerd** in mcp-http-daemon.ts en http.ts (verschillende caps, zelfde logica). Extraheer naar `transport/body.ts`.
+- **P3 — geen timeout op request-body-inlezen** (slow-loris) in beide body-readers; relevant zodra `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1` gebruikt wordt.
+- **P3 — geen concurrency-test voor multi-client SQLite writes** (N parallelle store_memory tegen één daemon-DB); WAL+busy_timeout is geconfigureerd maar onbewezen onder contentie.

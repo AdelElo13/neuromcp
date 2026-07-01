@@ -16,7 +16,7 @@ import type { NeuromcpConfig } from '../config.js';
 import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import { createRestRequestHandler, type HttpDeps } from './http.js';
-import { isAllowedHost } from './host-guard.js';
+import { isAllowedHost, isAllowedOrigin } from './host-guard.js';
 
 /** Result of starting the daemon: the server plus a graceful shutdown hook. */
 export interface DaemonHandle {
@@ -496,6 +496,15 @@ export async function startMcpHttpDaemon(
       return;
     }
     if (url.pathname === '/mcp') {
+      // MCP-spec Origin validation (defense-in-depth beyond the Host
+      // guard): a browser-context request carrying a non-loopback Origin
+      // is REJECTED outright — previously the Origin header only decided
+      // which ACAO value to echo, so a non-preflighted request with a
+      // hostile Origin sailed through as long as the Host header matched.
+      if (!isAllowedOrigin(req.headers.origin, extraAllowed)) {
+        writeJsonError(res, 403, 'forbidden_origin');
+        return;
+      }
       // CORS handling on /mcp itself. Without this, a browser-based MCP
       // client gets a preflight failure and a sessionId header it cannot
       // read. Loopback-only reflection — same policy as the REST handler.

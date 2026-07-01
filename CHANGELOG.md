@@ -5,6 +5,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **FIX (CRITICAL, CWE-22): path traversal in `wiki_ingest` allowed
+  arbitrary file read.** The `filename` tool input was joined onto
+  `<wikiDir>/raw-sources` unvalidated; `path.join` normalises `../`
+  chains out of the base directory and the full file content was
+  returned to the MCP client — any client (or a prompt-injected LLM
+  driving one) could exfiltrate arbitrary host files through a single
+  tool call. Now only plain basenames are accepted, rejected before any
+  filesystem access, enforced at both the tool layer and the Zod input
+  schema. Regression tests cover `../` chains, embedded traversal,
+  absolute paths, backslash variants and NUL bytes.
+  (`src/tools/wiki.ts`, `src/registration/wiki.ts`,
+  `tests/unit/wiki-ingest-security.test.ts`)
+- **FIX: `/mcp` now REJECTS non-loopback `Origin` headers with 403.**
+  Per the MCP Streamable HTTP spec's DNS-rebinding guidance, Origin must
+  be validated as a rejection layer — previously it only decided which
+  `Access-Control-Allow-Origin` value to echo, so a non-preflighted
+  browser request with a hostile Origin passed as long as the Host
+  header matched. Absent Origin (curl, native MCP clients) remains
+  allowed; loopback and `extraAllowed` hosts pass. New shared
+  `isAllowedOrigin` guard next to `isAllowedHost`.
+  (`src/transport/host-guard.ts`, `src/transport/mcp-http-daemon.ts`,
+  `tests/unit/origin-guard.test.ts`)
+
 ### Added
 
 - **`neuromcp-connect` bin — boot-race-safe stdio bridge to the daemon.**
