@@ -247,6 +247,34 @@ describe('MCP HTTP daemon E2E (Streamable HTTP transport)', () => {
     expect(res.headers['access-control-allow-origin']).toBe('http://127.0.0.1:3999');
   });
 
+  it('REJECTS a /mcp request carrying a non-loopback Origin with 403 (MCP-spec Origin validation)', async () => {
+    const res = await rawHttp(
+      'POST',
+      `${baseUrl}/mcp`,
+      {
+        'Content-Type': 'application/json',
+        'Accept': MCP_ACCEPT,
+        'Origin': 'https://attacker.example.com',
+      },
+      JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'evil', version: '0' }, capabilities: {} } }),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('still ACCEPTS a /mcp request with a loopback Origin', async () => {
+    const res = await rawHttp(
+      'POST',
+      `${baseUrl}/mcp`,
+      {
+        'Content-Type': 'application/json',
+        'Accept': MCP_ACCEPT,
+        'Origin': 'http://127.0.0.1:6274',
+      },
+      JSON.stringify({ jsonrpc: '2.0', id: 100, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'inspector', version: '0' }, capabilities: {} } }),
+    );
+    expect(res.status).toBe(200);
+  });
+
   it('GET /health (legacy REST endpoint) still served on the same port', async () => {
     const res = await rawHttp('GET', `${baseUrl}/health`, { 'Accept': 'application/json' });
     expect(res.status).toBe(200);

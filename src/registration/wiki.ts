@@ -11,7 +11,11 @@ export function registerWikiTools(server: McpServer, deps: ServerDeps): void {
     description:
       'Read a file from the wiki raw-sources/ directory and extract structured metadata (title, type, key concepts, related pages). Returns analysis the LLM uses to decide which wiki pages to create or update. Does NOT write pages itself.',
     inputSchema: {
-      filename: z.string().describe('Name of the file in raw-sources/ (e.g. "article.md")'),
+      filename: z
+        .string()
+        .min(1)
+        .regex(/^[^/\\\0]+$/, 'must be a plain file name (no path separators)')
+        .describe('Name of the file in raw-sources/ (e.g. "article.md") — plain file name only, no paths'),
     },
   }, (args) => {
     const result = wikiIngest(args, { config, logger });

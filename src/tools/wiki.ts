@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Logger } from '../observability/logger.js';
 import type { NeuromcpConfig } from '../config.js';
 
@@ -162,7 +162,30 @@ export function wikiIngest(input: IngestInput, deps: IngestDeps): IngestResult {
   const { config, logger } = deps;
   const wikiDir = config.wikiDir;
   const rawDir = join(wikiDir, 'raw-sources');
-  const filePath = join(rawDir, input.filename);
+
+  // CWE-22 guard: `filename` is attacker-reachable tool input and the file
+  // content is returned to the client verbatim. `join()` normalises `../`
+  // chains right out of rawDir, so only a plain basename is acceptable —
+  // reject BEFORE touching the filesystem.
+  const filename = input.filename;
+  if (
+    filename.length === 0 ||
+    filename.includes('/') ||
+    filename.includes('\\') ||
+    filename.includes('\0') ||
+    filename === '.' ||
+    filename === '..'
+  ) {
+    throw new Error(
+      `Invalid filename: must be a plain file name inside raw-sources/ (got: ${JSON.stringify(filename)})`,
+    );
+  }
+  const filePath = join(rawDir, filename);
+  // Belt-and-braces: even with the basename check above, verify the
+  // resolved path stays inside raw-sources/.
+  if (resolve(filePath) !== join(resolve(rawDir), filename)) {
+    throw new Error(`Invalid filename: resolves outside raw-sources/ (got: ${JSON.stringify(filename)})`);
+  }
 
   if (!existsSync(filePath)) {
     throw new Error(`File not found: ${input.filename} in ${rawDir}`);
