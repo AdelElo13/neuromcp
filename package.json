@@ -67,6 +67,7 @@
     "neuromcp-enable-consolidation": "bin/enable-consolidation.mjs",
     "neuromcp-enable-zombie-cleanup": "bin/enable-zombie-cleanup.mjs",
     "neuromcp-enable-daemon": "bin/enable-daemon.mjs",
+    "neuromcp-connect": "bin/neuromcp-connect.mjs",
     "neuromcp-index-wiki": "scripts/index-wiki.mjs",
     "neuromcp-backfill-embeddings": "scripts/backfill-embeddings.mjs",
     "neuromcp-query": "bin/query.mjs",

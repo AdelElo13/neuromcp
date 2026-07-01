@@ -3,6 +3,33 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`neuromcp-connect` bin — boot-race-safe stdio bridge to the daemon.**
+  On a cold boot, stdio-only clients (Claude Desktop) spawn their MCP
+  bridges within seconds of login, while the launchd daemon can take
+  60–90s to bind its port under boot I/O contention. A bare
+  `npx -y mcp-remote http://…/mcp` exits fatally on ECONNREFUSED (no
+  retry) and the client permanently shows "Server disconnected" until
+  manually restarted — observed 72× on the reference machine.
+  `neuromcp-connect` polls the daemon's `/health` endpoint (bounded at
+  ~55s, under Desktop's initialize timeout), kickstarts the launchd agent
+  if the first probe fails, and only then hands off to `mcp-remote`.
+  (`bin/neuromcp-connect.mjs`, `tests/unit/neuromcp-connect.test.ts`)
+
+### Fixed
+
+- **Daemon plist template no longer sets `LowPriorityIO`.** It throttled
+  disk reads exactly when it hurt most: cold boot, while node + native
+  modules (better-sqlite3, onnxruntime) load under login I/O contention —
+  the main contributor to the daemon losing the startup race above.
+  (`scripts/com.neuromcp.daemon.plist.template`)
+- `neuromcp-enable-daemon` next-steps output now recommends the
+  `neuromcp-connect` bridge for Claude Desktop instead of a bare
+  `mcp-remote` command. (`bin/enable-daemon.mjs`)
+
 ## [0.26.0] — 2026-06-14
 
 Recall-quality release: two new retrieval capabilities plus a sweep of P1

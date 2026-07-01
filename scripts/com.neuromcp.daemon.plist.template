@@ -59,10 +59,16 @@
     <key>StandardErrorPath</key>
     <string>{{HOME}}/.neuromcp/daemon.err.log</string>
 
+    <!--
+      ProcessType Background is enough to keep the daemon polite.
+      Deliberately NO LowPriorityIO: it throttles disk reads during the
+      one moment that matters most — cold boot, when node + native modules
+      (better-sqlite3, onnxruntime) load under heavy login I/O contention.
+      With LowPriorityIO the daemon took 60-90s to bind its port, losing
+      the race against stdio clients (Claude Desktop) that spawn their
+      MCP bridges within seconds of login.
+    -->
     <key>ProcessType</key>
     <string>Background</string>
-
-    <key>LowPriorityIO</key>
-    <true/>
 </dict>
 </plist>
