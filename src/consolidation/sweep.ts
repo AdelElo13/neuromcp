@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { ProposedSweep, ProposedPrune } from '../types.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 /**
  * Finds active memories that have passed their expires_at timestamp.
@@ -13,6 +14,9 @@ export function findExpired(
   const nsParams = isAll ? [] : [namespace];
 
   const now = new Date().toISOString();
+  // v0.29 (Codex Task1 #2): don't sweep superseded/window-closed rows — they
+  // are historical and must stay valid_at-queryable.
+  const validity = currentValiditySql(now);
 
   const rows = db
     .prepare(
@@ -20,9 +24,10 @@ export function findExpired(
        WHERE is_deleted = 0
          AND expires_at IS NOT NULL
          AND expires_at < ?
-         AND ${nsClause}`,
+         AND ${nsClause}
+         AND (${validity.clause})`,
     )
-    .all(now, ...nsParams) as Array<{ id: string; expires_at: string }>;
+    .all(now, ...nsParams, ...validity.params) as Array<{ id: string; expires_at: string }>;
 
   return rows.map((row) => ({
     id: row.id,
@@ -49,6 +54,10 @@ export function findStale(
   const nsClause = isAll ? '1=1' : 'namespace = ?';
   const nsParams = isAll ? [] : [namespace];
 
+  // v0.29 (Codex Task1 #2): superseded/window-closed rows are historical —
+  // exclude them from stale-prune candidate selection.
+  const validity = currentValiditySql(new Date().toISOString());
+
   const rows = db
     .prepare(
       `SELECT id, importance, access_count,
@@ -58,9 +67,10 @@ export function findStale(
        WHERE is_deleted = 0
          AND importance < ?
          AND julianday('now') - julianday(COALESCE(last_accessed_at, created_at)) > ?
-         AND ${nsClause}`,
+         AND ${nsClause}
+         AND (${validity.clause})`,
     )
-    .all(maxImportance, staleDays, ...nsParams) as Array<{
+    .all(maxImportance, staleDays, ...nsParams, ...validity.params) as Array<{
       id: string;
       importance: number;
       access_count: number;

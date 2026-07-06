@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { ProposedDecay, ProposedPrune } from '../types.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 export interface DecayResult {
   readonly decays: readonly ProposedDecay[];
@@ -27,6 +28,11 @@ export function computeDecay(
   const nsClause = isAll ? '1=1' : 'namespace = ?';
   const nsParams = isAll ? [] : [namespace];
 
+  // v0.29 (Codex Task1 #2): exclude superseded/window-closed rows from decay +
+  // prune candidate selection — they are historical and must survive
+  // consolidation so valid_at recall keeps working.
+  const validity = currentValiditySql(new Date().toISOString());
+
   // Decay operates on the COMPUTED importance (v14 split): it reads and the
   // executor writes effective_importance; the user-supplied importance
   // column is never system-mutated.
@@ -35,9 +41,9 @@ export function computeDecay(
       `SELECT id, COALESCE(effective_importance, importance) AS importance,
               access_count, created_at, last_accessed_at, source, source_trust
        FROM memories
-       WHERE is_deleted = 0 AND ${nsClause}`,
+       WHERE is_deleted = 0 AND ${nsClause} AND (${validity.clause})`,
     )
-    .all(...nsParams) as Array<{
+    .all(...nsParams, ...validity.params) as Array<{
     id: string;
     importance: number;
     access_count: number;

@@ -3,6 +3,7 @@ import type { VectorStore } from '../vectors/types.js';
 import type { ProposedMerge } from '../types.js';
 import { isHigherTrust } from '../governance/trust.js';
 import type { TrustLevel } from '../types.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 /**
  * Scans all active memories in a namespace and finds pairs whose cosine
@@ -19,11 +20,16 @@ export function findDuplicates(
   const nsClause = isAll ? '1=1' : 'namespace = ?';
   const nsParams = isAll ? [] : [namespace];
 
+  // v0.29 (Codex Task1 #2): superseded / window-closed rows are historical —
+  // never merge them away, or valid_at recall and the supersession chain
+  // break. Restrict candidate selection to currently-valid rows.
+  const validity = currentValiditySql(new Date().toISOString());
+
   const rows = db
     .prepare(
-      `SELECT id, content, tags, importance, effective_importance, source_trust FROM memories WHERE is_deleted = 0 AND ${nsClause}`,
+      `SELECT id, content, tags, importance, effective_importance, source_trust FROM memories WHERE is_deleted = 0 AND ${nsClause} AND (${validity.clause})`,
     )
-    .all(...nsParams) as Array<{
+    .all(...nsParams, ...validity.params) as Array<{
     id: string;
     content: string;
     tags: string;
@@ -73,9 +79,9 @@ export function findDuplicates(
       // Verify the neighbor is active and in the same namespace
       const neighborRow = db
         .prepare(
-          'SELECT id, content, tags, importance, effective_importance, source_trust FROM memories WHERE id = ? AND is_deleted = 0',
+          `SELECT id, content, tags, importance, effective_importance, source_trust FROM memories WHERE id = ? AND is_deleted = 0 AND (${validity.clause})`,
         )
-        .get(neighbor.id) as
+        .get(neighbor.id, ...validity.params) as
         | {
             id: string;
             content: string;
