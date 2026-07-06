@@ -3,6 +3,31 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.1] — 2026-07-07
+
+Web-view graph upgrade + Obsidian polish (independent Codex review applied).
+
+### Added
+
+- **Force-directed knowledge-graph in the `/ui` web view.** The Graph panel
+  is now an interactive `<canvas>` force graph (hand-rolled spring/repulsion,
+  no external lib — CSP-safe): drag nodes, scroll to zoom, pan, hover
+  highlights neighbours. Nodes keyed by entity id (fixes namespace='*' name
+  collisions), sized by memory count, coloured by entity type. Idle-cooling:
+  the sim stops when settled and wakes on interaction (0 CPU when idle).
+- **`GET /api/entity/:id/memories`** — real entity→memories via the
+  `memory_entities` join (default-current, `include_superseded` opt-in). A
+  node click now loads that, not a name-based topic search.
+- **`neuromcp-init-wiki` seeds a minimal `.obsidian/` vault config** so the
+  wiki opens in Obsidian with the graph/backlink plugins enabled and a
+  category-coloured graph (folders → colour groups) out-of-the-box.
+  Non-destructive: an existing `.obsidian/` (user's own vault setup) is never
+  overwritten. Does not touch Obsidian's global vault registry.
+
+### Security
+
+- `/ui` CSP hardened with `frame-ancestors 'none'` and `img-src 'self' data:`.
+
 ## [0.29.0] — 2026-07-06
 
 ### Fixed
