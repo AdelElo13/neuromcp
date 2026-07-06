@@ -21,8 +21,11 @@ export async function computeSurprise(
 ): Promise<number> {
   const embedding = await embedder.embed(content);
 
-  // Search for nearest neighbors
-  const neighbors = vecStore.search(embedding, 5);
+  // Search for nearest neighbors. v0.29 Fase 1B (Codex [MEDIUM], same bug
+  // family): push the namespace into the vec query so other namespaces cannot
+  // fill the top-k and skew the surprise score. '*' → undefined (all).
+  const scopedNamespace = namespace === '*' ? undefined : namespace;
+  const neighbors = vecStore.search(embedding, 5, scopedNamespace);
 
   if (neighbors.length === 0) {
     // No existing memories — maximum surprise

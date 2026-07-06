@@ -170,10 +170,14 @@ export async function storeMemory(
   // Step 2: Generate embedding
   const embedding = await embedder.embed(input.content);
 
-  // Step 3: Semantic dedup — search for nearest neighbors
-  // But check for contradictions first: if content has factual differences
-  // (numbers, opposites) despite high similarity, it's a contradiction, not a duplicate
-  const neighbors = vecStore.search(embedding, 5);
+  // Step 3: Semantic dedup — search for nearest neighbors.
+  // v0.29 Fase 1B (Codex [MEDIUM]): push the namespace into the vec query so
+  // other namespaces' near-duplicates cannot fill the top-k and starve the
+  // same-namespace dedup match (the loop below filters by namespace anyway,
+  // but only over whatever the global top-k happened to surface).
+  // '*' means all namespaces → undefined (no vec-side filter).
+  const scopedNamespace = namespace === '*' ? undefined : namespace;
+  const neighbors = vecStore.search(embedding, 5, scopedNamespace);
 
   for (const neighbor of neighbors) {
     const similarity = 1 - neighbor.distance;

@@ -96,7 +96,11 @@ export async function detectContradictions(
   threshold: number,
 ): Promise<readonly Contradiction[]> {
   const embedding = await embedder.embed(content);
-  const neighbors = vecStore.search(embedding, 10);
+  // v0.29 Fase 1B (Codex [MEDIUM]): push the namespace into the vec query so
+  // other namespaces cannot fill the global top-k and hide same-namespace
+  // contradictions. '*' → undefined (search all namespaces).
+  const scopedNamespace = namespace === '*' ? undefined : namespace;
+  const neighbors = vecStore.search(embedding, 10, scopedNamespace);
 
   const contradictions: Contradiction[] = [];
   const contentLower = content.toLowerCase();
