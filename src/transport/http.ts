@@ -10,9 +10,13 @@ import type { Metrics } from '../observability/metrics.js';
 import { searchMemory } from '../tools/search.js';
 import { storeMemory } from '../tools/store.js';
 import { storeMemoryBatch } from '../tools/store-batch.js';
+import { queryGraph } from '../tools/graph.js';
+import { memoryTimeline } from '../tools/timeline.js';
+import { recallMemory } from '../tools/recall.js';
 import { eventBus } from './events.js';
 import { isAllowedHost } from './host-guard.js';
 import { currentValiditySql } from '../governance/validity.js';
+import { WEB_UI_HTML } from './web-ui.js';
 
 // Resolved once at startup from the module's runtime location. The source
 // tree lives in src/transport/ so `../../package.json` is correct for tsx
@@ -116,6 +120,15 @@ export function createRestRequestHandler(
   deps?: HttpDeps,
   extraAllowedHosts: ReadonlySet<string> = new Set(),
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  // v0.29 Fase 3: the read-only web-view (/ui) and its browse APIs
+  // (/api/graph, /api/timeline, /api/memory/:id) expose the whole memory
+  // store to any browser that can reach the daemon. They are ONLY safe on a
+  // loopback-only bind. A non-empty extraAllowedHosts means the operator
+  // opted into NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK — in that case the
+  // memory browser is DISABLED (routes fall through to 404) so we never
+  // publish an unauthenticated memory-browser to the network.
+  const webUiEnabled = extraAllowedHosts.size === 0;
+
   return async (req, res) => {
     // DNS-rebinding guard. Reject any request whose Host header is not an
     // allowed loopback host (or an operator-opted-in extra host) BEFORE
@@ -368,10 +381,14 @@ export function createRestRequestHandler(
         const msg = err instanceof Error ? err.message : String(err);
         if (msg === 'payload_too_large_handled') return; // 413 already written
         const stack = err instanceof Error ? err.stack : undefined;
+        // v0.29 Fase 3: log the detail server-side, but do NOT leak it in the
+        // response — match the /api/store generic-message pattern. Returning
+        // `detail: msg` echoed internal error strings (paths, SQL) to any
+        // caller.
         logger.warn('http', 'Batch store API failed', { error: msg, stack });
         if (!res.headersSent) {
           res.writeHead(500, jsonHeaders());
-          res.end(JSON.stringify({ error: 'batch store failed', detail: msg }));
+          res.end(JSON.stringify({ error: 'batch store failed' }));
         }
       }
       return;
@@ -395,6 +412,96 @@ export function createRestRequestHandler(
       req.on('close', () => { eventBus.off('memory', listener); });
       res.write(': keepalive\n\n');
       return;
+    }
+
+    // ─── v0.29 Fase 3: read-only web-view (loopback-only) ──────────────
+    // Disabled entirely under a non-loopback bind (webUiEnabled === false):
+    // these routes fall through to 404 so no unauthenticated memory browser
+    // is published to the network.
+    if (webUiEnabled && deps) {
+      // GET /ui — self-contained, read-only memory browser. Strict CSP so the
+      // page can only talk to same-origin and cannot pull external resources.
+      if (url.pathname === '/ui' && req.method === 'GET') {
+        const uiHeaders: Record<string, string> = {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy':
+            "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+        };
+        if (allowedOrigin !== null) uiHeaders['Access-Control-Allow-Origin'] = allowedOrigin;
+        res.writeHead(200, uiHeaders);
+        res.end(WEB_UI_HTML);
+        return;
+      }
+
+      // GET /api/graph — knowledge-graph overview (nodes + edges).
+      if (url.pathname === '/api/graph' && req.method === 'GET') {
+        try {
+          const namespace = url.searchParams.get('namespace') ?? deps.config.defaultNamespace;
+          const limitRaw = parseInt(url.searchParams.get('limit') ?? '50', 10);
+          const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+          const result = queryGraph({ namespace, limit }, deps.db, deps.config, logger, deps.metrics);
+          res.writeHead(200, jsonHeaders());
+          res.end(JSON.stringify(result));
+        } catch (err: unknown) {
+          logger.warn('http', 'Graph API failed', { error: err instanceof Error ? err.message : String(err) });
+          res.writeHead(500, jsonHeaders());
+          res.end(JSON.stringify({ error: 'graph failed' }));
+        }
+        return;
+      }
+
+      // GET /api/timeline — topic evolution (current-only by default).
+      if (url.pathname === '/api/timeline' && req.method === 'GET') {
+        const query = url.searchParams.get('query') ?? '';
+        if (!query) {
+          res.writeHead(400, jsonHeaders());
+          res.end(JSON.stringify({ error: 'query parameter required' }));
+          return;
+        }
+        try {
+          const namespace = url.searchParams.get('namespace') ?? deps.config.defaultNamespace;
+          const includeSuperseded = url.searchParams.get('include_superseded') === '1';
+          const result = memoryTimeline(
+            deps.db,
+            { query, namespace, include_superseded: includeSuperseded },
+            deps.config.defaultNamespace,
+          );
+          res.writeHead(200, jsonHeaders());
+          res.end(JSON.stringify(result));
+        } catch (err: unknown) {
+          logger.warn('http', 'Timeline API failed', { error: err instanceof Error ? err.message : String(err) });
+          res.writeHead(500, jsonHeaders());
+          res.end(JSON.stringify({ error: 'timeline failed' }));
+        }
+        return;
+      }
+
+      // GET /api/memory/:id — single memory by id (id-lookup bypass).
+      if (url.pathname.startsWith('/api/memory/') && req.method === 'GET') {
+        const id = decodeURIComponent(url.pathname.slice('/api/memory/'.length));
+        if (!id) {
+          res.writeHead(400, jsonHeaders());
+          res.end(JSON.stringify({ error: 'id required' }));
+          return;
+        }
+        try {
+          const rows = recallMemory({ id }, deps.db, deps.config, logger, deps.metrics);
+          if (rows.length === 0) {
+            res.writeHead(404, jsonHeaders());
+            res.end(JSON.stringify({ error: 'not_found' }));
+            return;
+          }
+          res.writeHead(200, jsonHeaders());
+          res.end(JSON.stringify(rows[0]));
+        } catch (err: unknown) {
+          logger.warn('http', 'Memory API failed', { error: err instanceof Error ? err.message : String(err) });
+          res.writeHead(500, jsonHeaders());
+          res.end(JSON.stringify({ error: 'memory failed' }));
+        }
+        return;
+      }
     }
 
     // 404

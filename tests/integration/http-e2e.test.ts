@@ -187,4 +187,18 @@ describe('HTTP transport E2E', () => {
     expect(status).toBe(404);
     expect((data as Record<string, string>).error).toBe('not_found');
   });
+
+  // v0.29 Fase 3: /api/store-batch must not echo internal error detail.
+  it('POST /api/store-batch does not leak error detail on failure', async () => {
+    // items present but malformed (item without content) forces a store error
+    // deeper in the pipeline; the response must carry only a generic message.
+    const { status, data } = await httpReq('POST', `${baseUrl}/api/store-batch`, {
+      items: [{ notcontent: 'x' }],
+    });
+    // Either a clean handled error — but never a `detail` field leaking internals.
+    expect(data).not.toHaveProperty('detail');
+    if (status === 500) {
+      expect((data as Record<string, string>).error).toBe('batch store failed');
+    }
+  });
 });

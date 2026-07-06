@@ -117,6 +117,12 @@ export function queryGraph(
   // entities-by-edge-count response without having to invent a start node.
   if (entityId === undefined) {
     const overviewLimit = Math.min(input.limit ?? 25, 200);
+    // v0.29: '*' means all namespaces. Previously the overview always filtered
+    // `e.namespace = ?`, so `namespace='*'` returned zero entities. Handle it
+    // by dropping the namespace predicate.
+    const isAll = namespace === '*';
+    const nsClause = isAll ? '1=1' : 'e.namespace = ?';
+    const nsParams: string[] = isAll ? [] : [namespace];
     const entityRows = db.prepare(`
       SELECT e.*,
              (SELECT COUNT(*) FROM memory_entities me
@@ -125,10 +131,10 @@ export function queryGraph(
               WHERE (r.source_entity_id = e.id OR r.target_entity_id = e.id)
                 AND r.is_deleted = 0) AS degree
       FROM entities e
-      WHERE e.namespace = ? AND e.is_deleted = 0
+      WHERE ${nsClause} AND e.is_deleted = 0
       ORDER BY degree DESC, e.updated_at DESC
       LIMIT ?
-    `).all(namespace, overviewLimit) as Array<Entity & { memory_count: number; degree: number }>;
+    `).all(...nsParams, overviewLimit) as Array<Entity & { memory_count: number; degree: number }>;
 
     const nodes: GraphNode[] = entityRows.map(({ memory_count, ...entity }) => {
       void (entity as unknown as { degree?: number }).degree;
@@ -141,6 +147,8 @@ export function queryGraph(
     if (entityRows.length > 0) {
       const idsPlaceholders = entityRows.map(() => '?').join(',');
       const ids = entityRows.map((r) => r.id);
+      const edgeNsClause = isAll ? '1=1' : 'r.namespace = ?';
+      const edgeNsParams: string[] = isAll ? [] : [namespace];
       const edgeRows = db.prepare(`
         SELECT r.*,
                src.name AS source_name,
@@ -148,10 +156,10 @@ export function queryGraph(
           FROM relations r
           JOIN entities src ON src.id = r.source_entity_id
           JOIN entities tgt ON tgt.id = r.target_entity_id
-         WHERE r.is_deleted = 0 AND r.namespace = ?
+         WHERE r.is_deleted = 0 AND ${edgeNsClause}
            AND r.source_entity_id IN (${idsPlaceholders})
            AND r.target_entity_id IN (${idsPlaceholders})
-      `).all(namespace, ...ids, ...ids) as Array<Relation & {
+      `).all(...edgeNsParams, ...ids, ...ids) as Array<Relation & {
         source_name: string; target_name: string;
       }>;
       edges = edgeRows.map(({ source_name, target_name, ...relation }) => ({
