@@ -15,3 +15,7 @@ release-artifacts/
 .mcpb-staging/
 models/
 eval/longmemeval/distractor-*-results.json
+
+# Python bytecode
+__pycache__/
+*.pyc
