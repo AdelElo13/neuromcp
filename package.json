@@ -85,7 +85,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint src/ && tsc --noEmit",
+    "lint": "eslint src/ bin/ scripts/ && tsc --noEmit && tsc -p tsconfig.scripts.json",
     "docs:tools": "tsx scripts/generate-tools-doc.ts",
     "docs:tools:check": "tsx scripts/generate-tools-doc.ts --check",
     "eval": "tsx eval/runner.ts",

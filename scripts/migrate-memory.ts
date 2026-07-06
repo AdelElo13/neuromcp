@@ -1,7 +1,6 @@
 import { OllamaEmbeddingProvider } from '../src/embeddings/ollama.ts';
 import { openDatabase, closeDatabase } from '../src/storage/database.ts';
 import { runMigrations } from '../src/storage/migrations.ts';
-import { applySchema } from '../src/storage/schema.ts';
 import { SqliteVecStore } from '../src/vectors/sqlite-vec.ts';
 import { storeMemory } from '../src/tools/store.ts';
 import { loadConfig } from '../src/config.ts';

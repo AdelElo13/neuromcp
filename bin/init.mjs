@@ -205,7 +205,7 @@ export function mergeNeuromcpEntry(rawText, entry, opts) {
   try {
     parsed = JSON.parse(rawText);
   } catch (err) {
-    throw new Error(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('config root is not a JSON object — refusing to rewrite it');

@@ -50,6 +50,10 @@ export function resolveDaemonPort(env) {
   return n;
 }
 
+/**
+ * @param {string} url
+ * @param {RequestInit} [init]
+ */
 function defaultFetch(url, init) {
   return fetch(url, init);
 }
@@ -78,7 +82,7 @@ export async function checkDaemon(deps = {}) {
     if (res.ok) {
       let version = 'unknown';
       try {
-        const body = await res.json();
+        const body = /** @type {{ version?: unknown }} */ (await res.json());
         if (body && typeof body === 'object' && typeof body.version === 'string') {
           version = body.version;
         }
@@ -134,7 +138,7 @@ export async function checkOllama(deps = {}) {
     if (!res.ok) {
       return ollamaDownResult(name, host, `HTTP ${res.status}`);
     }
-    const body = await res.json();
+    const body = /** @type {{ models?: Array<{ name?: unknown }> }} */ (await res.json());
     const models = Array.isArray(body?.models) ? body.models : [];
     const hasNomic = models.some(
       (m) => typeof m?.name === 'string' && m.name.split(':')[0] === 'nomic-embed-text',
@@ -398,25 +402,78 @@ async function runCheck() {
   process.exit(code);
 }
 
-async function runAuditNetwork() {
-  // Strategy: spawn the neuromcp server as a child process with a custom
-  // Node `--require` shim that monkey-patches `node:net`'s Socket.connect
-  // and `node:dgram`. Any non-loopback target is logged. Run for 30s,
-  // then report.
+/**
+ * Stop the audited child server: SIGTERM first, escalate to SIGKILL when
+ * it has not exited after graceMs. `child.killed` only means "a signal
+ * was sent", so exit is detected via the 'exit' event — a child that
+ * traps SIGTERM would otherwise leak as an orphan.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {{ graceMs?: number }} [opts]
+ * @returns {Promise<boolean>} true when escalation to SIGKILL was needed
+ */
+export function terminateChild(child, opts = {}) {
+  const { graceMs = 1_000 } = opts;
+  return new Promise((resolveDone) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolveDone(false);
+      return;
+    }
+    const onExit = () => {
+      clearTimeout(timer);
+      resolveDone(false);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      child.kill('SIGKILL');
+      resolveDone(true);
+    }, graceMs);
+    child.once('exit', onExit);
+    child.kill('SIGTERM');
+  });
+}
+
+/**
+ * Spawn the neuromcp server as a child process with a custom Node
+ * `--import` shim that monkey-patches `node:net`'s Socket.connect and
+ * `node:dgram`. Any non-loopback target is logged. Run for the audit
+ * window, then report.
+ *
+ * @param {{
+ *   spawnImpl?: typeof spawn,
+ *   exists?: (p: string) => boolean,
+ *   auditMs?: number,
+ *   graceMs?: number,
+ *   stdout?: { write: (s: string) => unknown },
+ *   stderr?: { write: (s: string) => unknown },
+ * }} [deps]
+ * @returns {Promise<0|1>} CLI exit code
+ */
+export async function runAuditNetwork(deps = {}) {
+  const {
+    spawnImpl = spawn,
+    exists = existsSync,
+    auditMs = 30_000,
+    graceMs = 1_000,
+    stdout = process.stdout,
+    stderr = process.stderr,
+  } = deps;
+
   const shimPath = resolve(HERE, 'audit-network-shim.mjs');
-  if (!existsSync(shimPath)) {
+  if (!exists(shimPath)) {
     // Lazy-write the shim on first use to keep the bin/ dir clean.
     writeShim(shimPath);
   }
 
   const dist = resolve(REPO_ROOT, 'dist', 'index.js');
-  if (!existsSync(dist)) {
-    process.stderr.write('dist/index.js missing — run `npm run build` first\n');
-    process.exit(1);
+  if (!exists(dist)) {
+    stderr.write('dist/index.js missing — run `npm run build` first\n');
+    return 1;
   }
 
+  /** @type {string[]} */
   const auditEvents = [];
-  const child = spawn(
+  const child = spawnImpl(
     process.execPath,
     ['--import', shimPath, dist],
     {
@@ -430,6 +487,12 @@ async function runAuditNetwork() {
     },
   );
 
+  // A spawn failure (ENOENT, EACCES, …) is delivered as an 'error' event;
+  // without a listener Node turns it into an uncaught exception mid-audit.
+  const spawnFailure = new Promise((resolveErr) => {
+    child.on('error', (err) => resolveErr(err));
+  });
+
   child.stderr.on('data', (b) => {
     const s = b.toString();
     for (const line of s.split('\n')) {
@@ -437,28 +500,35 @@ async function runAuditNetwork() {
     }
   });
 
-  process.stdout.write('Auditing outbound connections for 30 seconds...\n');
-  await new Promise(r => setTimeout(r, 30000));
+  stdout.write(`Auditing outbound connections for ${Math.round(auditMs / 1000)} seconds...\n`);
+  const failure = await Promise.race([
+    spawnFailure,
+    new Promise((r) => setTimeout(() => r(null), auditMs)),
+  ]);
+  if (failure) {
+    const msg = failure instanceof Error ? failure.message : String(failure);
+    stderr.write(`✗ could not start the audited server: ${msg}\n`);
+    return 1;
+  }
 
-  child.kill('SIGTERM');
-  await new Promise(r => setTimeout(r, 1000));
-  if (!child.killed) child.kill('SIGKILL');
+  await terminateChild(child, { graceMs });
 
   if (auditEvents.length === 0) {
-    process.stdout.write(
-      '\n✓ zero TCP/UDP outbound connections observed in 30s\n' +
+    stdout.write(
+      '\n✓ zero TCP/UDP outbound connections observed in ' +
+      `${Math.round(auditMs / 1000)}s\n` +
       '  (via net.Socket + dgram shim — does NOT cover undici/fetch,\n' +
       '   node:http2, or DNS prefetch. For completeness run\n' +
       '   `tcpdump -i any -n host not 127.0.0.1` alongside.)\n',
     );
-    process.exit(0);
-  } else {
-    process.stdout.write(`\n✗ ${auditEvents.length} outbound connections observed:\n`);
-    for (const e of auditEvents) process.stdout.write(`  ${e}\n`);
-    process.exit(1);
+    return 0;
   }
+  stdout.write(`\n✗ ${auditEvents.length} outbound connections observed:\n`);
+  for (const e of auditEvents) stdout.write(`  ${e}\n`);
+  return 1;
 }
 
+/** @param {string} path */
 function writeShim(path) {
   const src = `
 // audit-network-shim.mjs — registered via --import. Wraps net.Socket.connect
@@ -516,7 +586,7 @@ async function main() {
   if (cmd === 'check') {
     await runCheck();
   } else if (cmd === 'audit-network') {
-    await runAuditNetwork();
+    process.exit(await runAuditNetwork());
   } else {
     console.error(`Unknown subcommand: ${cmd}\n`);
     printHelp();
