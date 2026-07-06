@@ -501,3 +501,21 @@ but the gate can't protect excluded files until then.
 all: on Node 18 ESLint 10's stylish formatter crashes on ANY printed
 output (`util.styleText` missing), so warnings broke the CI matrix. The
 CI lint step now runs on Node 22 only for the same reason.
+
+---
+
+## [2026-07-06] Gevonden tijdens hardening-fix (registry-workflow pin + init atomic write)
+
+- **P3 — `neuromcp-init` laadt als bijeffect een launchd-agent in de globale
+  gui-domain.** `bin/init-wiki.mjs:249-259` auto-installeert
+  `enable-zombie-cleanup.mjs`, dat `launchctl` aanroept op basis van `HOME`.
+  Symptoom: een init-run met alternatieve/sandbox `HOME` (CI, tests, smoke
+  runs) registreert een agent (`com.neuromcp.zombie-cleanup`) die naar een
+  tijdelijk pad wijst — na cleanup van dat pad blijft een dangling launchd-
+  entry achter. Vandaag live gereproduceerd tijdens de init-smoke-test in een
+  fake-HOME sandbox (agent handmatig ge-boot-out). Hypothese root cause:
+  installer gebruikt `HOME` voor plist-pad maar launchctl-registratie is
+  per-user globaal; er is geen guard tegen niet-standaard HOME en geen
+  opt-in. Voorstel: zombie-cleanup-install opt-in maken (of minstens skippen
+  wanneer `HOME` afwijkt van de user-database-home / in CI), en bij install
+  een bestaande registratie met zelfde label detecteren. Severity: P3.

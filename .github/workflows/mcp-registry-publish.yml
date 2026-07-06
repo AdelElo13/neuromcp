@@ -68,9 +68,20 @@ jobs:
           mv server.json.tmp server.json
           cat server.json
 
-      - name: Install mcp-publisher
+      - name: Install mcp-publisher (pinned + checksum-verified)
+        env:
+          # Pinned release tag of modelcontextprotocol/registry. This job
+          # holds id-token: write (OIDC for the io.github.AdelElo13/*
+          # namespace), so it must never execute whatever "latest" serves.
+          # Bump deliberately after reviewing the upstream release.
+          MCP_PUBLISHER_VERSION: v1.7.9
         run: |
-          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          BASE_URL="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          CHECKSUMS="registry_${MCP_PUBLISHER_VERSION#v}_checksums.txt"
+          curl -fsSLO "${BASE_URL}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSLO "${BASE_URL}/${CHECKSUMS}"
+          grep ' mcp-publisher_linux_amd64.tar.gz$' "${CHECKSUMS}" | sha256sum --check -
+          tar xzf mcp-publisher_linux_amd64.tar.gz mcp-publisher
 
       - name: Login (GitHub OIDC) and publish
         run: |

@@ -30,6 +30,11 @@ import {
   writeFileSync as fsWriteFileSync,
   copyFileSync as fsCopyFileSync,
   mkdirSync as fsMkdirSync,
+  renameSync as fsRenameSync,
+  statSync as fsStatSync,
+  chmodSync as fsChmodSync,
+  lstatSync as fsLstatSync,
+  unlinkSync as fsUnlinkSync,
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
@@ -231,12 +236,68 @@ export function mergeNeuromcpEntry(rawText, entry, opts) {
   return { changed: true, reason: 'added', next };
 }
 
+/** Owner-only permissions for configs we create — they may end up holding secrets. */
+const NEW_CONFIG_MODE = 0o600;
+
+/**
+ * Is there a symlink at `path`? Uses lstat (never follows the link), and
+ * treats "nothing there at all" as not-a-symlink. existsSync is NOT
+ * enough here: it follows links, so a dangling symlink looks like a
+ * missing file while a write through it would land at the link target.
+ *
+ * @param {string} path
+ * @param {(p: string) => { isSymbolicLink: () => boolean }} lstatSync
+ * @returns {boolean}
+ */
+function isSymlinkAt(path, lstatSync) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Write a config file atomically with an explicit mode. The content goes
+ * to a same-directory temp file first (same filesystem → atomic rename),
+ * then replaces the target in a single renameSync — a kill mid-write can
+ * never leave a truncated config behind. The temp file is created
+ * exclusively ('wx') and chmod'ed to `mode` before the rename, so a
+ * restrictive mode (e.g. 0o600 on a config holding other MCP servers'
+ * secrets) survives the rewrite instead of falling back to 0o644.
+ *
+ * @param {string} configPath
+ * @param {string} data
+ * @param {number} mode
+ * @param {{
+ *   writeFileSync: (p: string, data: string, opts?: { mode?: number, flag?: string }) => void,
+ *   renameSync: (from: string, to: string) => void,
+ *   chmodSync: (p: string, mode: number) => void,
+ *   unlinkSync: (p: string) => void,
+ * }} fsOps
+ */
+function writeConfigAtomic(configPath, data, mode, fsOps) {
+  const tmpPath = `${configPath}.tmp-${process.pid}`;
+  fsOps.writeFileSync(tmpPath, data, { mode, flag: 'wx' });
+  try {
+    fsOps.chmodSync(tmpPath, mode);
+    fsOps.renameSync(tmpPath, configPath);
+  } catch (err) {
+    try {
+      fsOps.unlinkSync(tmpPath);
+    } catch {
+      // best effort — the rename/chmod error below is the real story
+    }
+    throw err;
+  }
+}
+
 /**
  * @typedef {Object} ConfigureResult
  * @property {string} id
  * @property {string} configPath
  * @property {'added' | 'updated' | 'created' | 'already-configured' | 'skipped-missing' | 'invalid-json'
- *   | 'would-add' | 'would-update' | 'would-create'} status
+ *   | 'refused-symlink' | 'would-add' | 'would-update' | 'would-create'} status
  * @property {string} [backupPath] - set when a backup was (or would be) written
  * @property {string} [message] - human-readable detail (errors)
  * @property {string} [nextContent] - the exact content that was / would be written
@@ -250,9 +311,14 @@ export function mergeNeuromcpEntry(rawText, entry, opts) {
  * @param {{
  *   existsSync?: (p: string) => boolean,
  *   readFileSync?: (p: string, enc: 'utf8') => string,
- *   writeFileSync?: (p: string, data: string) => void,
+ *   writeFileSync?: (p: string, data: string, opts?: { mode?: number, flag?: string }) => void,
  *   copyFileSync?: (src: string, dest: string) => void,
  *   mkdirSync?: (p: string, opts: { recursive: boolean }) => void,
+ *   renameSync?: (from: string, to: string) => void,
+ *   statSync?: (p: string) => { mode: number },
+ *   chmodSync?: (p: string, mode: number) => void,
+ *   lstatSync?: (p: string) => { isSymbolicLink: () => boolean },
+ *   unlinkSync?: (p: string) => void,
  *   now?: () => Date,
  * }} [deps]
  * @returns {ConfigureResult}
@@ -265,8 +331,27 @@ export function configureClient(options, deps = {}) {
     writeFileSync = fsWriteFileSync,
     copyFileSync = fsCopyFileSync,
     mkdirSync = fsMkdirSync,
+    renameSync = fsRenameSync,
+    statSync = fsStatSync,
+    chmodSync = fsChmodSync,
+    lstatSync = fsLstatSync,
+    unlinkSync = fsUnlinkSync,
     now = () => new Date(),
   } = deps;
+  const fsOps = { writeFileSync, renameSync, chmodSync, unlinkSync };
+
+  // Refuse symlinked config paths outright (also in dry-run, so the
+  // preview matches the real run): the atomic rename below would
+  // silently replace the link with a regular file, and writing through
+  // a (possibly dangling) link would modify whatever it points at.
+  if (isSymlinkAt(configPath, lstatSync)) {
+    return {
+      id,
+      configPath,
+      status: 'refused-symlink',
+      message: `${configPath} is a symlink — refusing to modify it. Edit the link target directly, or replace the link with a regular file and re-run.`,
+    };
+  }
 
   if (!existsSync(configPath)) {
     if (!createIfMissing) {
@@ -278,7 +363,7 @@ export function configureClient(options, deps = {}) {
       return { id, configPath, status: 'would-create', nextContent };
     }
     mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, nextContent);
+    writeConfigAtomic(configPath, nextContent, NEW_CONFIG_MODE, fsOps);
     return { id, configPath, status: 'created', nextContent };
   }
 
@@ -306,12 +391,22 @@ export function configureClient(options, deps = {}) {
     return { id, configPath, status, backupPath, nextContent };
   }
 
+  // Preserve the existing file mode: ~/.claude.json and friends may be
+  // 0o600 because other MCP servers keep secrets in them. Fall back to
+  // owner-only if the mode cannot be read.
+  let mode = NEW_CONFIG_MODE;
+  try {
+    mode = statSync(configPath).mode & 0o777;
+  } catch {
+    // keep the restrictive default
+  }
+
   // Backup BEFORE the write. If a backup for today already exists, keep
   // it — it holds the oldest (safest) pre-init state of the day.
   if (!existsSync(backupPath)) {
     copyFileSync(configPath, backupPath);
   }
-  writeFileSync(configPath, nextContent);
+  writeConfigAtomic(configPath, nextContent, mode, fsOps);
   const status = merge.reason === 'updated' ? 'updated' : 'added';
   return { id, configPath, status, backupPath, nextContent };
 }
@@ -416,6 +511,7 @@ async function main() {
         console.log(`  · ${res.id}: no config at ${shorten(res.configPath)} — skipped`);
         break;
       case 'invalid-json':
+      case 'refused-symlink':
         failures++;
         console.error(`  ✗ ${res.id}: ${res.message}`);
         break;

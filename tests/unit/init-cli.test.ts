@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  chmodSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -305,6 +316,11 @@ describe('configureClient', () => {
       writeFileSync: (p: string, data: string) => { files[p] = data; },
       copyFileSync: (src: string, dest: string) => { files[dest] = files[src]; },
       mkdirSync: () => undefined,
+      renameSync: (from: string, to: string) => { files[to] = files[from]; delete files[from]; },
+      statSync: () => ({ mode: 0o100644 }),
+      chmodSync: () => undefined,
+      lstatSync: () => ({ isSymbolicLink: () => false }),
+      unlinkSync: (p: string) => { delete files[p]; },
       now: () => new Date('2026-07-02T10:00:00Z'),
     };
     const res = configureClient(
@@ -314,6 +330,126 @@ describe('configureClient', () => {
     expect(res.status).toBe('added');
     expect(files['/fake/cfg.json.bak-2026-07-02']).toBe('{}');
     expect(JSON.parse(files['/fake/cfg.json']).mcpServers.neuromcp).toEqual(ENTRY);
+  });
+});
+
+// ─── configureClient — atomic write, mode preservation, symlinks ──────
+
+describe('configureClient — atomic write & mode preservation', () => {
+  const notWin = process.platform !== 'win32';
+
+  it('writes via a same-directory temp file + rename, never directly to the config path', () => {
+    // A kill mid-write must never leave a truncated config behind: the
+    // full content has to land in a temp file first and replace the
+    // config in a single rename. Same directory = same filesystem, so
+    // the rename is atomic.
+    const files: Record<string, string> = { '/fake/cfg.json': '{}' };
+    const directWrites: string[] = [];
+    const renames: Array<[string, string]> = [];
+    const fsDeps = {
+      existsSync: (p: string) => p in files,
+      readFileSync: (p: string) => files[p],
+      writeFileSync: (p: string, data: string) => { directWrites.push(p); files[p] = data; },
+      copyFileSync: (src: string, dest: string) => { files[dest] = files[src]; },
+      mkdirSync: () => undefined,
+      renameSync: (from: string, to: string) => {
+        renames.push([from, to]);
+        files[to] = files[from];
+        delete files[from];
+      },
+      statSync: () => ({ mode: 0o100644 }),
+      chmodSync: () => undefined,
+      lstatSync: () => ({ isSymbolicLink: () => false }),
+      unlinkSync: (p: string) => { delete files[p]; },
+      now: () => new Date('2026-07-06T10:00:00Z'),
+    };
+
+    const res = configureClient(
+      { id: 'cursor', configPath: '/fake/cfg.json', yes: false, dryRun: false, createIfMissing: false },
+      fsDeps,
+    );
+
+    expect(res.status).toBe('added');
+    expect(directWrites).not.toContain('/fake/cfg.json');
+    expect(renames).toHaveLength(1);
+    expect(renames[0][1]).toBe('/fake/cfg.json');
+    expect(renames[0][0].startsWith('/fake/')).toBe(true);
+    expect(JSON.parse(files['/fake/cfg.json']).mcpServers.neuromcp).toEqual(ENTRY);
+  });
+
+  it.skipIf(!notWin)('preserves a restrictive 0o600 mode across the rewrite', () => {
+    // ~/.claude.json regularly holds other MCP servers' secrets; a
+    // 0o600 config must never round-trip through the 0o644 default.
+    const configPath = join(tmp, '.claude.json');
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { other: { command: 'x' } } }));
+    chmodSync(configPath, 0o600);
+
+    const res = configureClient(
+      { id: 'claude-code', configPath, yes: false, dryRun: false, createIfMissing: false },
+      {},
+    );
+
+    expect(res.status).toBe('added');
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(!notWin)('creates fresh configs with owner-only 0o600 mode', () => {
+    const configPath = join(tmp, '.cursor', 'mcp.json');
+
+    const res = configureClient(
+      { id: 'cursor', configPath, yes: false, dryRun: false, createIfMissing: true },
+      {},
+    );
+
+    expect(res.status).toBe('created');
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('leaves no temp files behind after a successful rewrite', () => {
+    const configPath = join(tmp, 'mcp.json');
+    writeFileSync(configPath, '{}');
+
+    configureClient(
+      { id: 'cursor', configPath, yes: false, dryRun: false, createIfMissing: false },
+      { now: () => new Date('2026-07-06T10:00:00Z') },
+    );
+
+    expect(readdirSync(tmp).sort()).toEqual(['mcp.json', 'mcp.json.bak-2026-07-06']);
+  });
+
+  it.skipIf(!notWin)('refuses to modify a config path that is a symlink', () => {
+    // Atomic rename would silently replace the link with a regular
+    // file; writing through it would modify whatever it points at.
+    // Both are surprises — refuse with a clear message instead.
+    const realTarget = join(tmp, 'real-config.json');
+    writeFileSync(realTarget, '{}');
+    const configPath = join(tmp, 'mcp.json');
+    symlinkSync(realTarget, configPath);
+
+    const res = configureClient(
+      { id: 'cursor', configPath, yes: false, dryRun: false, createIfMissing: false },
+      {},
+    );
+
+    expect(res.status).toBe('refused-symlink');
+    expect(res.message).toMatch(/symlink/i);
+    expect(readFileSync(realTarget, 'utf8')).toBe('{}');
+  });
+
+  it.skipIf(!notWin)('refuses to create through a dangling symlink at the config path', () => {
+    // existsSync follows links, so a dangling symlink looks like "no
+    // config" — creating would materialize the file at the link target.
+    const attackerTarget = join(tmp, 'attacker-target.json');
+    const configPath = join(tmp, 'mcp.json');
+    symlinkSync(attackerTarget, configPath);
+
+    const res = configureClient(
+      { id: 'cursor', configPath, yes: true, dryRun: false, createIfMissing: true },
+      {},
+    );
+
+    expect(res.status).toBe('refused-symlink');
+    expect(existsSync(attackerTarget)).toBe(false);
   });
 });
 
