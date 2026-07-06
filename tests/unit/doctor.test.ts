@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 
 // @ts-expect-error — plain-ESM helper in bin/, no type declarations shipped
 import {
@@ -9,6 +10,8 @@ import {
   checkDatabase,
   deriveEmbeddingRoute,
   aggregateExitCode,
+  terminateChild,
+  runAuditNetwork,
 } from '../../bin/doctor.mjs';
 
 /**
@@ -222,6 +225,130 @@ describe('deriveEmbeddingRoute', () => {
   it('fails when no embedding route exists at all', () => {
     const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' });
     expect(result.status).toBe('fail');
+  });
+});
+
+/**
+ * Test double for child_process.ChildProcess with real `killed` semantics:
+ * `killed` flips to true as soon as a signal is *sent* — it says nothing
+ * about the child having exited. A child that traps/ignores SIGTERM keeps
+ * exitCode/signalCode at null and never emits 'exit' for it.
+ */
+class FakeChild extends EventEmitter {
+  stderr = new EventEmitter();
+  killed = false;
+  exitCode: number | null = null;
+  signalCode: string | null = null;
+  signals: string[] = [];
+
+  constructor(private behavior: 'ignore-sigterm' | 'exit-on-sigterm') {
+    super();
+  }
+
+  kill(signal = 'SIGTERM'): boolean {
+    this.signals.push(signal);
+    this.killed = true;
+    if (signal === 'SIGKILL' || this.behavior === 'exit-on-sigterm') {
+      queueMicrotask(() => {
+        this.signalCode = signal;
+        this.emit('exit', null, signal);
+      });
+    }
+    return true;
+  }
+}
+
+describe('terminateChild', () => {
+  it('escalates to SIGKILL when the child ignores SIGTERM (regression: child.killed is not "child exited")', async () => {
+    const child = new FakeChild('ignore-sigterm');
+    const escalated = await terminateChild(child, { graceMs: 20 });
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(escalated).toBe(true);
+  });
+
+  it('does not SIGKILL a child that exits on SIGTERM within the grace window', async () => {
+    const child = new FakeChild('exit-on-sigterm');
+    const escalated = await terminateChild(child, { graceMs: 20 });
+    expect(child.signals).toEqual(['SIGTERM']);
+    expect(escalated).toBe(false);
+  });
+});
+
+describe('runAuditNetwork', () => {
+  function collector() {
+    const lines: string[] = [];
+    return { lines, write: (s: string) => lines.push(s) };
+  }
+
+  it('fails cleanly with a readable message when the server cannot be spawned (regression: unhandled ENOENT)', async () => {
+    const child = new FakeChild('ignore-sigterm');
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      queueMicrotask(() => child.emit('error', new Error('spawn node ENOENT')));
+      return child;
+    });
+    const out = collector();
+    const errOut = collector();
+    const code = await runAuditNetwork({
+      spawnImpl,
+      exists: () => true,
+      auditMs: 100,
+      graceMs: 10,
+      stdout: out,
+      stderr: errOut,
+    });
+    expect(code).toBe(1);
+    expect(errOut.lines.join('')).toContain('ENOENT');
+  });
+
+  it('returns 1 with a build hint when dist/index.js is missing', async () => {
+    const spawnImpl = vi.fn();
+    const errOut = collector();
+    const code = await runAuditNetwork({
+      spawnImpl,
+      exists: (p: string) => !p.endsWith('index.js'),
+      stdout: collector(),
+      stderr: errOut,
+    });
+    expect(code).toBe(1);
+    expect(errOut.lines.join('')).toContain('npm run build');
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('returns 0 and reports zero egress when no [NET-AUDIT] lines appear', async () => {
+    const child = new FakeChild('exit-on-sigterm');
+    const out = collector();
+    const code = await runAuditNetwork({
+      spawnImpl: vi.fn().mockReturnValue(child),
+      exists: () => true,
+      auditMs: 30,
+      graceMs: 10,
+      stdout: out,
+      stderr: collector(),
+    });
+    expect(code).toBe(0);
+    expect(out.lines.join('')).toContain('zero TCP/UDP outbound connections');
+    expect(child.signals).toContain('SIGTERM');
+  });
+
+  it('returns 1 and lists the destinations when [NET-AUDIT] lines appear on child stderr', async () => {
+    const child = new FakeChild('exit-on-sigterm');
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      queueMicrotask(() => {
+        child.stderr.emit('data', Buffer.from('[NET-AUDIT] tcp connect host=93.184.216.34 port=443\n'));
+      });
+      return child;
+    });
+    const out = collector();
+    const code = await runAuditNetwork({
+      spawnImpl,
+      exists: () => true,
+      auditMs: 30,
+      graceMs: 10,
+      stdout: out,
+      stderr: collector(),
+    });
+    expect(code).toBe(1);
+    expect(out.lines.join('')).toContain('tcp connect host=93.184.216.34 port=443');
   });
 });
 

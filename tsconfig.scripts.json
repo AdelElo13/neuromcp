@@ -1,0 +1,41 @@
+{
+  // Type-checks the shipped CLIs (bin/) and maintenance scripts (scripts/)
+  // that the main tsconfig (include: ["src"]) never sees — wired into
+  // `npm run lint` so CI catches bin/scripts bugs (added post-v0.28.0,
+  // after two audit-network bugs shipped unchecked).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["bin/**/*.mjs", "scripts/**/*.mjs", "scripts/**/*.ts"],
+  "exclude": [
+    // Generated at runtime by `neuromcp-doctor audit-network` (gitignored);
+    // its net/dgram monkey-patches don't fit the lib signatures by design.
+    "bin/audit-network-shim.mjs",
+    // RATCHET: pre-existing type debt, tracked in FOUND-DURING-FIX.md.
+    // New files are checked by default; remove entries as files get typed.
+    // Never add a file below this line — fix its types instead.
+    "bin/embed.mjs",
+    "bin/enable-consolidation.mjs",
+    "bin/enable-daemon.mjs",
+    "bin/enable-zombie-cleanup.mjs",
+    "bin/init-wiki.mjs",
+    "bin/init.mjs",
+    "bin/neuromcp-connect.mjs",
+    "bin/query.mjs",
+    "bin/resolve-node-bin.mjs",
+    "scripts/ab-sweep.mjs",
+    "scripts/backfill-embeddings.mjs",
+    "scripts/backfill-verbatim.mjs",
+    "scripts/download-reranker.mjs",
+    "scripts/index-wiki.mjs",
+    "scripts/migrate-memory.ts",
+    "scripts/usefulness-dashboard.mjs"
+  ]
+}

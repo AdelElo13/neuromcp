@@ -3,6 +3,32 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **FIX: `neuromcp-doctor audit-network` — SIGKILL escalation never fired.**
+  The fallback checked `child.killed`, which is true as soon as the SIGTERM
+  was *sent* — it says nothing about the child having exited. A server that
+  traps SIGTERM therefore leaked as an orphan after every audit. Escalation
+  now waits on the child's `exit` event with a 1s grace window
+  (`terminateChild`, exported + unit-tested with a SIGTERM-ignoring double).
+- **FIX: `neuromcp-doctor audit-network` — spawn failure crashed the CLI.**
+  The audited child had no `error` listener, so a spawn failure (ENOENT,
+  EACCES, …) surfaced as an uncaught exception mid-audit instead of a
+  diagnostic. It now prints `✗ could not start the audited server: …` and
+  exits 1.
+
+### Internal
+
+- **INTERNAL: lint gate now covers `bin/` and `scripts/`.** Both bugs above
+  shipped because `npm run lint` only saw `src/`. It now runs
+  `eslint src/ bin/ scripts/` plus `tsc -p tsconfig.scripts.json` (strict
+  `checkJs`). Sixteen pre-existing files sit on an explicit exclude ratchet
+  (logged in `FOUND-DURING-FIX.md`); new files are checked by default and
+  `bin/doctor.mjs` is strict-clean. `runAuditNetwork` is now
+  dependency-injected and unit-tested (31 doctor tests, 6 new).
+
 ## [0.28.0] — 2026-07-02
 
 DX release: the five-command setup becomes one command, the docs stop

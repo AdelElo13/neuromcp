@@ -131,7 +131,7 @@ const STOPWORDS = new Set([
 function ftsKeywords(s) {
   const seen = new Set();
   const out = [];
-  for (const raw of s.toLowerCase().split(/[^a-z0-9_\-]+/)) {
+  for (const raw of s.toLowerCase().split(/[^a-z0-9_-]+/)) {
     const t = raw.trim();
     if (t.length < 3 || STOPWORDS.has(t) || seen.has(t)) continue;
     seen.add(t);

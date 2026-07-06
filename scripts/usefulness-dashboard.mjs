@@ -22,12 +22,10 @@
  * launchd (weekly StartInterval) for autonomous reporting.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
 const DB_PATH = process.env.NEUROMCP_DB || join(HOME, '.neuromcp', 'memory.db');
 const EXP_DIR = join(HOME, '.neuromcp', 'experiments');

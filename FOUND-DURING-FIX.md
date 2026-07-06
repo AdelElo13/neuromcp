@@ -464,3 +464,40 @@ selected sentence (or eligible content), or rename/redocument the field as
 - **P3 — geen timeout op request-body-inlezen** (slow-loris) in beide body-readers; relevant zodra `NEUROMCP_DAEMON_INSECURE_NON_LOOPBACK=1` gebruikt wordt.
 - **P3 — geen concurrency-test voor multi-client SQLite writes** (N parallelle store_memory tegen één daemon-DB); WAL+busy_timeout is geconfigureerd maar onbewezen onder contentie.
 - **P3 — flaky test onder volle suite-load:** `tests/integration/release-014-regressions.test.ts` › "embed.mjs returns {ok:false} for unknown memory id" faalde 1× met lege stdout (JSON parse error) tijdens parallelle full-suite run; geïsoleerd en bij herhaalde full run groen. Vermoedelijk subprocess-spawn contention. Overweeg retry of ruimere timeout op de runNode-helper.
+
+---
+
+## P3: pre-existing type debt in bin/ + scripts/ (excluded from new tsconfig.scripts.json gate)
+
+**Found while:** wiring the v0.28.0 audit-network fixes (dead SIGKILL fallback +
+missing spawn 'error' listener) into CI. Root cause of the gap: `npm run lint`
+was `eslint src/ && tsc --noEmit` with tsconfig `include: ["src"]`, so nothing
+in bin/ or scripts/ was ever linted or type-checked.
+
+**Fix applied in that PR:** lint now runs `eslint src/ bin/ scripts/` plus
+`tsc -p tsconfig.scripts.json` (strict checkJs over bin/ + scripts/).
+`bin/doctor.mjs` was made strict-clean.
+
+**Remaining debt:** 16 files fail strict checkJs today (~248 errors, mostly
+implicit-any params and property access on `unknown` from `res.json()` /
+db rows). They are listed in the `exclude` ratchet in `tsconfig.scripts.json`
+— new files ARE checked by default; these need typing to be un-excluded:
+
+- bin/embed.mjs, bin/enable-consolidation.mjs, bin/enable-daemon.mjs,
+  bin/enable-zombie-cleanup.mjs, bin/init-wiki.mjs, bin/init.mjs,
+  bin/neuromcp-connect.mjs, bin/query.mjs, bin/resolve-node-bin.mjs
+- scripts/ab-sweep.mjs, scripts/backfill-embeddings.mjs,
+  scripts/backfill-verbatim.mjs, scripts/download-reranker.mjs,
+  scripts/index-wiki.mjs, scripts/migrate-memory.ts,
+  scripts/usefulness-dashboard.mjs
+
+**Proposed fix:** JSDoc-type per file (boundary casts on JSON/db reads),
+remove from exclude one file per PR. Severity P3 — no runtime impact known,
+but the gate can't protect excluded files until then.
+
+**Also (same sweep):** the 2 eslint warnings this surfaced
+(`migrate-memory.ts` unused import `applySchema`,
+`usefulness-dashboard.mjs` unused `__dirname`) got fixed in the PR after
+all: on Node 18 ESLint 10's stylish formatter crashes on ANY printed
+output (`util.styleText` missing), so warnings broke the CI matrix. The
+CI lint step now runs on Node 22 only for the same reason.

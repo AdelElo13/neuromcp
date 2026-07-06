@@ -19,3 +19,6 @@ eval/longmemeval/distractor-*-results.json
 # Python bytecode
 __pycache__/
 *.pyc
+
+# generated at runtime by `neuromcp-doctor audit-network` (lazy-written shim)
+bin/audit-network-shim.mjs
