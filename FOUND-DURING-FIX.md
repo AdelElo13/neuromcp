@@ -519,3 +519,27 @@ CI lint step now runs on Node 22 only for the same reason.
   opt-in. Voorstel: zombie-cleanup-install opt-in maken (of minstens skippen
   wanneer `HOME` afwijkt van de user-database-home / in CI), en bij install
   een bestaande registratie met zelfde label detecteren. Severity: P3.
+
+---
+
+## [2026-07-06] Rest-items uit v0.28.0 code review (post-hoc, PR #9/#10 al gemerged)
+
+Bevindingen uit de v0.28.0 review die bewust NIET in PR #9/#10 zijn
+meegenomen en geen eigen taak hebben. Gelogd per CLAUDE.md-policy.
+
+- **P3 — GitHub Actions gepind op tag i.p.v. commit-SHA.**
+  `.github/workflows/ci.yml` en `mcp-registry-publish.yml` gebruiken
+  `actions/checkout@v4`, `actions/setup-node@v4`, `actions/upload-artifact@v4`.
+  Tags zijn mutable; OpenSSF Scorecard "Pinned-Dependencies" adviseert
+  SHA-pinning met versie-comment. Laag risico (first-party actions), maar de
+  publish-job heeft `id-token: write`. Voorstel: pin op SHA, bijv. via
+  `pin-github-action` of Dependabot met SHA-mode.
+
+- **P3 — `void main()` zonder top-level `.catch()` in bin/init.mjs:581 en
+  bin/doctor.mjs:600.** Alle huidige throw-paden zijn lokaal gevangen, maar
+  een toekomstig ongevangen pad wordt een UnhandledPromiseRejection
+  (onleesbare crash) i.p.v. nette melding + `process.exit(1)`. Eén-regel-fix
+  per file: `main().catch((err) => { console.error(...); process.exit(1); })`.
+
+(De flaky P95-latency-assert in tests/eval/retrieval-quality.test.ts heeft
+een eigen taak — niet hier tracken.)
