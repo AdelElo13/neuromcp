@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **FIX (CWE-494): unpinned `mcp-publisher` download in the registry
+  publish workflow.** The workflow fetched the *latest* mcp-publisher
+  release with `curl | tar` — unpinned and unverified — inside a job
+  holding `id-token: write` for the `io.github.AdelElo13/*` registry
+  namespace, so a compromised upstream release could publish under our
+  name. The install is now pinned to `MCP_PUBLISHER_VERSION: v1.7.9` and
+  sha256-verified against that release's `checksums.txt` before
+  extraction. (`.github/workflows/mcp-registry-publish.yml`, regression
+  tests in `tests/unit/mcp-registry-publish-workflow.test.ts`)
+- **FIX (CWE-276/CWE-59): `neuromcp-init` config writes could truncate,
+  loosen, or follow-symlink client configs.** `configureClient` now
+  writes a same-directory tempfile (`.tmp-<pid>`) and swaps it in with a
+  single `renameSync`, so a kill mid-write can no longer truncate configs
+  like `~/.claude.json`; an existing restrictive mode (e.g. `0o600` on a
+  config holding other MCP servers' secrets) is preserved across the
+  rewrite; new config files are created `0o600`; and symlinked config
+  paths — including dangling links — are refused with the new
+  `refused-symlink` status and exit 1 instead of being silently replaced
+  by a regular file. (`bin/init.mjs`, regression tests in
+  `tests/unit/init-cli.test.ts`)
+
 ### Fixed
 
 - **FIX: `neuromcp-doctor audit-network` — SIGKILL escalation never fired.**
