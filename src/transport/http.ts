@@ -425,7 +425,7 @@ export function createRestRequestHandler(
         const uiHeaders: Record<string, string> = {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Security-Policy':
-            "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+            "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
         };
@@ -476,6 +476,52 @@ export function createRestRequestHandler(
           res.end(JSON.stringify({ error: 'timeline failed' }));
         }
         return;
+      }
+
+      // GET /api/entity/:id/memories — CURRENT memories linked to an entity
+      // via the memory_entities join. This is the real "memories for this
+      // entity" path (the web-view node-click target), distinct from the
+      // name-based topic search that /api/timeline does. Default-current:
+      // superseded/expired rows are excluded via the shared validity helper.
+      {
+        const entMatch = url.pathname.match(/^\/api\/entity\/([^/]+)\/memories$/);
+        if (entMatch && req.method === 'GET') {
+          const entityId = decodeURIComponent(entMatch[1]);
+          if (!entityId) {
+            res.writeHead(400, jsonHeaders());
+            res.end(JSON.stringify({ error: 'entity id required' }));
+            return;
+          }
+          try {
+            const limitRaw = parseInt(url.searchParams.get('limit') ?? '50', 10);
+            const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+            const includeSuperseded = url.searchParams.get('include_superseded') === '1';
+            const now = new Date().toISOString();
+            const validity = currentValiditySql(now, 'm');
+            const where = includeSuperseded ? 'm.is_deleted = 0' : `m.is_deleted = 0 AND ${validity.clause}`;
+            const params: unknown[] = [entityId];
+            if (!includeSuperseded) params.push(...validity.params);
+            params.push(limit);
+            const rows = deps.db
+              .prepare(
+                `SELECT m.id, m.content, m.category, m.created_at, m.importance,
+                        m.superseded_by_id, m.valid_to, me.role
+                   FROM memory_entities me
+                   JOIN memories m ON m.id = me.memory_id
+                  WHERE me.entity_id = ? AND ${where}
+                  ORDER BY m.created_at DESC
+                  LIMIT ?`,
+              )
+              .all(...params);
+            res.writeHead(200, jsonHeaders());
+            res.end(JSON.stringify({ entity_id: entityId, count: rows.length, memories: rows }));
+          } catch (err: unknown) {
+            logger.warn('http', 'Entity-memories API failed', { error: err instanceof Error ? err.message : String(err) });
+            res.writeHead(500, jsonHeaders());
+            res.end(JSON.stringify({ error: 'entity memories failed' }));
+          }
+          return;
+        }
       }
 
       // GET /api/memory/:id — single memory by id (id-lookup bypass).

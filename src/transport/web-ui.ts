@@ -39,6 +39,9 @@ export const WEB_UI_HTML = `<!doctype html>
   .content { white-space: pre-wrap; word-break: break-word; }
   .edge { font-size: 0.85rem; opacity: 0.85; }
   .err { color: #c0392b; }
+  #gcanvas { width: 100%; height: 440px; display: block; border-radius: 6px; background: #8881; cursor: grab; touch-action: none; }
+  #gcanvas.grabbing { cursor: grabbing; }
+  #ghint { font-size: 0.78rem; opacity: 0.65; margin-top: 0.35rem; }
 </style>
 </head>
 <body>
@@ -49,7 +52,7 @@ export const WEB_UI_HTML = `<!doctype html>
   <button id="go">Load</button>
 </div>
 <div class="cols">
-  <div class="panel"><h2>Graph (top entities)</h2><div id="graph"></div></div>
+  <div class="panel"><h2>Graph (entities &amp; relations)</h2><canvas id="gcanvas"></canvas><div id="ghint"></div></div>
   <div class="panel"><h2>Timeline</h2><div id="timeline"></div></div>
 </div>
 
@@ -85,31 +88,208 @@ export const WEB_UI_HTML = `<!doctype html>
     return ns ? ('?namespace=' + encodeURIComponent(ns)) : '';
   }
 
-  function loadGraph() {
-    var node = document.getElementById('graph');
-    clear(node);
-    node.appendChild(el('div', 'meta', 'Loading…'));
-    getJSON('/api/graph' + qs()).then(function (data) {
-      clear(node);
-      var nodes = (data && data.nodes) || [];
-      var edges = (data && data.edges) || [];
-      if (nodes.length === 0) { node.appendChild(el('div', 'meta', 'No entities.')); return; }
-      nodes.forEach(function (n) {
-        var item = el('div', 'item');
-        var entity = n.entity || {};
-        item.appendChild(el('div', 'content', entity.name || '(unnamed)'));
-        item.appendChild(el('div', 'meta',
-          (entity.entity_type || 'entity') + ' · ' + (n.memory_count || 0) + ' memories · ' + (entity.namespace || '')));
-        node.appendChild(item);
-      });
-      if (edges.length > 0) {
-        node.appendChild(el('div', 'meta', edges.length + ' edge(s):'));
-        edges.forEach(function (e) {
-          node.appendChild(el('div', 'edge',
-            (e.source_name || '?') + ' —' + ((e.relation && e.relation.relation_type) || 'rel') + '→ ' + (e.target_name || '?')));
-        });
+  // ── Force-directed graph on <canvas> ────────────────────────────────
+  // Hand-rolled spring/repulsion sim — no external lib (CSP forbids CDN).
+  // Labels drawn with fillText (canvas text is inert, no HTML injection),
+  // so the XSS-safe invariant holds without innerHTML.
+  var G = { nodes: [], edges: [], scale: 1, ox: 0, oy: 0, raf: 0, drag: null, pan: null, hover: null, running: false, warm: 0, cv: null, ctx: null };
+
+  function hashHue(s) { var h = 0, i; for (i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) % 360; } return h; }
+  function nodeRadius(n) { return Math.max(5, Math.min(26, 5 + Math.sqrt(n.mem || 0) * 3.2)); }
+
+  function fitView(cv) {
+    // Center the cloud in the canvas on first layout.
+    if (G.nodes.length === 0) return;
+    var minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+    G.nodes.forEach(function (n) { minx = Math.min(minx, n.x); miny = Math.min(miny, n.y); maxx = Math.max(maxx, n.x); maxy = Math.max(maxy, n.y); });
+    var w = maxx - minx || 1, h = maxy - miny || 1;
+    G.scale = Math.min(cv.width / (w + 120), cv.height / (h + 120), 1.6);
+    G.ox = cv.width / 2 - (minx + maxx) / 2 * G.scale;
+    G.oy = cv.height / 2 - (miny + maxy) / 2 * G.scale;
+  }
+
+  function step() {
+    var i, j, a, b, dx, dy, d2, d, f, ns = G.nodes;
+    for (i = 0; i < ns.length; i++) {
+      a = ns[i];
+      // centering gravity
+      a.vx += -a.x * 0.0016; a.vy += -a.y * 0.0016;
+      for (j = i + 1; j < ns.length; j++) {
+        b = ns[j];
+        dx = a.x - b.x; dy = a.y - b.y; d2 = dx * dx + dy * dy || 0.01; d = Math.sqrt(d2);
+        f = 4200 / d2; // repulsion
+        var ux = dx / d, uy = dy / d;
+        a.vx += ux * f; a.vy += uy * f; b.vx -= ux * f; b.vy -= uy * f;
       }
-    }).catch(function (err) { showError(node, err.message); });
+    }
+    G.edges.forEach(function (e) {
+      a = e.a; b = e.b; if (!a || !b) return;
+      dx = b.x - a.x; dy = b.y - a.y; d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      f = (d - 70) * 0.015; // spring toward rest length 70
+      var ux = dx / d, uy = dy / d;
+      a.vx += ux * f; a.vy += uy * f; b.vx -= ux * f; b.vy -= uy * f;
+    });
+    for (i = 0; i < ns.length; i++) {
+      a = ns[i];
+      if (a === (G.drag && G.drag.node)) { a.vx = 0; a.vy = 0; continue; }
+      a.vx *= 0.86; a.vy *= 0.86;
+      a.x += a.vx; a.y += a.vy;
+    }
+  }
+
+  function draw(cv, ctx) {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.save(); ctx.translate(G.ox, G.oy); ctx.scale(G.scale, G.scale);
+    ctx.lineWidth = 1 / G.scale;
+    G.edges.forEach(function (e) {
+      if (!e.a || !e.b) return;
+      var hot = G.hover && (e.a === G.hover || e.b === G.hover);
+      ctx.strokeStyle = hot ? 'rgba(90,150,255,0.9)' : 'rgba(136,136,136,0.35)';
+      ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke();
+    });
+    ctx.font = (11 / G.scale) + 'px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    G.nodes.forEach(function (n) {
+      var r = nodeRadius(n);
+      var dim = G.hover && G.hover !== n && !(G.hover.adj && G.hover.adj[n.id]);
+      ctx.globalAlpha = dim ? 0.25 : 1;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'hsl(' + n.hue + ',65%,55%)'; ctx.fill();
+      if (n === G.hover) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 / G.scale; ctx.stroke(); }
+      ctx.fillStyle = getComputedStyle(cv).color;
+      ctx.fillText(n.name.length > 22 ? n.name.slice(0, 21) + '…' : n.name, n.x, n.y + r + 2);
+      ctx.globalAlpha = 1;
+    });
+    ctx.restore();
+  }
+
+  // Animation controller with cooling: the RAF loop stops once the layout
+  // settles (low kinetic energy, no active interaction) and is restarted by
+  // wake() on any drag/pan/zoom/hover — so an idle graph burns 0 CPU.
+  function energy() { var e = 0, i, n; for (i = 0; i < G.nodes.length; i++) { n = G.nodes[i]; e += n.vx * n.vx + n.vy * n.vy; } return e; }
+  function tick() {
+    step();
+    if (G.warm < 60) { G.warm++; if (G.warm === 60 && G.cv) fitView(G.cv); }
+    if (G.cv && G.ctx) draw(G.cv, G.ctx);
+    if (G.warm >= 60 && !G.drag && !G.pan && energy() < 0.05) { G.running = false; G.raf = 0; return; }
+    G.raf = requestAnimationFrame(tick);
+  }
+  function wake() {
+    if (!G.running) { G.running = true; if (G.raf) cancelAnimationFrame(G.raf); G.raf = requestAnimationFrame(tick); }
+  }
+
+  function toWorld(cv, ev) {
+    var rect = cv.getBoundingClientRect();
+    var sx = (ev.clientX - rect.left) * (cv.width / rect.width);
+    var sy = (ev.clientY - rect.top) * (cv.height / rect.height);
+    return { x: (sx - G.ox) / G.scale, y: (sy - G.oy) / G.scale, sx: sx, sy: sy };
+  }
+  function pick(cv, ev) {
+    var p = toWorld(cv, ev), i, n, dx, dy, r;
+    for (i = G.nodes.length - 1; i >= 0; i--) {
+      n = G.nodes[i]; dx = p.x - n.x; dy = p.y - n.y; r = nodeRadius(n) + 4 / G.scale;
+      if (dx * dx + dy * dy <= r * r) return n;
+    }
+    return null;
+  }
+
+  function loadGraph() {
+    var cv = document.getElementById('gcanvas');
+    var hint = document.getElementById('ghint');
+    var ctx = cv.getContext('2d');
+    hint.textContent = 'Loading graph…';
+    // size the backing store to the element (device pixels)
+    cv.width = cv.clientWidth || 600; cv.height = cv.clientHeight || 440;
+    getJSON('/api/graph' + qs()).then(function (data) {
+      var rawNodes = (data && data.nodes) || [];
+      var rawEdges = (data && data.edges) || [];
+      if (G.raf) { cancelAnimationFrame(G.raf); G.raf = 0; } G.running = false;
+      if (rawNodes.length === 0) { ctx.clearRect(0, 0, cv.width, cv.height); hint.textContent = 'No entities in this namespace.'; return; }
+      // Key nodes by entity id (not name): with namespace='*' the same name
+      // can appear in multiple namespaces, and edges reference entity ids.
+      var byId = {};
+      G.nodes = rawNodes.map(function (n, i) {
+        var ent = n.entity || {};
+        var nm = ent.name || '(unnamed)';
+        var ang = (i / rawNodes.length) * Math.PI * 2;
+        var node = {
+          id: ent.id || nm, name: nm, type: ent.entity_type || 'entity', ns: ent.namespace || '',
+          mem: n.memory_count || 0, hue: hashHue(ent.entity_type || nm),
+          x: Math.cos(ang) * 140 + (i % 7) * 3, y: Math.sin(ang) * 140 + (i % 5) * 3,
+          vx: 0, vy: 0, adj: {}
+        };
+        byId[node.id] = node; return node;
+      });
+      G.edges = rawEdges.map(function (e) {
+        var rel = e.relation || {};
+        var a = byId[rel.source_entity_id], b = byId[rel.target_entity_id];
+        if (a && b) { a.adj[b.id] = 1; b.adj[a.id] = 1; }
+        return { a: a, b: b, type: rel.relation_type || 'rel' };
+      });
+      G.cv = cv; G.ctx = ctx; G.warm = 0;
+      // pre-settle synchronously so the first painted frame is already laid out
+      var k; for (k = 0; k < 120; k++) step();
+      fitView(cv); G.warm = 60;
+      hint.textContent = G.nodes.length + ' entities · ' + G.edges.length + ' relations · drag nodes, scroll to zoom, click a node to see its memories';
+      wake();
+    }).catch(function (err) { hint.textContent = 'Error: ' + err.message; });
+
+    // interaction (bind once)
+    if (!cv._wired) {
+      cv._wired = true;
+      var CLICK_PX = 5; // movement under this many screen px still counts as a click
+      cv.addEventListener('mousedown', function (ev) {
+        var n = pick(cv, ev);
+        if (n) { G.drag = { node: n, moved: false, x0: ev.clientX, y0: ev.clientY }; }
+        else { var p = toWorld(cv, ev); G.pan = { sx: p.sx, sy: p.sy, ox: G.ox, oy: G.oy }; }
+        cv.classList.add('grabbing'); wake();
+      });
+      cv.addEventListener('mousemove', function (ev) {
+        if (G.drag) {
+          // Only treat as a drag once the pointer moves past the threshold —
+          // small jitter on a click must not suppress the click action.
+          if (Math.abs(ev.clientX - G.drag.x0) > CLICK_PX || Math.abs(ev.clientY - G.drag.y0) > CLICK_PX) G.drag.moved = true;
+          if (G.drag.moved) { var p = toWorld(cv, ev); G.drag.node.x = p.x; G.drag.node.y = p.y; }
+          wake();
+        }
+        else if (G.pan) { var q = toWorld(cv, ev); G.ox = G.pan.ox + (q.sx - G.pan.sx); G.oy = G.pan.oy + (q.sy - G.pan.sy); wake(); }
+        else { var h = pick(cv, ev); if (h !== G.hover) { G.hover = h; wake(); } }
+      });
+      window.addEventListener('mouseup', function () {
+        if (G.drag && !G.drag.moved) {
+          // click (no drag past threshold) → real entity→memories via join
+          loadEntityMemories(G.drag.node);
+        }
+        G.drag = null; G.pan = null; cv.classList.remove('grabbing');
+      });
+      cv.addEventListener('wheel', function (ev) {
+        ev.preventDefault();
+        var p = toWorld(cv, ev), factor = ev.deltaY < 0 ? 1.1 : 0.9;
+        G.scale *= factor;
+        G.ox = p.sx - p.x * G.scale; G.oy = p.sy - p.y * G.scale;
+        wake();
+      }, { passive: false });
+    }
+  }
+
+  // Real entity → memories (memory_entities join), distinct from the
+  // name-based topic search loadTimeline does. Rendered into the timeline panel.
+  function loadEntityMemories(node) {
+    var out = document.getElementById('timeline');
+    clear(out);
+    out.appendChild(el('div', 'meta', 'Memories linked to entity "' + node.name + '"…'));
+    getJSON('/api/entity/' + encodeURIComponent(node.id) + '/memories').then(function (data) {
+      clear(out);
+      var mems = (data && data.memories) || [];
+      out.appendChild(el('div', 'meta', node.name + ' · ' + mems.length + ' current memory(ies) linked'));
+      if (mems.length === 0) { out.appendChild(el('div', 'meta', 'No current memories linked to this entity.')); return; }
+      mems.forEach(function (m) {
+        var item = el('div', 'item');
+        item.appendChild(el('div', 'content', m.content || ''));
+        item.appendChild(el('div', 'meta', (m.created_at || '') + ' · ' + (m.category || '') + ' · ' + (m.role || 'mentioned') + ' · id ' + (m.id || '')));
+        out.appendChild(item);
+      });
+    }).catch(function (err) { showError(out, err.message); });
   }
 
   function loadTimeline() {

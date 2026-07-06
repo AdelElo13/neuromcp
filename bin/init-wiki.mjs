@@ -21,6 +21,7 @@ import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { seedObsidianVault } from './obsidian-vault.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
@@ -67,6 +68,28 @@ for (const tpl of templates) {
   } else if (existsSync(dest)) {
     skip(dest.replace(HOME, '~'));
   }
+}
+
+// Pre-seed a minimal `.obsidian/` config so that WHEN the user opens the
+// wiki in Obsidian, it's already a valid vault with the graph/backlink
+// plugins enabled — the first open lands on a useful graph instead of a
+// blank config. NOTE: this does NOT make Obsidian auto-open the folder;
+// Obsidian only opens vaults from its own registry, and neither the CLI
+// (`open -a Obsidian <dir>`) nor the `obsidian://` URL scheme registers an
+// arbitrary path — verified empirically. Registering is a deliberate,
+// app-private action, so the user does it ONCE via Obsidian's
+// "Open folder as vault" → ~/.neuromcp/wiki. We intentionally do NOT touch
+// Obsidian's global vault registry (platform-specific, surprising).
+// Pairs with `neuromcp-obsidian-bridge` (related: → [[wikilinks]]).
+try {
+  const result = seedObsidianVault(WIKI_DIR);
+  if (result === 'created') {
+    log('Created wiki/.obsidian — in Obsidian: Open folder as vault → ~/.neuromcp/wiki (one time)');
+  } else {
+    skip('wiki/.obsidian (existing vault settings left untouched)');
+  }
+} catch (err) {
+  warn(`Obsidian vault config failed: ${err.message}`);
 }
 
 // Init git on wiki

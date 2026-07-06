@@ -562,3 +562,6 @@ een eigen taak — niet hier tracken.)
   fix. De accumulator-fix schrijft nu de running-max (defensief correct, geen
   regressie), maar de waarde overleeft de adaptive-pass niet. Geen aparte
   ticket nodig; genoteerd voor transparantie.
+
+## [2026-07-07] Gevonden tijdens web-view graph-hardening (P3)
+- **Graph node `memory_count` overtelt vs current/linked memories.** `queryGraph` (src/tools/graph.ts:128) telt ALLE `memory_entities`-rijen voor een entity, inclusief links naar getombstonede (is_deleted=1) memories. Voorbeeld live: entity "Consolidation" badge=8, maar slechts 1 levende memory via de join (7 links wijzen naar deleted memories). Gevolg: node-badge in de web-view kan hoger zijn dan wat `/api/entity/:id/memories` (current, non-deleted) teruggeeft — verwarrend maar niet fout. Root cause: tombstone/hard-delete ruimt `memory_entities`-rijen niet op. Fix-opties: (a) queryGraph `memory_count` joinen op `memories m WHERE m.is_deleted=0`, of (b) tombstone/sweep de bijbehorende memory_entities-rijen laten verwijderen. Severity P3 (cosmetisch/telling, geen dataverlies of verkeerd antwoord). Buiten scope van de graph-view PR.

@@ -131,6 +131,36 @@ describe('web-view /ui — loopback (secure) mode', () => {
     const body = JSON.parse(res.body) as { entries: unknown[] };
     expect(Array.isArray(body.entries)).toBe(true);
   });
+
+  it('GET /api/entity/:id/memories returns memories linked via memory_entities (real entity path, not name search)', async () => {
+    const ent = createEntity({ name: 'Kubernetes', entity_type: 'tool', namespace: 'default' }, ctx.db, ctx.config, ctx.logger, ctx.metrics);
+    insertTestMemory(ctx, { id: 'em1', content: 'linked memory one' });
+    insertTestMemory(ctx, { id: 'em2', content: 'linked memory two' });
+    ctx.db.prepare('INSERT INTO memory_entities (memory_id, entity_id, role) VALUES (?, ?, ?)').run('em1', ent.id, 'mentioned');
+    ctx.db.prepare('INSERT INTO memory_entities (memory_id, entity_id, role) VALUES (?, ?, ?)').run('em2', ent.id, 'subject');
+
+    const res = await req(baseUrl, '/api/entity/' + encodeURIComponent(ent.id) + '/memories');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body) as { entity_id: string; count: number; memories: Array<{ id: string; role: string }> };
+    expect(body.count).toBe(2);
+    expect(body.memories.map((m) => m.id).sort()).toEqual(['em1', 'em2']);
+  });
+
+  it('GET /api/entity/:id/memories excludes superseded by default, includes with include_superseded=1', async () => {
+    const ent = createEntity({ name: 'Home', entity_type: 'place', namespace: 'default' }, ctx.db, ctx.config, ctx.logger, ctx.metrics);
+    insertTestMemory(ctx, { id: 'cur', content: 'lives in Berlin' });
+    insertTestMemory(ctx, { id: 'old', content: 'lives in Amsterdam' });
+    // Mark 'old' superseded by 'cur'.
+    ctx.db.prepare("UPDATE memories SET superseded_by_id = 'cur', valid_to = '2020-01-01T00:00:00.000Z' WHERE id = 'old'").run();
+    ctx.db.prepare('INSERT INTO memory_entities (memory_id, entity_id, role) VALUES (?, ?, ?)').run('cur', ent.id, 'subject');
+    ctx.db.prepare('INSERT INTO memory_entities (memory_id, entity_id, role) VALUES (?, ?, ?)').run('old', ent.id, 'subject');
+
+    const def = JSON.parse((await req(baseUrl, '/api/entity/' + encodeURIComponent(ent.id) + '/memories')).body) as { memories: Array<{ id: string }> };
+    expect(def.memories.map((m) => m.id)).toEqual(['cur']);
+
+    const hist = JSON.parse((await req(baseUrl, '/api/entity/' + encodeURIComponent(ent.id) + '/memories?include_superseded=1')).body) as { memories: Array<{ id: string }> };
+    expect(hist.memories.map((m) => m.id).sort()).toEqual(['cur', 'old']);
+  });
 });
 
 describe('web-view /ui — non-loopback (insecure) mode is disabled', () => {
