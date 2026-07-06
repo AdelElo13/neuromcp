@@ -58,6 +58,7 @@ Search memories using hybrid vector + full-text search with RRF ranking, graph b
 | `before` | string | no | Only memories created before this ISO timestamp |
 | `hybrid` | boolean | no | Use hybrid search (default: true) |
 | `valid_at` | string | no | ISO 8601 timestamp — only return memories valid at this time (temporal query) |
+| `include_superseded` | boolean | no | Include superseded / expired (window-closed) memories. Default false — only current facts. A valid_at query overrides this. |
 | `graph_boost` | boolean | no | Boost results connected via knowledge graph (default: true) |
 | `episode_id` | string | no | Filter by episode ID — only return memories from this episode |
 | `explain` | boolean | no | Include explanation metadata: trust reason, contradictions, temporal validity, claims, confidence breakdown (default: true) |
@@ -76,6 +77,7 @@ Answer a question FROM memory: runs hybrid retrieval, then returns a synthesized
 | `after` | string | no | Only memories created after this ISO timestamp |
 | `before` | string | no | Only memories created before this ISO timestamp |
 | `valid_at` | string | no | ISO 8601 timestamp — only memories valid at this time |
+| `include_superseded` | boolean | no | Include superseded / expired (window-closed) memories. Default false — only current facts. A valid_at query overrides this. |
 | `max_sentences` | number | no | Max sentences in the answer (default: 5) |
 
 ### `recall_memory`
@@ -89,6 +91,7 @@ Recall memories by ID, namespace, category, or tags without semantic search.
 | `category` | string | no | Category filter |
 | `tags` | array | no | Tags filter: all must match |
 | `limit` | number | no | Max results (default: 20) |
+| `include_superseded` | boolean | no | Include superseded / expired (window-closed) memories. Default false — only current facts. Ignored for id lookups (an explicit id fetch always returns the row). |
 
 ### `forget_memory`
 
@@ -326,7 +329,7 @@ Track how knowledge about a topic evolved over time. Follows supersession chains
 | `namespace` | string | no | Namespace (default: config default) |
 | `after` | string | no | Only show entries after this ISO date |
 | `before` | string | no | Only show entries before this ISO date |
-| `include_superseded` | boolean | no | Include superseded (old) versions (default: true) |
+| `include_superseded` | boolean | no | Include superseded / expired (window-closed) versions (default: true). Set false to return only currently-valid entries. |
 | `limit` | number | no | Max entries (default: 20) |
 
 ## Multi-agent
