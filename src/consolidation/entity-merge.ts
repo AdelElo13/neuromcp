@@ -65,13 +65,26 @@ export function mergeEntitiesInNamespace(
     )
     .all(namespace) as Array<Pick<Entity, 'id' | 'name' | 'entity_type'>>;
 
-  const byType = new Map<string, Array<{ id: string; name: string }>>();
+  const byType = new Map<string, Array<{ id: string; name: string; type: string }>>();
   for (const e of entities) {
     if (e.name.length < minLen) continue;
     const arr = byType.get(e.entity_type) ?? [];
-    arr.push({ id: e.id, name: e.name });
+    arr.push({ id: e.id, name: e.name, type: e.entity_type });
     byType.set(e.entity_type, arr);
   }
+
+  // v0.29 Fase 1B (Codex [MEDIUM]): bare prefix is not enough evidence for a
+  // prefix-merge — "Apple"/"Apple Music", "Washington"/"Washington Post" are
+  // distinct entities. Only accept a prefix-merge when there is corroborating
+  // evidence: either the entities are people (first-name ⊂ full-name is the
+  // canonical alias case), or they co-occur in at least one shared memory.
+  const sharesMemoryStmt = db.prepare(
+    `SELECT 1 FROM memory_entities a
+       JOIN memory_entities b ON a.memory_id = b.memory_id
+      WHERE a.entity_id = ? AND b.entity_id = ? LIMIT 1`,
+  );
+  const shareMemory = (idA: string, idB: string): boolean =>
+    sharesMemoryStmt.get(idA, idB) !== undefined;
 
   const proposed: MergePair[] = [];
   const consumed = new Set<string>(); // entity ids already losing in a merge
@@ -94,10 +107,15 @@ export function mergeEntitiesInNamespace(
 
         // Rule A: prefix-extension. "Emily Williams" canonical → swallow "Emily"
         // when canon starts with other + word boundary, or vice versa.
-        const prefixHit =
+        // v0.29: require evidence beyond the bare prefix — the entities must
+        // be people (canonical first-name ⊂ full-name alias) OR share a memory.
+        const rawPrefixHit =
           (canonLower.startsWith(otherLower + ' ') ||
             canonLower.endsWith(' ' + otherLower)) &&
           otherLower.length >= minLen;
+        const prefixHit =
+          rawPrefixHit &&
+          (canon.type === 'person' || shareMemory(canon.id, other.id));
 
         // Rule B: small Levenshtein (typo dedup).
         let levHit = false;

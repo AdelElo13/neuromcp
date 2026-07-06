@@ -104,4 +104,34 @@ describe('mergeEntitiesInNamespace', () => {
     const result = mergeEntitiesInNamespace(ctx.db, 'ns1');
     expect(result.merged).toBe(0);
   });
+
+  // v0.29 Fase 1B (Codex [MEDIUM]): bare prefix is not enough evidence for a
+  // non-person merge. "Apple" and "Apple Music" (same concept type, no shared
+  // memory) are distinct entities and must NOT be merged.
+  it('does NOT prefix-merge non-person entities without shared-memory evidence', () => {
+    const a = upsertEntity(ctx.db, 'Apple', 'concept', 'ns1');
+    const b = upsertEntity(ctx.db, 'Apple Music', 'concept', 'ns1');
+    linkMemoryEntity(ctx.db, memNs1A, a.id);
+    linkMemoryEntity(ctx.db, memNs1B, b.id); // different memories → no evidence
+    const result = mergeEntitiesInNamespace(ctx.db, 'ns1');
+    expect(result.merged).toBe(0);
+  });
+
+  it('does NOT prefix-merge "Washington" / "Washington Post" (concept, no shared memory)', () => {
+    upsertEntity(ctx.db, 'Washington', 'concept', 'ns1');
+    upsertEntity(ctx.db, 'Washington Post', 'concept', 'ns1');
+    const result = mergeEntitiesInNamespace(ctx.db, 'ns1');
+    expect(result.merged).toBe(0);
+  });
+
+  it('DOES prefix-merge non-person entities that SHARE a memory (evidence)', () => {
+    const a = upsertEntity(ctx.db, 'Postgres', 'concept', 'ns1');
+    const b = upsertEntity(ctx.db, 'Postgres Database', 'concept', 'ns1');
+    // Both linked to the SAME memory → co-occurrence evidence they are the same.
+    linkMemoryEntity(ctx.db, memNs1A, a.id);
+    linkMemoryEntity(ctx.db, memNs1A, b.id);
+    const result = mergeEntitiesInNamespace(ctx.db, 'ns1');
+    expect(result.merged).toBe(1);
+    expect(result.proposed[0]?.reason).toBe('prefix_extension');
+  });
 });
