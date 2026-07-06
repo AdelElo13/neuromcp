@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (logged in `FOUND-DURING-FIX.md`); new files are checked by default and
   `bin/doctor.mjs` is strict-clean. `runAuditNetwork` is now
   dependency-injected and unit-tested (31 doctor tests, 6 new).
+- **INTERNAL: search-P95 latency assert moved to a dedicated perf lane.**
+  The wall-clock assert in `tests/eval/retrieval-quality.test.ts` made the
+  default suite machine-load-sensitive (observed: P95 157ms under parallel
+  build load vs 1.8ms isolated — a false red). `npm test` still measures
+  and prints the P95 but no longer asserts it; `npm run test:perf`
+  (`vitest.perf.config.ts`, arms `NEUROMCP_PERF_ASSERT=1`) runs the eval
+  tests with the `<100ms` assert enforced. Deterministic quality metrics
+  (recall/MRR/hit-rate/exclusion) are asserted in both lanes.
 
 ## [0.28.0] — 2026-07-02
 
