@@ -244,6 +244,14 @@ export async function storeMemoryBatch(
         }
       }
     }
+
+    // v0.29 Fase 1B (Codex [MEDIUM] atomicity): index vectors INSIDE the same
+    // transaction as the rows + FTS. Previously the SQLite tx committed and
+    // then vecStore.upsertBatch ran afterwards — a vector failure left live
+    // rows with no vector, invisible to hybrid search forever. Nested here
+    // via better-sqlite3's SAVEPOINT support so a vec failure rolls back the
+    // rows too. (upsertBatch runs on the same connection.)
+    vecStore.upsertBatch(vecEntries.map((e) => ({ id: e.id, embedding: e.vec })));
   });
   tx();
 
@@ -296,10 +304,6 @@ export async function storeMemoryBatch(
       concurrency: maxConcurrency,
     });
   }
-
-  // Vector store batch insert outside the SQLite transaction (sqlite-vec
-  // handles its own transactions on upsertBatch).
-  vecStore.upsertBatch(vecEntries.map((e) => ({ id: e.id, embedding: e.vec })));
 
   const insertMs = Date.now() - t1;
   logger.info('store-batch', `bulk inserted ${items.length} memories`, {
