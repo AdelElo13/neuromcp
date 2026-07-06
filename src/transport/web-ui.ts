@@ -92,7 +92,7 @@ export const WEB_UI_HTML = `<!doctype html>
   // Hand-rolled spring/repulsion sim — no external lib (CSP forbids CDN).
   // Labels drawn with fillText (canvas text is inert, no HTML injection),
   // so the XSS-safe invariant holds without innerHTML.
-  var G = { nodes: [], edges: [], scale: 1, ox: 0, oy: 0, raf: 0, drag: null, pan: null, hover: null };
+  var G = { nodes: [], edges: [], scale: 1, ox: 0, oy: 0, raf: 0, drag: null, pan: null, hover: null, running: false, warm: 0, cv: null, ctx: null };
 
   function hashHue(s) { var h = 0, i; for (i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) % 360; } return h; }
   function nodeRadius(n) { return Math.max(5, Math.min(26, 5 + Math.sqrt(n.mem || 0) * 3.2)); }
@@ -151,7 +151,7 @@ export const WEB_UI_HTML = `<!doctype html>
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     G.nodes.forEach(function (n) {
       var r = nodeRadius(n);
-      var dim = G.hover && G.hover !== n && !(G.hover.adj && G.hover.adj[n.name]);
+      var dim = G.hover && G.hover !== n && !(G.hover.adj && G.hover.adj[n.id]);
       ctx.globalAlpha = dim ? 0.25 : 1;
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
       ctx.fillStyle = 'hsl(' + n.hue + ',65%,55%)'; ctx.fill();
@@ -161,6 +161,21 @@ export const WEB_UI_HTML = `<!doctype html>
       ctx.globalAlpha = 1;
     });
     ctx.restore();
+  }
+
+  // Animation controller with cooling: the RAF loop stops once the layout
+  // settles (low kinetic energy, no active interaction) and is restarted by
+  // wake() on any drag/pan/zoom/hover — so an idle graph burns 0 CPU.
+  function energy() { var e = 0, i, n; for (i = 0; i < G.nodes.length; i++) { n = G.nodes[i]; e += n.vx * n.vx + n.vy * n.vy; } return e; }
+  function tick() {
+    step();
+    if (G.warm < 60) { G.warm++; if (G.warm === 60 && G.cv) fitView(G.cv); }
+    if (G.cv && G.ctx) draw(G.cv, G.ctx);
+    if (G.warm >= 60 && !G.drag && !G.pan && energy() < 0.05) { G.running = false; G.raf = 0; return; }
+    G.raf = requestAnimationFrame(tick);
+  }
+  function wake() {
+    if (!G.running) { G.running = true; if (G.raf) cancelAnimationFrame(G.raf); G.raf = requestAnimationFrame(tick); }
   }
 
   function toWorld(cv, ev) {
@@ -188,59 +203,62 @@ export const WEB_UI_HTML = `<!doctype html>
     getJSON('/api/graph' + qs()).then(function (data) {
       var rawNodes = (data && data.nodes) || [];
       var rawEdges = (data && data.edges) || [];
-      if (G.raf) { cancelAnimationFrame(G.raf); G.raf = 0; }
+      if (G.raf) { cancelAnimationFrame(G.raf); G.raf = 0; } G.running = false;
       if (rawNodes.length === 0) { ctx.clearRect(0, 0, cv.width, cv.height); hint.textContent = 'No entities in this namespace.'; return; }
-      var byName = {};
+      // Key nodes by entity id (not name): with namespace='*' the same name
+      // can appear in multiple namespaces, and edges reference entity ids.
+      var byId = {};
       G.nodes = rawNodes.map(function (n, i) {
         var ent = n.entity || {};
         var nm = ent.name || '(unnamed)';
         var ang = (i / rawNodes.length) * Math.PI * 2;
         var node = {
-          name: nm, type: ent.entity_type || 'entity', ns: ent.namespace || '',
+          id: ent.id || nm, name: nm, type: ent.entity_type || 'entity', ns: ent.namespace || '',
           mem: n.memory_count || 0, hue: hashHue(ent.entity_type || nm),
           x: Math.cos(ang) * 140 + (i % 7) * 3, y: Math.sin(ang) * 140 + (i % 5) * 3,
           vx: 0, vy: 0, adj: {}
         };
-        byName[nm] = node; return node;
+        byId[node.id] = node; return node;
       });
       G.edges = rawEdges.map(function (e) {
-        var a = byName[e.source_name], b = byName[e.target_name];
-        if (a && b) { a.adj[b.name] = 1; b.adj[a.name] = 1; }
-        return { a: a, b: b, type: (e.relation && e.relation.relation_type) || 'rel' };
+        var rel = e.relation || {};
+        var a = byId[rel.source_entity_id], b = byId[rel.target_entity_id];
+        if (a && b) { a.adj[b.id] = 1; b.adj[a.id] = 1; }
+        return { a: a, b: b, type: rel.relation_type || 'rel' };
       });
-      var warm = 0;
-      function frame() {
-        step();
-        if (warm < 60) { warm++; if (warm === 60) fitView(cv); }
-        draw(cv, ctx);
-        G.raf = requestAnimationFrame(frame);
-      }
-      // pre-settle a bit, then fit + animate
+      G.cv = cv; G.ctx = ctx; G.warm = 0;
+      // pre-settle synchronously so the first painted frame is already laid out
       var k; for (k = 0; k < 120; k++) step();
-      fitView(cv);
+      fitView(cv); G.warm = 60;
       hint.textContent = G.nodes.length + ' entities · ' + G.edges.length + ' relations · drag nodes, scroll to zoom, click a node to see its memories';
-      frame();
+      wake();
     }).catch(function (err) { hint.textContent = 'Error: ' + err.message; });
 
     // interaction (bind once)
     if (!cv._wired) {
       cv._wired = true;
+      var CLICK_PX = 5; // movement under this many screen px still counts as a click
       cv.addEventListener('mousedown', function (ev) {
         var n = pick(cv, ev);
-        if (n) { G.drag = { node: n, moved: false }; }
+        if (n) { G.drag = { node: n, moved: false, x0: ev.clientX, y0: ev.clientY }; }
         else { var p = toWorld(cv, ev); G.pan = { sx: p.sx, sy: p.sy, ox: G.ox, oy: G.oy }; }
-        cv.classList.add('grabbing');
+        cv.classList.add('grabbing'); wake();
       });
       cv.addEventListener('mousemove', function (ev) {
-        if (G.drag) { var p = toWorld(cv, ev); G.drag.node.x = p.x; G.drag.node.y = p.y; G.drag.moved = true; }
-        else if (G.pan) { var q = toWorld(cv, ev); G.ox = G.pan.ox + (q.sx - G.pan.sx); G.oy = G.pan.oy + (q.sy - G.pan.sy); }
-        else { G.hover = pick(cv, ev); }
+        if (G.drag) {
+          // Only treat as a drag once the pointer moves past the threshold —
+          // small jitter on a click must not suppress the click action.
+          if (Math.abs(ev.clientX - G.drag.x0) > CLICK_PX || Math.abs(ev.clientY - G.drag.y0) > CLICK_PX) G.drag.moved = true;
+          if (G.drag.moved) { var p = toWorld(cv, ev); G.drag.node.x = p.x; G.drag.node.y = p.y; }
+          wake();
+        }
+        else if (G.pan) { var q = toWorld(cv, ev); G.ox = G.pan.ox + (q.sx - G.pan.sx); G.oy = G.pan.oy + (q.sy - G.pan.sy); wake(); }
+        else { var h = pick(cv, ev); if (h !== G.hover) { G.hover = h; wake(); } }
       });
       window.addEventListener('mouseup', function () {
         if (G.drag && !G.drag.moved) {
-          // click (no drag) → load that entity's memories into the timeline
-          document.getElementById('q').value = G.drag.node.name;
-          loadTimeline();
+          // click (no drag past threshold) → real entity→memories via join
+          loadEntityMemories(G.drag.node);
         }
         G.drag = null; G.pan = null; cv.classList.remove('grabbing');
       });
@@ -249,8 +267,29 @@ export const WEB_UI_HTML = `<!doctype html>
         var p = toWorld(cv, ev), factor = ev.deltaY < 0 ? 1.1 : 0.9;
         G.scale *= factor;
         G.ox = p.sx - p.x * G.scale; G.oy = p.sy - p.y * G.scale;
+        wake();
       }, { passive: false });
     }
+  }
+
+  // Real entity → memories (memory_entities join), distinct from the
+  // name-based topic search loadTimeline does. Rendered into the timeline panel.
+  function loadEntityMemories(node) {
+    var out = document.getElementById('timeline');
+    clear(out);
+    out.appendChild(el('div', 'meta', 'Memories linked to entity "' + node.name + '"…'));
+    getJSON('/api/entity/' + encodeURIComponent(node.id) + '/memories').then(function (data) {
+      clear(out);
+      var mems = (data && data.memories) || [];
+      out.appendChild(el('div', 'meta', node.name + ' · ' + mems.length + ' current memory(ies) linked'));
+      if (mems.length === 0) { out.appendChild(el('div', 'meta', 'No current memories linked to this entity.')); return; }
+      mems.forEach(function (m) {
+        var item = el('div', 'item');
+        item.appendChild(el('div', 'content', m.content || ''));
+        item.appendChild(el('div', 'meta', (m.created_at || '') + ' · ' + (m.category || '') + ' · ' + (m.role || 'mentioned') + ' · id ' + (m.id || '')));
+        out.appendChild(item);
+      });
+    }).catch(function (err) { showError(out, err.message); });
   }
 
   function loadTimeline() {

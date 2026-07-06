@@ -69,6 +69,29 @@ for (const tpl of templates) {
   }
 }
 
+// Make the wiki a recognizable Obsidian vault out-of-the-box. Obsidian
+// treats any folder containing a `.obsidian/` dir as a vault; without it,
+// "open in Obsidian" falls back to some other vault. We only write a
+// minimal config inside neuromcp-owned state (~/.neuromcp/wiki) — we do
+// NOT touch Obsidian's global vault registry (app-private, platform-
+// specific, surprising). Pairs with `neuromcp-obsidian-bridge` which turns
+// `related:` frontmatter into [[wikilinks]] so the graph view lights up.
+const obsidianDir = join(WIKI_DIR, '.obsidian');
+if (!existsSync(obsidianDir)) {
+  try {
+    mkdirSync(obsidianDir, { recursive: true });
+    // app.json: sensible read-friendly defaults. graph.json: show tags off,
+    // so the graph is purely note/link structure.
+    writeFileSync(join(obsidianDir, 'app.json'), JSON.stringify({ attachmentFolderPath: '', alwaysUpdateLinks: true }, null, 2));
+    writeFileSync(join(obsidianDir, 'core-plugins.json'), JSON.stringify(['graph', 'backlink', 'outgoing-link', 'tag-pane', 'file-explorer', 'search'], null, 2));
+    log('Created wiki/.obsidian (open ~/.neuromcp/wiki in Obsidian as a vault)');
+  } catch (err) {
+    warn(`Obsidian vault config failed: ${err.message}`);
+  }
+} else {
+  skip('wiki/.obsidian');
+}
+
 // Init git on wiki
 if (!existsSync(join(WIKI_DIR, '.git'))) {
   try {
