@@ -21,6 +21,7 @@ import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { seedObsidianVault } from './obsidian-vault.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
@@ -80,18 +81,15 @@ for (const tpl of templates) {
 // "Open folder as vault" → ~/.neuromcp/wiki. We intentionally do NOT touch
 // Obsidian's global vault registry (platform-specific, surprising).
 // Pairs with `neuromcp-obsidian-bridge` (related: → [[wikilinks]]).
-const obsidianDir = join(WIKI_DIR, '.obsidian');
-if (!existsSync(obsidianDir)) {
-  try {
-    mkdirSync(obsidianDir, { recursive: true });
-    writeFileSync(join(obsidianDir, 'app.json'), JSON.stringify({ attachmentFolderPath: '', alwaysUpdateLinks: true }, null, 2));
-    writeFileSync(join(obsidianDir, 'core-plugins.json'), JSON.stringify(['graph', 'backlink', 'outgoing-link', 'tag-pane', 'file-explorer', 'search'], null, 2));
+try {
+  const result = seedObsidianVault(WIKI_DIR);
+  if (result === 'created') {
     log('Created wiki/.obsidian — in Obsidian: Open folder as vault → ~/.neuromcp/wiki (one time)');
-  } catch (err) {
-    warn(`Obsidian vault config failed: ${err.message}`);
+  } else {
+    skip('wiki/.obsidian (existing vault settings left untouched)');
   }
-} else {
-  skip('wiki/.obsidian');
+} catch (err) {
+  warn(`Obsidian vault config failed: ${err.message}`);
 }
 
 // Init git on wiki
