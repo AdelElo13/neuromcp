@@ -114,6 +114,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       after: z.string().optional().describe('Only memories created after this ISO timestamp'),
       before: z.string().optional().describe('Only memories created before this ISO timestamp'),
       valid_at: z.string().optional().describe('ISO 8601 timestamp — only memories valid at this time'),
+      include_superseded: z.boolean().optional().describe('Include superseded / expired (window-closed) memories. Default false — only current facts. A valid_at query overrides this.'),
       max_sentences: z.number().int().min(1).max(15).optional().describe('Max sentences in the answer (default: 5)'),
     },
   }, async (args) => {

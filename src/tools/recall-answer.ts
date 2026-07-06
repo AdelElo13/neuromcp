@@ -18,6 +18,8 @@ export interface RecallAnswerInput {
   readonly valid_at?: string;
   /** Max sentences in the synthesized answer (default 5). */
   readonly max_sentences?: number;
+  /** v0.29: include superseded / window-closed memories (default false). */
+  readonly include_superseded?: boolean;
 }
 
 export async function recallAnswer(
@@ -34,6 +36,7 @@ export async function recallAnswer(
       after: input.after,
       before: input.before,
       valid_at: input.valid_at,
+      include_superseded: input.include_superseded,
       hybrid: true,
       explain: false,
     },
