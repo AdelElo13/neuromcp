@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import type { EmbeddingProvider } from '../embeddings/types.js';
 import type { NeuromcpConfig } from '../config.js';
 import type { MemoryStats } from '../types.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 export interface StatsInput {
   readonly namespace?: string;
@@ -20,12 +21,20 @@ export function memoryStats(
   const nsClause = isAll ? '1=1' : 'namespace = ?';
   const nsParams = isAll ? [] : [namespace];
 
-  // Total active memories
+  // Total active memories (non-deleted; includes superseded/window-closed)
   const totalRow = db
     .prepare(
       `SELECT COUNT(*) as count FROM memories WHERE is_deleted = 0 AND ${nsClause}`,
     )
     .get(...nsParams) as { count: number };
+
+  // Currently-valid memories (v0.29): what default reads return.
+  const validity = currentValiditySql(new Date().toISOString());
+  const currentRow = db
+    .prepare(
+      `SELECT COUNT(*) as count FROM memories WHERE is_deleted = 0 AND ${nsClause} AND (${validity.clause})`,
+    )
+    .get(...nsParams, ...validity.params) as { count: number };
 
   // By category
   const catRows = db
@@ -98,6 +107,7 @@ export function memoryStats(
 
   return {
     total: totalRow.count,
+    current: currentRow.count,
     by_category: byCategory,
     by_source: bySource,
     by_trust: byTrust,

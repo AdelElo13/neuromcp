@@ -174,7 +174,13 @@ export interface ConsolidationResult {
 }
 
 export interface MemoryStats {
+  /** Non-deleted memories (is_deleted=0). Includes superseded/window-closed. */
   readonly total: number;
+  /**
+   * v0.29: currently-valid memories — non-deleted AND not superseded AND
+   * validity window still open. This is what default reads return.
+   */
+  readonly current: number;
   readonly by_category: Record<string, number>;
   readonly by_source: Record<string, number>;
   readonly by_trust: Record<string, number>;

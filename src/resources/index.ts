@@ -3,6 +3,7 @@ import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ServerDeps } from '../server.js';
 import type { Memory, OperationRecord } from '../types.js';
 import { memoryStats } from '../tools/stats.js';
+import { recentMemories, namespaceMemories } from './queries.js';
 import { NEUROMCP_VERSION } from '../version.js';
 
 export function registerResources(server: McpServer, deps: ServerDeps): void {
@@ -22,12 +23,10 @@ export function registerResources(server: McpServer, deps: ServerDeps): void {
 
   // ─── Static 2: memory://recent ───────────────────────────────────
   server.registerResource('recent_memories', 'memory://recent', {
-    description: 'Last 20 memories across all namespaces',
+    description: 'Last 20 currently-valid memories across all namespaces',
     mimeType: 'application/json',
   }, () => {
-    const rows = db.prepare(
-      'SELECT * FROM memories WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT 20',
-    ).all() as Memory[];
+    const rows = recentMemories(db, 20);
     return {
       contents: [{
         uri: 'memory://recent',
@@ -141,14 +140,12 @@ export function registerResources(server: McpServer, deps: ServerDeps): void {
     'namespace_recent',
     new ResourceTemplate('memory://recent/{namespace}', { list: undefined }),
     {
-      description: 'Last 20 memories in a specific namespace',
+      description: 'Last 20 currently-valid memories in a specific namespace',
       mimeType: 'application/json',
     },
     (uri, variables) => {
       const namespace = String(variables.namespace);
-      const rows = db.prepare(
-        'SELECT * FROM memories WHERE is_deleted = 0 AND namespace = ? ORDER BY created_at DESC LIMIT 20',
-      ).all(namespace) as Memory[];
+      const rows = namespaceMemories(db, namespace, 20);
       return {
         contents: [{
           uri: uri.href,
@@ -238,14 +235,12 @@ export function registerResources(server: McpServer, deps: ServerDeps): void {
     'namespace_memories',
     new ResourceTemplate('memory://namespace/{ns}', { list: undefined }),
     {
-      description: 'All memories in a namespace (up to 100)',
+      description: 'Currently-valid memories in a namespace (up to 100)',
       mimeType: 'application/json',
     },
     (uri, variables) => {
       const ns = String(variables.ns);
-      const rows = db.prepare(
-        'SELECT * FROM memories WHERE is_deleted = 0 AND namespace = ? ORDER BY created_at DESC LIMIT 100',
-      ).all(ns) as Memory[];
+      const rows = namespaceMemories(db, ns, 100);
       return {
         contents: [{
           uri: uri.href,
