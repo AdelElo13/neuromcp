@@ -3,6 +3,81 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.0] — 2026-07-06
+
+### Fixed
+
+- **FIX: current-validity invariant enforced end-to-end.** Default reads
+  now hide superseded and window-closed (`valid_to` in the past) memories
+  across **every** read path — hybrid + chrono search, `recall_memory`,
+  `recall_answer`, `memory_timeline`, the `memory://recent` /
+  `memory://recent/{ns}` / `memory://namespace/{ns}` resources, and
+  `memory_stats`. History is explicit opt-in: a `valid_at` point-in-time
+  query or `include_superseded: true` returns it; an id-lookup bypasses the
+  filter. A single shared source of truth (`src/governance/validity.ts`:
+  `currentValiditySql` / `isCurrent`) backs all of them. The vec candidate
+  budget is widened when filtering so a run of superseded near-duplicates
+  cannot starve the current row out of the top-k. `memory_stats` keeps
+  `total` (non-deleted) and adds `current` (currently-valid).
+- **FIX: re-storing a superseded/window-closed fact revives it.** A dedup
+  match on such a row previously returned `matched: true` while leaving the
+  fact invisible after the read-fix. It is now made current again
+  (`valid_to`/`superseded_by_id` cleared, `valid_from` bumped) and the stale
+  reverse `supersedes_id` is cleared — in one transaction.
+- **FIX: contradiction auto-supersede gate tightened.** The gate required
+  both predicates to be mutually-exclusive but never the same, so
+  "uses React 18" could be superseded by "requires Node 22". Auto-supersede
+  now requires the same normalized predicate **and** an exact subject match
+  (no bare substring), removing a false-supersede hallucination vector.
+- **FIX: consolidation no longer destroys live history.** `findDuplicates`,
+  `computeDecay`, `findExpired`, and `findStale` selected on `is_deleted = 0`
+  only, so superseded rows could be merged/decayed/pruned — breaking
+  `valid_at` recall and the supersession chain. They now exclude
+  superseded/window-closed rows from candidate selection.
+- **FIX: compression is now atomic.** `compressMemories` tombstoned + removed
+  the originals' vectors inside the transaction but embedded/indexed the
+  digest *after* the commit — a crash between left the originals gone and the
+  digest unsearchable. Digest embeddings are precomputed before the
+  transaction and the vector/FTS index write now lands inside it.
+- **FIX: batch store is now atomic.** `storeMemoryBatch` committed rows + FTS
+  before `vecStore.upsertBatch`, so a vector failure left live rows with no
+  vector (invisible to hybrid search). The vector write now runs inside the
+  same transaction.
+- **FIX: dedup keep-tracking.** When one keep received multiple merge
+  proposals, the per-merge winner update overwrote its tags each time,
+  dropping earlier merges' tags. Tags are now accumulated (union) per keep.
+- **FIX: entity-merge prefix false-positives.** Bare prefix matched
+  "Apple"/"Apple Music" and "Washington"/"Washington Post" as one entity.
+  A prefix-merge now requires evidence — both entities are people, or they
+  co-occur in a shared memory.
+- **FIX: store-time namespace pushdown.** Semantic dedup, contradiction
+  detection, and surprise scoring searched the vector index globally then
+  filtered by namespace, so in a multi-namespace DB other namespaces could
+  fill the top-k and hide same-namespace duplicates/contradictions. The
+  namespace is now pushed into the vector query.
+- **FIX: `query_graph` overview honours `namespace: "*"`.** The overview
+  branch always filtered `e.namespace = ?`, so `"*"` returned zero entities;
+  it now aggregates across all namespaces.
+- **FIX: `/api/store-batch` no longer leaks internal error detail** in the
+  500 response body (matches the `/api/store` generic-message pattern).
+
+### Added
+
+- **Added: `neuromcp-obsidian-bridge`.** Projects each wiki page's
+  `related: [...]` frontmatter into a managed `## Related` section of
+  `[[wikilinks]]`, so the neuromcp knowledge graph renders in Obsidian.
+  Idempotent (HTML-comment-delimited block), frontmatter byte-exact,
+  sanitized against `[[`/`]]`/newline injection, CRLF-safe, `--dry-run`.
+  See `docs/OBSIDIAN.md`.
+- **Added: read-only daemon web-view at `GET /ui`** plus `GET /api/graph`,
+  `GET /api/timeline`, `GET /api/memory/:id`. Self-contained (no external
+  resources), XSS-safe (all store content rendered via `textContent`),
+  strict CSP (`default-src 'none'; connect-src 'self'`), and **disabled
+  under a non-loopback bind** so no unauthenticated memory browser is ever
+  published to the network.
+- **Added: `include_superseded` parameter** on `search_memory`,
+  `recall_memory`, and `recall_answer` (default false — only current facts).
+
 ## [0.28.1] — 2026-07-06
 
 ### Security
