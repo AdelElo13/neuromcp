@@ -69,22 +69,24 @@ for (const tpl of templates) {
   }
 }
 
-// Make the wiki a recognizable Obsidian vault out-of-the-box. Obsidian
-// treats any folder containing a `.obsidian/` dir as a vault; without it,
-// "open in Obsidian" falls back to some other vault. We only write a
-// minimal config inside neuromcp-owned state (~/.neuromcp/wiki) — we do
-// NOT touch Obsidian's global vault registry (app-private, platform-
-// specific, surprising). Pairs with `neuromcp-obsidian-bridge` which turns
-// `related:` frontmatter into [[wikilinks]] so the graph view lights up.
+// Pre-seed a minimal `.obsidian/` config so that WHEN the user opens the
+// wiki in Obsidian, it's already a valid vault with the graph/backlink
+// plugins enabled — the first open lands on a useful graph instead of a
+// blank config. NOTE: this does NOT make Obsidian auto-open the folder;
+// Obsidian only opens vaults from its own registry, and neither the CLI
+// (`open -a Obsidian <dir>`) nor the `obsidian://` URL scheme registers an
+// arbitrary path — verified empirically. Registering is a deliberate,
+// app-private action, so the user does it ONCE via Obsidian's
+// "Open folder as vault" → ~/.neuromcp/wiki. We intentionally do NOT touch
+// Obsidian's global vault registry (platform-specific, surprising).
+// Pairs with `neuromcp-obsidian-bridge` (related: → [[wikilinks]]).
 const obsidianDir = join(WIKI_DIR, '.obsidian');
 if (!existsSync(obsidianDir)) {
   try {
     mkdirSync(obsidianDir, { recursive: true });
-    // app.json: sensible read-friendly defaults. graph.json: show tags off,
-    // so the graph is purely note/link structure.
     writeFileSync(join(obsidianDir, 'app.json'), JSON.stringify({ attachmentFolderPath: '', alwaysUpdateLinks: true }, null, 2));
     writeFileSync(join(obsidianDir, 'core-plugins.json'), JSON.stringify(['graph', 'backlink', 'outgoing-link', 'tag-pane', 'file-explorer', 'search'], null, 2));
-    log('Created wiki/.obsidian (open ~/.neuromcp/wiki in Obsidian as a vault)');
+    log('Created wiki/.obsidian — in Obsidian: Open folder as vault → ~/.neuromcp/wiki (one time)');
   } catch (err) {
     warn(`Obsidian vault config failed: ${err.message}`);
   }
