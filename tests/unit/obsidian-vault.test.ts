@@ -21,6 +21,12 @@ describe('seedObsidianVault', () => {
     expect(existsSync(join(dir, '.obsidian', 'app.json'))).toBe(true);
     const plugins = JSON.parse(readFileSync(join(dir, '.obsidian', 'core-plugins.json'), 'utf8'));
     expect(plugins).toContain('graph');
+    // Graph colour groups so the Obsidian graph is coloured by category
+    // out-of-the-box (Obsidian's default graph is monochrome).
+    const graph = JSON.parse(readFileSync(join(dir, '.obsidian', 'graph.json'), 'utf8'));
+    expect(Array.isArray(graph.colorGroups)).toBe(true);
+    expect(graph.colorGroups.length).toBeGreaterThanOrEqual(6);
+    expect(graph.colorGroups.map((g: { query: string }) => g.query)).toContain('path:projects/');
   });
 
   it('NEVER overwrites an existing .obsidian setup (returns skipped, files byte-identical)', () => {

@@ -19,6 +19,24 @@ import { join } from 'node:path';
 const APP_JSON = { attachmentFolderPath: '', alwaysUpdateLinks: true };
 const CORE_PLUGINS = ['graph', 'backlink', 'outgoing-link', 'tag-pane', 'file-explorer', 'search'];
 
+// Colour the Obsidian graph by wiki category folder out-of-the-box —
+// Obsidian's graph is monochrome by default (colours only come from
+// "Groups"). These map the neuromcp wiki's top-level folders to distinct
+// hues so the graph is readable on first open. `rgb` is Obsidian's packed
+// integer colour (0xRRGGBB).
+const GRAPH_JSON = {
+  colorGroups: [
+    { query: 'path:projects/', color: { a: 1, rgb: 0x4c8dff } },   // blue
+    { query: 'path:people/', color: { a: 1, rgb: 0x3cb371 } },     // green
+    { query: 'path:systems/', color: { a: 1, rgb: 0xe8912d } },    // orange
+    { query: 'path:patterns/', color: { a: 1, rgb: 0xa46be0 } },   // purple
+    { query: 'path:decisions/', color: { a: 1, rgb: 0xe0533b } },  // red
+    { query: 'path:skills/', color: { a: 1, rgb: 0x2db5b5 } },     // teal
+  ],
+  showTags: false,
+  showAttachments: false,
+};
+
 /**
  * @param {string} wikiDir Absolute path to the neuromcp wiki directory.
  * @param {{
@@ -43,7 +61,9 @@ export function seedObsidianVault(wikiDir, deps = {}) {
   // something else between the check and here, never clobber an existing file.
   const appPath = join(dir, 'app.json');
   const pluginsPath = join(dir, 'core-plugins.json');
+  const graphPath = join(dir, 'graph.json');
   if (!existsSync(appPath)) writeFileSync(appPath, JSON.stringify(APP_JSON, null, 2));
   if (!existsSync(pluginsPath)) writeFileSync(pluginsPath, JSON.stringify(CORE_PLUGINS, null, 2));
+  if (!existsSync(graphPath)) writeFileSync(graphPath, JSON.stringify(GRAPH_JSON, null, 2));
   return 'created';
 }
