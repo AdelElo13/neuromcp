@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { Memory } from '../types.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 export interface TimelineEntry {
   readonly memory: Memory;
@@ -33,6 +34,17 @@ export function memoryTimeline(
   const includeSuperseded = input.include_superseded !== false;
   const limit = input.limit ?? 20;
 
+  // v0.29: when include_superseded is false the timeline shows only CURRENT
+  // entries — the old `AND is_deleted = 0` gate was semantically broken
+  // (it never hid superseded/window-closed rows). Reuse the shared helper.
+  const nowIso = new Date().toISOString();
+  const matchValidity = includeSuperseded ? null : currentValiditySql(nowIso, 'm');
+  const matchValidityClause = matchValidity !== null ? ` AND (${matchValidity.clause})` : '';
+  const matchValidityParams = matchValidity !== null ? matchValidity.params : [];
+  const likeValidity = includeSuperseded ? null : currentValiditySql(nowIso);
+  const likeValidityClause = likeValidity !== null ? ` AND (${likeValidity.clause})` : '';
+  const likeValidityParams = likeValidity !== null ? likeValidity.params : [];
+
   // Find memories matching the query (FTS)
   let matchIds: string[];
   try {
@@ -40,20 +52,18 @@ export function memoryTimeline(
     const ftsRows = db.prepare(`
       SELECT m.id FROM memories_fts f
       JOIN memories m ON m.rowid = f.rowid
-      WHERE memories_fts MATCH ? AND m.namespace = ?
-      ${includeSuperseded ? '' : 'AND m.is_deleted = 0'}
+      WHERE memories_fts MATCH ? AND m.namespace = ? AND m.is_deleted = 0${matchValidityClause}
       ORDER BY rank
       LIMIT ?
-    `).all(ftsQuery, namespace, limit * 3) as Array<{ id: string }>;
+    `).all(ftsQuery, namespace, ...matchValidityParams, limit * 3) as Array<{ id: string }>;
     matchIds = ftsRows.map(r => r.id);
   } catch {
     // FTS failed, try LIKE fallback
     const likeRows = db.prepare(`
       SELECT id FROM memories
-      WHERE namespace = ? AND content LIKE ?
-      ${includeSuperseded ? '' : 'AND is_deleted = 0'}
+      WHERE namespace = ? AND content LIKE ? AND is_deleted = 0${likeValidityClause}
       ORDER BY created_at DESC LIMIT ?
-    `).all(namespace, `%${input.query}%`, limit * 3) as Array<{ id: string }>;
+    `).all(namespace, `%${input.query}%`, ...likeValidityParams, limit * 3) as Array<{ id: string }>;
     matchIds = likeRows.map(r => r.id);
   }
 
@@ -82,10 +92,18 @@ export function memoryTimeline(
     }
   }
 
-  // Fetch all memories
+  // Fetch all memories. When include_superseded is false, the chain
+  // expansion above re-introduces superseded ids — re-apply the current
+  // filter here so `false` genuinely returns only current entries.
   const placeholders = [...allIds].map(() => '?').join(',');
   let query = `SELECT * FROM memories WHERE id IN (${placeholders})`;
   const params: unknown[] = [...allIds];
+
+  if (!includeSuperseded) {
+    const v = currentValiditySql(nowIso);
+    query += ` AND (${v.clause})`;
+    params.push(...v.params);
+  }
 
   if (input.after) {
     query += ' AND created_at > ?';

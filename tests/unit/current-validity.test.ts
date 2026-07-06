@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, teardownTestDb, insertTestMemory } from '../helpers/index.js';
 import type { TestContext } from '../helpers/index.js';
 import { recallMemory } from '../../src/tools/recall.js';
+import { memoryTimeline } from '../../src/tools/timeline.js';
 
 /**
  * Current-validity invariant (v0.29) — read paths.
@@ -84,5 +85,63 @@ describe('recallMemory — current-validity invariant', () => {
     const ids = results.map((r) => r.id);
     expect(ids).toContain('a');
     expect(ids).toContain('b');
+  });
+});
+
+describe('memoryTimeline — current-validity invariant', () => {
+  let ctx: TestContext;
+
+  beforeEach(() => {
+    ctx = setupTestDb();
+  });
+
+  afterEach(() => {
+    teardownTestDb(ctx);
+  });
+
+  function seedFts(id: string, content: string, overrides: Record<string, unknown> = {}): void {
+    insertTestMemory(ctx, { id, content, ...overrides });
+    const row = ctx.db.prepare('SELECT rowid FROM memories WHERE id = ?').get(id) as { rowid: number };
+    ctx.db
+      .prepare('INSERT INTO memories_fts (rowid, content, summary, tags, category) VALUES (?, ?, NULL, ?, ?)')
+      .run(row.rowid, content, '[]', 'general');
+  }
+
+  it('include_superseded default (true) returns the whole chain', () => {
+    seedFts('v1', 'kubernetes version is 1.28', { superseded_by_id: 'v2' });
+    seedFts('v2', 'kubernetes version is 1.30', { supersedes_id: 'v1' });
+
+    const result = memoryTimeline(ctx.db, { query: 'kubernetes version' }, 'default');
+    const ids = result.entries.map((e) => e.memory.id);
+    expect(ids).toContain('v1');
+    expect(ids).toContain('v2');
+  });
+
+  it('include_superseded:false returns only the current entry', () => {
+    seedFts('v1', 'kubernetes version is 1.28', { superseded_by_id: 'v2' });
+    seedFts('v2', 'kubernetes version is 1.30', { supersedes_id: 'v1' });
+
+    const result = memoryTimeline(
+      ctx.db,
+      { query: 'kubernetes version', include_superseded: false },
+      'default',
+    );
+    const ids = result.entries.map((e) => e.memory.id);
+    expect(ids).toContain('v2');
+    expect(ids).not.toContain('v1');
+  });
+
+  it('include_superseded:false also drops window-closed (valid_to past) entries', () => {
+    seedFts('expired', 'redis maxmemory is 1gb', { valid_to: PAST });
+    seedFts('live', 'redis maxmemory is 4gb', {});
+
+    const result = memoryTimeline(
+      ctx.db,
+      { query: 'redis maxmemory', include_superseded: false },
+      'default',
+    );
+    const ids = result.entries.map((e) => e.memory.id);
+    expect(ids).toContain('live');
+    expect(ids).not.toContain('expired');
   });
 });

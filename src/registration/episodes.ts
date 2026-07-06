@@ -136,7 +136,7 @@ export function registerEpisodeTools(server: McpServer, deps: ServerDeps): void 
       namespace: z.string().optional().describe('Namespace (default: config default)'),
       after: z.string().optional().describe('Only show entries after this ISO date'),
       before: z.string().optional().describe('Only show entries before this ISO date'),
-      include_superseded: z.boolean().optional().describe('Include superseded (old) versions (default: true)'),
+      include_superseded: z.boolean().optional().describe('Include superseded / expired (window-closed) versions (default: true). Set false to return only currently-valid entries.'),
       limit: z.number().int().optional().describe('Max entries (default: 20)'),
     },
   }, (args) => {
