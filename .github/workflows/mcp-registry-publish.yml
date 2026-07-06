@@ -54,11 +54,25 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          MCPNAME=$(npm view "neuromcp@$VERSION" mcpName 2>/dev/null || true)
-          if [ "$MCPNAME" != "io.github.AdelElo13/neuromcp" ]; then
-            echo "::error::neuromcp@$VERSION is not on npm (or lacks mcpName) — publish to npm first."
-            exit 1
-          fi
+          # npm registry propagation lags `npm publish` by up to ~1-2 min.
+          # When this workflow is triggered by the GitHub release (which is
+          # created right after publish), a single check races the lag and
+          # fails with "not on npm" even though publish succeeded. Poll with
+          # backoff so the automatic release-triggered run self-heals instead
+          # of needing a manual re-dispatch.
+          ATTEMPTS=10
+          DELAY=15
+          for i in $(seq 1 "$ATTEMPTS"); do
+            MCPNAME=$(npm view "neuromcp@$VERSION" mcpName 2>/dev/null || true)
+            if [ "$MCPNAME" = "io.github.AdelElo13/neuromcp" ]; then
+              echo "neuromcp@$VERSION present on npm (attempt $i)."
+              exit 0
+            fi
+            echo "Attempt $i/$ATTEMPTS: neuromcp@$VERSION not visible on npm yet (mcpName='$MCPNAME'); waiting ${DELAY}s…"
+            sleep "$DELAY"
+          done
+          echo "::error::neuromcp@$VERSION not on npm (or lacks mcpName) after $((ATTEMPTS * DELAY))s — publish to npm first."
+          exit 1
 
       - name: Patch server.json to the release version
         env:

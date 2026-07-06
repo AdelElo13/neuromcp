@@ -40,3 +40,16 @@ describe('mcp-registry-publish workflow — mcp-publisher install hardening', ()
     expect(extractAt).toBeGreaterThan(verifyAt);
   });
 });
+
+describe('mcp-registry-publish workflow — npm propagation race', () => {
+  // v0.29.0 release: the release-triggered run failed because it checked
+  // `npm view` once, before npm registry propagation caught up with the
+  // just-completed publish. The verify step must poll/retry so the
+  // automatic run self-heals instead of needing a manual re-dispatch.
+  it('polls npm for the version instead of checking exactly once', () => {
+    const verify = workflow.slice(workflow.indexOf('Verify the npm package version'));
+    // A retry loop: some for/while iterating with a sleep between attempts.
+    expect(verify).toMatch(/for\s+\w+\s+in|while\s+/);
+    expect(verify).toMatch(/sleep\s+/);
+  });
+});
