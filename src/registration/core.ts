@@ -128,6 +128,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       category: z.string().optional().describe('Category filter'),
       tags: z.array(z.string()).optional().describe('Tags filter: all must match'),
       limit: z.number().int().min(1).max(100).optional().describe('Max results (default: 20)'),
+      include_superseded: z.boolean().optional().describe('Include superseded / expired (window-closed) memories. Default false — only current facts. Ignored for id lookups (an explicit id fetch always returns the row).'),
     },
   }, (args) => {
     const results = recallMemory(args, db, config, logger, metrics);

@@ -3,6 +3,7 @@ import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import type { NeuromcpConfig } from '../config.js';
 import type { Memory } from '../types.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 export interface RecallInput {
   readonly id?: string;
@@ -10,6 +11,12 @@ export interface RecallInput {
   readonly category?: string;
   readonly tags?: readonly string[];
   readonly limit?: number;
+  /**
+   * v0.29: include superseded / window-closed rows. Default false — only
+   * current facts. Ignored for id-lookups (an explicit fetch bypasses the
+   * current-validity filter entirely).
+   */
+  readonly include_superseded?: boolean;
 }
 
 export function recallMemory(
@@ -44,6 +51,15 @@ export function recallMemory(
   if (input.id !== undefined) {
     conditions.push('id = ?');
     params.push(input.id);
+  }
+
+  // v0.29 current-validity invariant: default reads hide superseded /
+  // window-closed rows. An id-lookup is the one legitimate bypass — an
+  // explicit fetch may return anything. `include_superseded` opts back in.
+  if (input.id === undefined && input.include_superseded !== true) {
+    const validity = currentValiditySql(new Date().toISOString());
+    conditions.push(`(${validity.clause})`);
+    params.push(...validity.params);
   }
 
   if (input.category !== undefined) {

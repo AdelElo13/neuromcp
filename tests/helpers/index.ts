@@ -102,6 +102,10 @@ export function insertTestMemory(
     is_deleted: number;
     tombstoned_at: string | null;
     content_hash: string;
+    superseded_by_id: string | null;
+    supersedes_id: string | null;
+    valid_from: string | null;
+    valid_to: string | null;
   }> = {},
 ): string {
   const id =
@@ -121,6 +125,10 @@ export function insertTestMemory(
   const expires_at = overrides.expires_at ?? null;
   const is_deleted = overrides.is_deleted ?? 0;
   const tombstoned_at = overrides.tombstoned_at ?? null;
+  const superseded_by_id = overrides.superseded_by_id ?? null;
+  const supersedes_id = overrides.supersedes_id ?? null;
+  const valid_from = overrides.valid_from ?? null;
+  const valid_to = overrides.valid_to ?? null;
   const content_hash =
     overrides.content_hash ??
     Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
@@ -132,11 +140,13 @@ export function insertTestMemory(
         namespace, project_id, agent_id, source, source_trust, visibility,
         schema_version, category, tags, importance, access_count,
         created_at, updated_at, last_accessed_at, expires_at,
-        is_deleted, tombstoned_at, supersedes_id, superseded_by_id, metadata
+        is_deleted, tombstoned_at, supersedes_id, superseded_by_id, metadata,
+        valid_from, valid_to
       ) VALUES (
         ?, ?, ?, NULL, 'fake', 384,
         ?, NULL, NULL, ?, ?, 'namespace', 1, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, NULL, NULL, '{}'
+        ?, ?, ?, ?, ?, ?, ?, ?, '{}',
+        ?, ?
       )`,
     )
     .run(
@@ -156,6 +166,10 @@ export function insertTestMemory(
       expires_at,
       is_deleted,
       tombstoned_at,
+      supersedes_id,
+      superseded_by_id,
+      valid_from,
+      valid_to,
     );
 
   return id;
