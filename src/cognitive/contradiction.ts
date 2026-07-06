@@ -21,9 +21,31 @@ function normalizeSubject(s: string): string {
 }
 
 /**
+ * Canonicalize a predicate for equality comparison. The mutually-exclusive
+ * list carries singular + plural forms (uses/use, is/are, runs/run); collapse
+ * them so "uses" and "use" compare equal, while "uses" and "requires" do NOT.
+ */
+function normalizePredicate(p: string): string {
+  const lower = p.toLowerCase().trim();
+  // is/are/was/were → be; has/have/had → have
+  if (lower === 'is' || lower === 'are' || lower === 'was' || lower === 'were') return 'be';
+  if (lower === 'has' || lower === 'have' || lower === 'had') return 'have';
+  // Strip a trailing 's' for third-person singular (uses → use, runs → run).
+  return lower.endsWith('s') ? lower.slice(0, -1) : lower;
+}
+
+/**
  * Gate for auto-supersede: returns true only when the new and existing
- * content share a claim with the same subject and a mutually-exclusive
- * predicate but a DIFFERENT object — i.e. a real single-valued-fact update.
+ * content share a claim with the SAME subject, the SAME (normalized)
+ * mutually-exclusive predicate, but a DIFFERENT object — i.e. a real
+ * single-valued-fact update.
+ *
+ * v0.29 (Codex Task1 #4) tightened two false-positive sources:
+ *   - predicates must MATCH after normalization ("uses React 18" is not
+ *     superseded by "requires Node 22" — different predicate, additive fact);
+ *   - subjects must be EXACTLY equal after normalization (no bare substring:
+ *     "the app" and "the mapping app" are different subjects). A false
+ *     supersede silently deletes a true fact — a hallucination vector.
  */
 export function predicatesAllowSupersede(newContent: string, existingContent: string): boolean {
   const newTriples = extractTriplesFromText(newContent);
@@ -35,11 +57,15 @@ export function predicatesAllowSupersede(newContent: string, existingContent: st
     if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(nt.predicate.toLowerCase())) continue;
     const ns = normalizeSubject(nt.subject);
     if (ns.length === 0) continue;
+    const np = normalizePredicate(nt.predicate);
     for (const ot of oldTriples) {
       if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(ot.predicate.toLowerCase())) continue;
+      // Same predicate (normalized) required — additive facts across
+      // different predicates must never auto-invalidate each other.
+      if (np !== normalizePredicate(ot.predicate)) continue;
       const os = normalizeSubject(ot.subject);
-      const subjectsAlign = ns === os || ns.includes(os) || os.includes(ns);
-      if (!subjectsAlign) continue;
+      // Exact subject equality — substring alignment produced false supersedes.
+      if (ns !== os) continue;
       if (nt.object.toLowerCase().trim() !== ot.object.toLowerCase().trim()) {
         return true;
       }
