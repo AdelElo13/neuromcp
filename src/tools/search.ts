@@ -17,6 +17,7 @@ import { mmrRerank } from '../cognitive/mmr.js';
 import { searchEntities } from '../graph/entities.js';
 import { findConnectedMemories } from '../graph/traverse.js';
 import type { RerankProvider } from '../rerank/types.js';
+import { currentValiditySql, isCurrent } from '../governance/validity.js';
 
 export interface SearchInput {
   readonly query: string;
@@ -38,6 +39,12 @@ export interface SearchInput {
   // (37 fields per result, most of them DB internals). `compact` trims the
   // payload to the 7 fields an agent actually needs.
   readonly compact?: boolean;
+  /**
+   * v0.29: include superseded / window-closed rows. Default false — only
+   * current facts. A `valid_at` point-in-time query overrides this (history
+   * is exactly what valid_at asks for).
+   */
+  readonly include_superseded?: boolean;
 }
 
 /** The 7 fields a consuming agent typically needs. Reduces payload ~10×. */
@@ -109,25 +116,34 @@ export function ftsCandidates(
   ftsQuery: string,
   k: number,
   namespace?: string,
+  currentOnlyNow?: string,
 ): Array<{ id: string }> {
+  // v0.29: when currentOnlyNow is set, push the current-validity predicate
+  // into the candidate SQL so superseded/window-closed rows never consume
+  // the FTS candidate budget (the keyword-side twin of vec starvation).
+  const validity =
+    currentOnlyNow !== undefined ? currentValiditySql(currentOnlyNow, 'm') : null;
+  const validityClause = validity !== null ? ` AND (${validity.clause})` : '';
+  const validityParams = validity !== null ? validity.params : [];
+
   if (namespace === undefined) {
     return db
       .prepare(
         `SELECT m.id FROM memories_fts f
          JOIN memories m ON m.rowid = f.rowid
-         WHERE memories_fts MATCH ? AND m.is_deleted = 0
+         WHERE memories_fts MATCH ? AND m.is_deleted = 0${validityClause}
          ORDER BY rank LIMIT ?`,
       )
-      .all(ftsQuery, k) as Array<{ id: string }>;
+      .all(ftsQuery, ...validityParams, k) as Array<{ id: string }>;
   }
   return db
     .prepare(
       `SELECT m.id FROM memories_fts f
        JOIN memories m ON m.rowid = f.rowid
-       WHERE memories_fts MATCH ? AND m.is_deleted = 0 AND m.namespace = ?
+       WHERE memories_fts MATCH ? AND m.is_deleted = 0 AND m.namespace = ?${validityClause}
        ORDER BY rank LIMIT ?`,
     )
-    .all(ftsQuery, namespace, k) as Array<{ id: string }>;
+    .all(ftsQuery, namespace, ...validityParams, k) as Array<{ id: string }>;
 }
 
 export async function searchMemory(
@@ -149,12 +165,29 @@ export async function searchMemory(
   // hit `namespace = '*'` equality filters and silently return zero rows.
   const scopedNamespace = namespace === '*' ? undefined : namespace;
 
+  // v0.29 current-validity invariant: default reads hide superseded /
+  // window-closed rows. A `valid_at` point-in-time query overrides this
+  // (history is exactly what it asks for); `include_superseded` also opts
+  // back into everything.
+  const nowIso = new Date().toISOString();
+  const currentOnly = input.valid_at === undefined && input.include_superseded !== true;
+
   // Candidate budget per leg. When a reranker is active it needs at least
   // rerankPool candidates to choose from — fetch enough up front, otherwise
   // (e.g. limit=5 → limit*3=15 < pool=30) the reranker can never see the
   // wider pool the Step-7 truncation promises.
+  //
+  // When the current-validity filter is active, superseded/window-closed
+  // rows are filtered inside the FTS candidate SQL, but sqlite-vec cannot
+  // push the predicate into its MATCH. To stop hidden rows from starving the
+  // vec leg's top-k (a run of superseded near-duplicates would otherwise
+  // crowd the current row out before Step 7 ever fetches it), widen the vec
+  // candidate budget substantially when filtering is on.
   const reranker = deps.reranker ?? null;
-  const candidateK = reranker !== null ? Math.max(limit * 3, config.rerankPool) : limit * 3;
+  const baseCandidateK = reranker !== null ? Math.max(limit * 3, config.rerankPool) : limit * 3;
+  const candidateK = baseCandidateK;
+  // sqlite-vec hard-caps k at 4096; stay comfortably below.
+  const vecCandidateK = currentOnly ? Math.min(Math.max(baseCandidateK * 8, 200), 4000) : baseCandidateK;
 
   // Step 1: Generate query embedding. When the embedder is down (Ollama not
   // running, network timeout) a hybrid search degrades LOUDLY to FTS-only
@@ -176,7 +209,7 @@ export async function searchMemory(
   // Step 2: Vector search — push namespace into the vec query so we don't
   // waste the top-k budget on other tenants' data (see sqlite-vec.ts for
   // the recall-collapse story).
-  const vecResults = embedding !== null ? vecStore.search(embedding, candidateK, scopedNamespace) : [];
+  const vecResults = embedding !== null ? vecStore.search(embedding, vecCandidateK, scopedNamespace) : [];
 
   const vecRanks = new Map<string, number>();
   vecResults.forEach((r, i) => {
@@ -188,7 +221,13 @@ export async function searchMemory(
   if (hybrid) {
     try {
       const ftsQuery = sanitizeFtsQuery(input.query);
-      const ftsRows = ftsCandidates(db, ftsQuery, candidateK, scopedNamespace);
+      const ftsRows = ftsCandidates(
+        db,
+        ftsQuery,
+        currentOnly ? vecCandidateK : candidateK,
+        scopedNamespace,
+        currentOnly ? nowIso : undefined,
+      );
 
       ftsRows.forEach((row, i) => {
         ftsRanks.set(row.id, i + 1);
@@ -322,6 +361,10 @@ export async function searchMemory(
 
     if (memory === undefined) continue;
     if (memory.is_deleted === 1) continue;
+
+    // v0.29 current-validity invariant: hide superseded / window-closed rows
+    // on default reads. valid_at (below) and include_superseded opt back in.
+    if (currentOnly && !isCurrent(memory, nowIso)) continue;
 
     // Namespace filter
     if (nsFilter.params.length > 0 && memory.namespace !== nsFilter.params[0]) {

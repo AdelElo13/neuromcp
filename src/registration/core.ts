@@ -73,6 +73,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       before: z.string().optional().describe('Only memories created before this ISO timestamp'),
       hybrid: z.boolean().optional().describe('Use hybrid search (default: true)'),
       valid_at: z.string().optional().describe('ISO 8601 timestamp — only return memories valid at this time (temporal query)'),
+      include_superseded: z.boolean().optional().describe('Include superseded / expired (window-closed) memories. Default false — only current facts. A valid_at query overrides this.'),
       graph_boost: z.boolean().optional().describe('Boost results connected via knowledge graph (default: true)'),
       episode_id: z.string().optional().describe('Filter by episode ID — only return memories from this episode'),
       explain: z.boolean().optional().describe('Include explanation metadata: trust reason, contradictions, temporal validity, claims, confidence breakdown (default: true)'),
