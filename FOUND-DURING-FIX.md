@@ -543,3 +543,22 @@ meegenomen en geen eigen taak hebben. Gelogd per CLAUDE.md-policy.
 
 (De flaky P95-latency-assert in tests/eval/retrieval-quality.test.ts heeft
 een eigen taak — niet hier tracken.)
+
+---
+
+## v0.29.0 executie-bevindingen (Fase 1B verificatie)
+
+- **P3 — dedup keep-tracking: importance-helft van de bug is gemaskeerd door
+  adaptive-importance recompute.** Codex meldde dat bij meerdere merges in
+  dezelfde keep de `tags` ÉN `effective_importance` van eerdere losers
+  verdwijnen (executor.ts updateWinner overschreef per merge). Geverifieerd:
+  de **tags-loss is echt** en is gefixt + getest
+  (tests/integration/dedup-keep-tracking.test.ts — cumulatieve tag-union in
+  src/consolidation/executor.ts). De **importance-loss is end-to-end NIET
+  observeerbaar**: `executeConsolidationPlan` draait ná de merges
+  `updateAdaptiveImportance`, die `effective_importance` opnieuw berekent uit
+  de user-`importance`-kolom (importance.ts:36) — dus de door de merge
+  geschreven `merged_importance` wordt sowieso overschreven, met of zonder de
+  fix. De accumulator-fix schrijft nu de running-max (defensief correct, geen
+  regressie), maar de waarde overleeft de adaptive-pass niet. Geen aparte
+  ticket nodig; genoteerd voor transparantie.

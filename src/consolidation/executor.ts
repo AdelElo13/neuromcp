@@ -51,15 +51,36 @@ export function executeConsolidationPlan(
      WHERE id = ?`,
   );
 
+  // v0.29 Fase 1B (Codex [MEDIUM] keep-tracking): one keep can receive
+  // multiple merge proposals. The per-merge UPDATE overwrote the winner's
+  // tags/importance each time, so earlier losers' tags/importance were lost
+  // (last merge won). Accumulate CUMULATIVELY per keep: union the tags and
+  // take the running max importance, seeded from the keep's current state.
+  const readWinner = db.prepare(
+    'SELECT tags, COALESCE(effective_importance, importance) AS eff FROM memories WHERE id = ?',
+  );
+  const winnerAccum = new Map<string, { tags: Set<string>; importance: number }>();
+
   const runAll = db.transaction(() => {
     // 1. Merges
     for (const merge of plan.proposed_merges) {
       tombstoneWithLineage(db, merge.tombstone_id, merge.keep_id);
       vecStore.remove(merge.tombstone_id);
 
+      // Seed the accumulator from the keep's live row the first time we see it.
+      let accum = winnerAccum.get(merge.keep_id);
+      if (accum === undefined) {
+        const cur = readWinner.get(merge.keep_id) as { tags: string; eff: number } | undefined;
+        const curTags: string[] = cur ? (JSON.parse(cur.tags) as string[]) : [];
+        accum = { tags: new Set(curTags), importance: cur?.eff ?? 0 };
+        winnerAccum.set(merge.keep_id, accum);
+      }
+      for (const t of merge.merged_tags) accum.tags.add(t);
+      if (merge.merged_importance > accum.importance) accum.importance = merge.merged_importance;
+
       updateWinner.run(
-        JSON.stringify([...merge.merged_tags]),
-        merge.merged_importance,
+        JSON.stringify([...accum.tags]),
+        accum.importance,
         merge.tombstone_id,
         merge.keep_id,
       );
