@@ -92,6 +92,28 @@ function mergeTags(existing: string, incoming: readonly string[]): string {
   return JSON.stringify(merged);
 }
 
+/**
+ * v0.29 revive (Codex Task1 #1): make a dedup-matched row CURRENT again on
+ * re-store. Clears valid_to + superseded_by_id, bumps valid_from, and — to
+ * keep the supersession link consistent — clears the reverse supersedes_id on
+ * the memory that had superseded this one (only if it still points back).
+ * Runs in a single transaction so the two rows never disagree.
+ */
+function reviveMemory(db: Database.Database, id: string, priorSupersededById: string | null): void {
+  const now = new Date().toISOString();
+  const run = db.transaction(() => {
+    db.prepare(
+      "UPDATE memories SET valid_to = NULL, superseded_by_id = NULL, valid_from = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+    ).run(now, id);
+    if (priorSupersededById !== null) {
+      db.prepare(
+        "UPDATE memories SET supersedes_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND supersedes_id = ?",
+      ).run(priorSupersededById, id);
+    }
+  });
+  run();
+}
+
 export async function storeMemory(
   input: StoreInput,
   deps: StoreDeps,
@@ -114,10 +136,10 @@ export async function storeMemory(
   // Step 1: Exact dedup — same hash + same namespace + not deleted
   const exactMatch = db
     .prepare(
-      'SELECT id, importance, tags FROM memories WHERE content_hash = ? AND namespace = ? AND is_deleted = 0 LIMIT 1',
+      'SELECT id, importance, tags, superseded_by_id, valid_to FROM memories WHERE content_hash = ? AND namespace = ? AND is_deleted = 0 LIMIT 1',
     )
     .get(hash, namespace) as
-    | { id: string; importance: number; tags: string }
+    | { id: string; importance: number; tags: string; superseded_by_id: string | null; valid_to: string | null }
     | undefined;
 
   if (exactMatch !== undefined) {
@@ -128,6 +150,14 @@ export async function storeMemory(
     db.prepare(
       "UPDATE memories SET importance = ?, effective_importance = MAX(COALESCE(effective_importance, importance), ?), tags = ?, access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
     ).run(importance, importance, mergedTags, exactMatch.id);
+
+    // v0.29 revive (Codex Task1 #1): re-storing a fact that was previously
+    // superseded or window-closed must make it CURRENT again — otherwise the
+    // read-fix leaves the matched row invisible despite matched:true.
+    if (exactMatch.superseded_by_id !== null || exactMatch.valid_to !== null) {
+      reviveMemory(db, exactMatch.id, exactMatch.superseded_by_id);
+      metrics.increment('store.revived');
+    }
 
     logger.info('store', 'exact dedup match', { id: exactMatch.id, namespace });
     metrics.increment('store.dedup_exact');
@@ -150,10 +180,10 @@ export async function storeMemory(
     if (similarity > config.dedupThreshold) {
       const existing = db
         .prepare(
-          'SELECT id, content, importance, tags FROM memories WHERE id = ? AND namespace = ? AND is_deleted = 0 LIMIT 1',
+          'SELECT id, content, importance, tags, superseded_by_id, valid_to FROM memories WHERE id = ? AND namespace = ? AND is_deleted = 0 LIMIT 1',
         )
         .get(neighbor.id, namespace) as
-        | { id: string; content: string; importance: number; tags: string }
+        | { id: string; content: string; importance: number; tags: string; superseded_by_id: string | null; valid_to: string | null }
         | undefined;
 
       if (existing !== undefined) {
@@ -171,6 +201,13 @@ export async function storeMemory(
         db.prepare(
           "UPDATE memories SET importance = ?, effective_importance = MAX(COALESCE(effective_importance, importance), ?), tags = ?, access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
         ).run(importance, importance, mergedTags, existing.id);
+
+        // v0.29 revive (Codex Task1 #1): a semantic-dedup match on a
+        // superseded / window-closed row makes it current again.
+        if (existing.superseded_by_id !== null || existing.valid_to !== null) {
+          reviveMemory(db, existing.id, existing.superseded_by_id);
+          metrics.increment('store.revived');
+        }
 
         logger.info('store', 'semantic dedup match', {
           id: existing.id,
