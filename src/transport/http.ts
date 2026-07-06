@@ -12,6 +12,7 @@ import { storeMemory } from '../tools/store.js';
 import { storeMemoryBatch } from '../tools/store-batch.js';
 import { eventBus } from './events.js';
 import { isAllowedHost } from './host-guard.js';
+import { currentValiditySql } from '../governance/validity.js';
 
 // Resolved once at startup from the module's runtime location. The source
 // tree lives in src/transport/ so `../../package.json` is correct for tsx
@@ -180,19 +181,37 @@ export function createRestRequestHandler(
       // user history. Hybrid callers still default to 5 if unspecified.
       const limit = Math.min(500, parseInt(url.searchParams.get('limit') ?? '5', 10));
       const chrono = url.searchParams.get('chrono') === '1';
+      // v0.29 current-validity invariant on the chrono (LongMemEval) path.
+      // Default hides superseded / window-closed rows; include_superseded=1
+      // and a valid_at point-in-time query opt back into history.
+      const includeSuperseded = url.searchParams.get('include_superseded') === '1';
+      const validAtParam = url.searchParams.get('valid_at') ?? undefined;
 
       if (chrono) {
         try {
+          // Build the temporal predicate. valid_at wins (explicit history
+          // request); else default current-only unless include_superseded.
+          let temporalClause = '';
+          const temporalParams: unknown[] = [];
+          if (validAtParam !== undefined) {
+            temporalClause =
+              ' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)';
+            temporalParams.push(validAtParam, validAtParam);
+          } else if (!includeSuperseded) {
+            const v = currentValiditySql(new Date().toISOString());
+            temporalClause = ` AND (${v.clause})`;
+            temporalParams.push(...v.params);
+          }
           const rows = deps.db
             .prepare(
               `SELECT id, content, category, importance
                  FROM memories
                 WHERE namespace = ?
-                  AND is_deleted = 0
+                  AND is_deleted = 0${temporalClause}
                 ORDER BY created_at ASC
                 LIMIT ?`,
             )
-            .all(namespace, limit) as Array<{
+            .all(namespace, ...temporalParams, limit) as Array<{
               id: string;
               content: string;
               category: string | null;
@@ -227,7 +246,7 @@ export function createRestRequestHandler(
 
       try {
         const results = await searchMemory(
-          { query, namespace, limit, hybrid: true, after, before, valid_at: validAt },
+          { query, namespace, limit, hybrid: true, after, before, valid_at: validAt, include_superseded: includeSuperseded },
           deps,
         );
 
