@@ -19,6 +19,7 @@
     "scripts/download-reranker.mjs",
     "scripts/download-model.ts",
     "scripts/index-wiki.mjs",
+    "scripts/wiki-obsidian-bridge.mjs",
     "scripts/launcher.sh",
     "scripts/run-consolidation.sh",
     "templates",
@@ -26,6 +27,7 @@
     "docs/QUICKSTART.md",
     "docs/TOOLS.md",
     "docs/BENCHMARK.md",
+    "docs/OBSIDIAN.md",
     "README.md",
     "LICENSE",
     "LICENSE-EXAMPLES"
@@ -77,7 +79,8 @@
     "neuromcp-backfill-embeddings": "scripts/backfill-embeddings.mjs",
     "neuromcp-query": "bin/query.mjs",
     "neuromcp-embed": "bin/embed.mjs",
-    "neuromcp-doctor": "bin/doctor.mjs"
+    "neuromcp-doctor": "bin/doctor.mjs",
+    "neuromcp-obsidian-bridge": "bin/neuromcp-obsidian-bridge.mjs"
   },
   "scripts": {
     "build": "tsup",
