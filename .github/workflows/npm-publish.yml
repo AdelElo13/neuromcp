@@ -1,0 +1,55 @@
+name: Publish to npm (Trusted Publishing / OIDC)
+
+# Publishes the package to npm on a GitHub release using npm Trusted
+# Publishing (OIDC) — no stored publish credential at all. GitHub mints a short-lived OIDC
+# token that npm exchanges for publish rights, and npm records build
+# provenance automatically.
+#
+# ONE-TIME SETUP (npmjs.com, done by the maintainer):
+#   npmjs.com -> package `neuromcp` -> Settings -> Trusted Publishing ->
+#   Add GitHub Actions publisher:
+#     Organization/user: AdelElo13
+#     Repository:        neuromcp
+#     Workflow filename: npm-publish.yml
+#   (leave Environment blank unless you add one below)
+# After that, no token is ever needed again -- this workflow publishes on
+# every GitHub release. The mcp-registry-publish workflow runs in parallel
+# and waits (retry loop) for npm to show the version before publishing to
+# the MCP registry.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required for OIDC Trusted Publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Use an npm that supports Trusted Publishing (OIDC)
+        # OIDC publish support landed in npm 11.5.1; node@22 ships an older
+        # npm, so upgrade explicitly. Pinned major to avoid surprise jumps.
+        run: npm install -g npm@^11
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish (OIDC -- no token)
+        # No auth-token env var is set: with a configured trusted publisher
+        # npm uses the workflow's OIDC identity to authenticate the publish.
+        # Provenance is attached automatically.
+        run: npm publish

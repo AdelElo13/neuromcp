@@ -60,7 +60,10 @@ jobs:
           # fails with "not on npm" even though publish succeeded. Poll with
           # backoff so the automatic release-triggered run self-heals instead
           # of needing a manual re-dispatch.
-          ATTEMPTS=10
+          # 20×15s = 5 min. Wide enough to cover BOTH npm registry
+          # propagation AND the sibling npm-publish (OIDC) job's own runtime
+          # when both are triggered by the same GitHub release.
+          ATTEMPTS=20
           DELAY=15
           for i in $(seq 1 "$ATTEMPTS"); do
             MCPNAME=$(npm view "neuromcp@$VERSION" mcpName 2>/dev/null || true)
