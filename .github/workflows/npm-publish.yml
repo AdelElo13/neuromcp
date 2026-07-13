@@ -32,10 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NOTE: deliberately NOT configuring an npm registry on setup-node.
+      # Doing so makes setup-node write an .npmrc auth entry backed by a
+      # literal placeholder value; npm then authenticates with that bogus
+      # credential and never attempts Trusted Publishing (the registry
+      # answers E404 on PUT). OIDC requires NO npm auth config at all —
+      # a unit test (npm-publish-workflow.test.ts) pins this.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Use an npm that supports Trusted Publishing (OIDC)
         # OIDC publish support landed in npm 11.5.1; node@22 ships an older

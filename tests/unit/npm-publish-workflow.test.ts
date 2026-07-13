@@ -27,6 +27,16 @@ describe('npm-publish workflow — Trusted Publishing (OIDC)', () => {
     expect(workflow).not.toMatch(/_authToken/);
   });
 
+  it('does not configure registry-url on setup-node (it injects a placeholder NODE_AUTH_TOKEN that preempts OIDC)', () => {
+    // Root cause of the v0.29.2 publish failure: setup-node with
+    // `registry-url` writes an .npmrc with `_authToken=${NODE_AUTH_TOKEN}`
+    // and exports the literal placeholder XXXXX-XXXXX-XXXXX-XXXXX for that
+    // var. npm then authenticates with the bogus token and never attempts
+    // Trusted Publishing — the registry answers E404 on PUT. For OIDC the
+    // job must have NO npm auth config at all.
+    expect(workflow).not.toMatch(/registry-url/);
+  });
+
   it('publishes on a GitHub release', () => {
     expect(workflow).toMatch(/release:\s*\n\s*types:\s*\[published\]/);
   });
