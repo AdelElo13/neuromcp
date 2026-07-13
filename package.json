@@ -63,6 +63,9 @@
     "./transport/http": "./dist/transport/http.js",
     "./transport/mcp-http-daemon": "./dist/transport/mcp-http-daemon.js",
     "./daemon": "./dist/daemon.js",
+    "./daemon-core": "./dist/daemon-core.js",
+    "./daemon-bootstrap": "./dist/daemon-bootstrap.js",
+    "./daemon-early-bind": "./dist/daemon-early-bind.js",
     "./resources": "./dist/resources/index.js",
     "./prompts": "./dist/prompts/index.js"
   },

@@ -157,6 +157,9 @@ const SUPPRESS_KEYS = new Set([
   'NEUROMCP_DAEMON_PORT',
   'NEUROMCP_DAEMON_HOST',
   'NEUROMCP_LOG_LEVEL',
+  // Test-only seam (stretches daemon init for boot-race tests). Forwarding
+  // it would bake a permanent startup delay into every daemon boot.
+  'NEUROMCP_TEST_INIT_DELAY_MS',
 ]);
 
 const extraEnv = {};
@@ -236,6 +239,9 @@ if (!existsSync(DAEMON_ENTRY)) {
 // existsSync(dist) but fail at runtime with module-not-found.
 const REQUIRED_DIST_FILES = [
   join(SOURCE_DIST_DIR, 'daemon.js'),
+  join(SOURCE_DIST_DIR, 'daemon-bootstrap.js'),
+  join(SOURCE_DIST_DIR, 'daemon-core.js'),
+  join(SOURCE_DIST_DIR, 'daemon-early-bind.js'),
   join(SOURCE_DIST_DIR, 'transport', 'mcp-http-daemon.js'),
 ];
 for (const required of REQUIRED_DIST_FILES) {

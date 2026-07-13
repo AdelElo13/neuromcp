@@ -3,6 +3,35 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **FIX: cold-boot race — daemon port is now bound within milliseconds of
+  process start.** Previously the daemon loaded its full module graph
+  (better-sqlite3, MCP SDK, embeddings probe, …) *before* binding its port;
+  on a cold boot that window was measured at ~110 s, and every MCP client
+  that connected during it got `ECONNREFUSED` (Claude Code surfaced
+  "Could not attach to MCP server neuromcp" — it connects over plain HTTP
+  with no wait/retry wrapper). `bin/neuromcp-daemon` now starts through a
+  dependency-free bootstrap (`daemon-bootstrap.js` + `daemon-early-bind.js`)
+  that owns the TCP port immediately, answers `GET /health` with
+  `503 {"status":"starting"}` while the core loads (so `curl -sf` pollers
+  such as `mcp-remote-wait.sh` keep waiting), buffers all other requests in
+  a bounded queue (64 requests, 120 s hold timeout), and replays them into
+  the real router once the core has taken the server over
+  (`startMcpHttpDaemon` gained a `handoff` option). A build guard test
+  walks the static import graph of the built bootstrap artifact so a tsup
+  config regression cannot silently reintroduce the race.
+
+### Internal
+
+- `src/daemon.ts` main logic moved to `src/daemon-core.ts`
+  (`runDaemon(handoff?)`); `dist/daemon.js` remains as a back-compat direct
+  entry without early bind. Port/host env parsing + loopback-bind validation
+  moved to the dependency-free `src/daemon-early-bind.ts` so bootstrap and
+  core stay in lockstep.
+
 ## [0.29.1] — 2026-07-07
 
 Web-view graph upgrade + Obsidian polish (independent Codex review applied).
