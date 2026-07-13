@@ -56,5 +56,11 @@ jobs:
       - name: Publish (OIDC -- no token)
         # No auth-token env var is set: with a configured trusted publisher
         # npm uses the workflow's OIDC identity to authenticate the publish.
-        # Provenance is attached automatically.
-        run: npm publish
+        # Provenance is attached automatically. Verbose loglevel so a failed
+        # OIDC exchange is visible in the run log instead of a bare
+        # ENEEDAUTH (auth headers are redacted by npm).
+        env:
+          NPM_CONFIG_LOGLEVEL: verbose
+        run: |
+          npm --version
+          npm publish
