@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "neuromcp",
   "display_name": "neuromcp",
-  "version": "0.19.1",
+  "version": "0.29.2",
   "description": "Sovereign Memory for AI agents — local-first MCP server with semantic search, knowledge graph, and governance.",
   "long_description": "Any model. Your memory. Stays local.\n\nneuromcp is a local-first MCP server that gives AI agents durable semantic memory. It combines BM25 + vector hybrid retrieval (RRF ranking), namespace-scoped governance, episodes and clusters, a knowledge graph, and auto-consolidation of session logs into a queryable wiki. Embeddings run locally via Ollama (nomic-embed-text 768-dim) with an ONNX BGE-small fallback — no data leaves the machine.\n\nKEY FEATURES\n- 42 tools: store_memory, search_memory (hybrid + compact mode), query_graph (with overview mode), list_episodes (ambient auto-start), consolidate, export/import, verbatim, attribution, reflection, wiki_lint / wiki_ingest / wiki_briefing.\n- 13 resources + 3 prompts\n- LongMemEval-S v7 baseline: 96.08%\n- Runs fully offline (except optional Ollama embed host). AGPL-3.0 engine with MIT carve-out for bin/templates/scripts/docs/examples.\n\nREQUIREMENTS\n- Ollama running locally (http://localhost:11434) with nomic-embed-text pulled, OR the ONNX BGE-small fallback (auto-downloaded on first run).\n- SQLite database at ~/.neuromcp/memory.db (auto-created).",
   "author": {
