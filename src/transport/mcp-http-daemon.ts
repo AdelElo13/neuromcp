@@ -17,6 +17,9 @@ import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import { createRestRequestHandler, type HttpDeps } from './http.js';
 import { isAllowedHost, isAllowedOrigin } from './host-guard.js';
+// Type-only: the bootstrap module is dependency-free and this import is
+// erased at runtime, so the transport stays out of the early-bind path.
+import type { DaemonBootstrapHandoff } from '../daemon-early-bind.js';
 
 /** Result of starting the daemon: the server plus a graceful shutdown hook. */
 export interface DaemonHandle {
@@ -44,6 +47,15 @@ export interface McpHttpDaemonOptions {
    * hostname, not 127.0.0.1.
    */
   readonly extraAllowedHosts?: ReadonlyArray<string>;
+  /**
+   * Boot-race fix: when the process was started via the bootstrap entry,
+   * the port is ALREADY bound (requests buffered) and this carries the
+   * listening server. The daemon then attaches its handler via
+   * `handoff.takeover()` instead of binding a fresh server — buffered
+   * requests replay into the real router, so clients that connected
+   * during the slow module-load window are answered instead of refused.
+   */
+  readonly handoff?: DaemonBootstrapHandoff;
 }
 
 export interface McpHttpDaemonDeps {
@@ -473,7 +485,7 @@ export async function startMcpHttpDaemon(
     return null;
   };
 
-  const httpServer = createHttpServer(async (req, res) => {
+  const rootHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // DNS-rebinding guard. Any request whose Host header is not in the
     // allowlist is rejected up front, BEFORE routing or body parsing.
     if (!isAllowedHost(req.headers.host, extraAllowed)) {
@@ -539,16 +551,22 @@ export async function startMcpHttpDaemon(
       return;
     }
     await restHandler(req, res);
-  });
+  };
+
+  const httpServer = options.handoff?.server ?? createHttpServer(rootHandler);
 
   // Track open sockets so graceful shutdown can destroy lingering SSE
   // streams (GET /mcp, /events) that never close on their own and would
-  // otherwise pin httpServer.close() until a hard-exit timer.
-  const openSockets = new Set<Socket>();
-  httpServer.on('connection', (socket: Socket) => {
-    openSockets.add(socket);
-    socket.on('close', () => openSockets.delete(socket));
-  });
+  // otherwise pin httpServer.close() until a hard-exit timer. In handoff
+  // mode the bootstrap has tracked sockets since the very first accept —
+  // reuse its set so pre-takeover sockets stay visible to shutdown.
+  const openSockets = options.handoff?.sockets ?? new Set<Socket>();
+  if (options.handoff === undefined) {
+    httpServer.on('connection', (socket: Socket) => {
+      openSockets.add(socket);
+      socket.on('close', () => openSockets.delete(socket));
+    });
+  }
 
   // Idle-session sweep. POST is stateless: when a crashed client never
   // sends DELETE, its session would otherwise persist until daemon restart.
@@ -619,6 +637,36 @@ export async function startMcpHttpDaemon(
     await closed;
   };
 
+  const logListening = (bootstrap: boolean): void => {
+    logger.info('mcp-http', 'neuromcp daemon listening', {
+      mcp: `http://${options.host}:${options.port}/mcp`,
+      rest: {
+        health: `http://${options.host}:${options.port}/health`,
+        search: `http://${options.host}:${options.port}/api/search?q=...`,
+        store: `http://${options.host}:${options.port}/api/store`,
+        events: `http://${options.host}:${options.port}/events`,
+      },
+      idleTimeoutMinutes: SESSION_IDLE_TIMEOUT_MS / 60000,
+      ...(bootstrap ? { bootstrap: true } : {}),
+    });
+  };
+
+  if (options.handoff !== undefined) {
+    // Bootstrap handoff: the port was bound at process start and requests
+    // are buffered. Attach the real handler — takeover replays the buffer —
+    // and resolve immediately; there is no bind to wait for.
+    if (!httpServer.listening) {
+      clearInterval(sweepInterval);
+      throw new Error('bootstrap handoff server is not listening');
+    }
+    httpServer.on('error', (err: Error) => {
+      logger.warn('mcp-http', 'daemon HTTP server error after listen', { error: err.message });
+    });
+    options.handoff.takeover(rootHandler);
+    logListening(true);
+    return { server: httpServer, shutdown };
+  }
+
   return new Promise<DaemonHandle>((resolve, reject) => {
     const onError = (err: Error): void => {
       httpServer.removeListener('listening', onListening);
@@ -632,16 +680,7 @@ export async function startMcpHttpDaemon(
       httpServer.on('error', (err: Error) => {
         logger.warn('mcp-http', 'daemon HTTP server error after listen', { error: err.message });
       });
-      logger.info('mcp-http', 'neuromcp daemon listening', {
-        mcp: `http://${options.host}:${options.port}/mcp`,
-        rest: {
-          health: `http://${options.host}:${options.port}/health`,
-          search: `http://${options.host}:${options.port}/api/search?q=...`,
-          store: `http://${options.host}:${options.port}/api/store`,
-          events: `http://${options.host}:${options.port}/events`,
-        },
-        idleTimeoutMinutes: SESSION_IDLE_TIMEOUT_MS / 60000,
-      });
+      logListening(false);
       resolve({ server: httpServer, shutdown });
     };
     httpServer.once('error', onError);
