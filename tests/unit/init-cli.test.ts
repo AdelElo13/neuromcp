@@ -25,6 +25,9 @@ import {
   configureClient,
   checkOllama,
   NEUROMCP_SERVER_ENTRY,
+  NPX_SERVER_ENTRY,
+  buildServerEntry,
+  isEphemeralInstall,
 } from '../../bin/init.mjs';
 
 /**
@@ -35,7 +38,9 @@ import {
  * configs.
  */
 
-const ENTRY = { command: 'npx', args: ['-y', 'neuromcp'] };
+// v0.29.3: the entry written into client configs is the ABSOLUTE node +
+// script path (see the NEUROMCP_SERVER_ENTRY describe block below for why).
+const ENTRY = NEUROMCP_SERVER_ENTRY as { command: string; args: string[] };
 
 let tmp: string;
 
@@ -481,8 +486,48 @@ describe('checkOllama', () => {
 
 // ─── NEUROMCP_SERVER_ENTRY shape ───────────────────────────────────────
 
-describe('NEUROMCP_SERVER_ENTRY', () => {
-  it('is the npx stdio entry documented in the README', () => {
-    expect(NEUROMCP_SERVER_ENTRY).toEqual({ command: 'npx', args: ['-y', 'neuromcp'] });
+describe('NEUROMCP_SERVER_ENTRY / buildServerEntry', () => {
+  it('writes an absolute node path and an absolute script path (GUI clients have no login PATH)', () => {
+    const entry = buildServerEntry({
+      execPath: '/usr/local/bin/node',
+      binPath: '/opt/neuromcp/bin/neuromcp.mjs',
+      resolveNode: (p: string) => p,
+    });
+    expect(entry).toEqual({
+      command: '/usr/local/bin/node',
+      args: ['/opt/neuromcp/bin/neuromcp.mjs'],
+    });
+    expect(entry.command.startsWith('/')).toBe(true);
+    expect(entry.args[0].startsWith('/')).toBe(true);
+  });
+
+  it('routes the node path through resolveStableNodeBin (Homebrew Cellar → opt symlink)', () => {
+    const resolveNode = vi.fn().mockReturnValue('/opt/homebrew/opt/node@22/bin/node');
+    const entry = buildServerEntry({
+      execPath: '/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node',
+      binPath: '/opt/neuromcp/bin/neuromcp.mjs',
+      resolveNode,
+    });
+    expect(resolveNode).toHaveBeenCalledWith('/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node');
+    expect(entry.command).toBe('/opt/homebrew/opt/node@22/bin/node');
+  });
+
+  it('falls back to the npx entry when running from the garbage-collected npx cache', () => {
+    const entry = buildServerEntry({
+      execPath: '/usr/local/bin/node',
+      binPath: '/Users/x/.npm/_npx/2f3a/node_modules/neuromcp/bin/neuromcp.mjs',
+      resolveNode: (p: string) => p,
+    });
+    expect(entry).toEqual(NPX_SERVER_ENTRY);
+  });
+
+  it('recognises npx cache paths', () => {
+    expect(isEphemeralInstall('/Users/x/.npm/_npx/ab/node_modules/neuromcp/bin/neuromcp.mjs')).toBe(true);
+    expect(isEphemeralInstall('/usr/local/lib/node_modules/neuromcp/bin/neuromcp.mjs')).toBe(false);
+  });
+
+  it('exports a default entry with an absolute command', () => {
+    expect(NEUROMCP_SERVER_ENTRY.command.startsWith('/')).toBe(true);
+    expect(Array.isArray(NEUROMCP_SERVER_ENTRY.args)).toBe(true);
   });
 });

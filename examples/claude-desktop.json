@@ -1,9 +1,9 @@
 {
-  "$comment": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — simplest setup: Desktop spawns its own neuromcp over stdio.",
+  "$comment": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — simplest setup: Desktop spawns its own neuromcp over stdio. GUI apps are NOT launched from a login shell, so they usually have neither `node` nor `npx` on PATH: use absolute paths. Get yours with `which node` and `npm root -g` (then append /neuromcp/bin/neuromcp.mjs), or just run `npx neuromcp-init`, which writes this file for you.",
   "mcpServers": {
     "neuromcp": {
-      "command": "npx",
-      "args": ["-y", "neuromcp"]
+      "command": "/opt/homebrew/opt/node@22/bin/node",
+      "args": ["/opt/homebrew/lib/node_modules/neuromcp/bin/neuromcp.mjs"]
     }
   }
 }
