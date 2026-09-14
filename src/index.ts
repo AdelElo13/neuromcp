@@ -6,8 +6,7 @@ import { createMetrics } from './observability/metrics.js';
 import { openDatabase } from './storage/database.js';
 import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
-import { createEmbeddingProvider } from './embeddings/factory.js';
-import { validateEmbeddingCompatibility } from './embeddings/validate.js';
+import { resolveEmbeddingRuntime } from './embeddings/runtime.js';
 import { createRerankProvider } from './rerank/factory.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
@@ -31,11 +30,11 @@ async function main(): Promise<void> {
   const db = openDatabase(config.dbPath);
   runMigrations(db, config.dbPath, logger);
 
-  // Initialize embedding provider, then fail loudly if it is incompatible
-  // with the embeddings already stored in this database (dimension or model
-  // mismatch silently corrupts recall otherwise).
-  const embedder = await createEmbeddingProvider(config, logger);
-  validateEmbeddingCompatibility(db, embedder, logger);
+  // Resolve the embedding provider AGAINST the vector index that already
+  // exists in this database: prefer the provider that matches it, retry a
+  // briefly-unavailable one, and fall back to a degraded (FTS-only) start
+  // instead of refusing to boot. See embeddings/runtime.ts.
+  const { embedder } = await resolveEmbeddingRuntime(db, config, logger);
 
   // Initialize vector store
   const vecStore = new SqliteVecStore(embedder.dimensions);

@@ -13,6 +13,7 @@ import { extractEntitiesDispatch } from '../graph/extract.js';
 import { extractClaims } from '../cognitive/claims.js';
 import { createContradictionEdge } from '../graph/contradiction-edges.js';
 import { eventBus } from '../transport/events.js';
+import { isEmbeddingsUnavailable } from '../embeddings/runtime.js';
 
 export interface StoreInput {
   readonly content: string;
@@ -167,8 +168,22 @@ export async function storeMemory(
     return { id: exactMatch.id, matched: true, similarity: 1.0 };
   }
 
-  // Step 2: Generate embedding
-  const embedding = await embedder.embed(input.content);
+  // Step 2: Generate embedding. In DEGRADED mode (no provider matches the
+  // existing vector index — see embeddings/runtime.ts) the memory is stored
+  // WITHOUT a vector instead of failing the call: it stays fully findable
+  // via FTS and is picked up by the next backfill_embeddings run, which
+  // selects exactly the rows missing from memories_vec.
+  let embedding: Float32Array | null = null;
+  try {
+    embedding = await embedder.embed(input.content);
+  } catch (err: unknown) {
+    if (!isEmbeddingsUnavailable(err)) throw err;
+    logger.warn('store', 'Embeddings unavailable — storing without a vector (queued for backfill)', {
+      reason: err.message,
+    });
+    metrics.increment('store.degraded_no_embedding');
+  }
+  const degraded = embedding === null;
 
   // Step 3: Semantic dedup — search for nearest neighbors.
   // v0.29 Fase 1B (Codex [MEDIUM]): push the namespace into the vec query so
@@ -177,7 +192,7 @@ export async function storeMemory(
   // but only over whatever the global top-k happened to surface).
   // '*' means all namespaces → undefined (no vec-side filter).
   const scopedNamespace = namespace === '*' ? undefined : namespace;
-  const neighbors = vecStore.search(embedding, 5, scopedNamespace);
+  const neighbors = embedding === null ? [] : vecStore.search(embedding, 5, scopedNamespace);
 
   for (const neighbor of neighbors) {
     const similarity = 1 - neighbor.distance;
@@ -227,34 +242,39 @@ export async function storeMemory(
     }
   }
 
-  // Step 4: Contradiction detection (Phase 3)
+  // Step 4: Contradiction detection (Phase 3). Vector-based — skipped in
+  // degraded mode rather than attempted and logged as a failure per store.
   let contradictions: readonly Contradiction[] = [];
-  try {
-    contradictions = await detectContradictions(
-      input.content, namespace, db, vecStore, embedder, config.contradictionThreshold,
-    );
-    if (contradictions.length > 0) {
-      logger.info('store', 'Contradictions detected', {
-        count: contradictions.length,
-        resolutions: contradictions.map((c) => c.resolution),
+  if (!degraded) {
+    try {
+      contradictions = await detectContradictions(
+        input.content, namespace, db, vecStore, embedder, config.contradictionThreshold,
+      );
+      if (contradictions.length > 0) {
+        logger.info('store', 'Contradictions detected', {
+          count: contradictions.length,
+          resolutions: contradictions.map((c) => c.resolution),
+        });
+        metrics.increment('store.contradictions_detected', contradictions.length);
+      }
+    } catch (err: unknown) {
+      logger.warn('store', 'Contradiction detection failed', {
+        error: err instanceof Error ? err.message : String(err),
       });
-      metrics.increment('store.contradictions_detected', contradictions.length);
     }
-  } catch (err: unknown) {
-    logger.warn('store', 'Contradiction detection failed', {
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
 
-  // Step 5: Surprise scoring (Phase 4)
+  // Step 5: Surprise scoring (Phase 4) — vector-based, same story.
   let surpriseScore = 0;
-  try {
-    surpriseScore = await computeSurprise(input.content, namespace, db, vecStore, embedder);
-    metrics.record('store.surprise_score', surpriseScore);
-  } catch (err: unknown) {
-    logger.warn('store', 'Surprise scoring failed', {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  if (!degraded) {
+    try {
+      surpriseScore = await computeSurprise(input.content, namespace, db, vecStore, embedder);
+      metrics.record('store.surprise_score', surpriseScore);
+    } catch (err: unknown) {
+      logger.warn('store', 'Surprise scoring failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Boost importance based on surprise (novel info is more valuable). The
@@ -293,8 +313,10 @@ export async function storeMemory(
       id,
       hash,
       input.content,
-      embedder.name,
-      embedder.dimensions,
+      // Degraded: record 'none'/0 so the row is unambiguously un-embedded
+      // (validate.ts ignores 'none', backfill picks it up).
+      degraded ? 'none' : embedder.name,
+      degraded ? 0 : embedder.dimensions,
       namespace,
       input.project_id ?? null,
       input.agent_id ?? null,
@@ -314,7 +336,9 @@ export async function storeMemory(
       input.episode_id ?? null,
     );
 
-    vecStore.upsert(id, embedding);
+    if (embedding !== null) {
+      vecStore.upsert(id, embedding);
+    }
 
     const row = db
       .prepare('SELECT rowid FROM memories WHERE id = ?')

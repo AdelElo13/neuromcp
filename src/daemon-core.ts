@@ -30,8 +30,7 @@ import { createMetrics } from './observability/metrics.js';
 import { openDatabase } from './storage/database.js';
 import { runMigrations } from './storage/migrations.js';
 import { SqliteVecStore } from './vectors/sqlite-vec.js';
-import { createEmbeddingProvider } from './embeddings/factory.js';
-import { validateEmbeddingCompatibility } from './embeddings/validate.js';
+import { resolveEmbeddingRuntime } from './embeddings/runtime.js';
 import { createRerankProvider } from './rerank/factory.js';
 import { createServer } from './server.js';
 import { startScheduler } from './scheduler.js';
@@ -79,10 +78,10 @@ export async function runDaemon(handoff?: DaemonBootstrapHandoff): Promise<void>
   const db = openDatabase(config.dbPath);
   runMigrations(db, config.dbPath, logger);
 
-  const embedder = await createEmbeddingProvider(config, logger);
-  // Fail loudly if the provider is incompatible with stored embeddings
-  // (dimension or model mismatch silently corrupts recall otherwise).
-  validateEmbeddingCompatibility(db, embedder, logger);
+  // Index-aware provider resolution: matches the existing vector index,
+  // retries a briefly-down provider, and degrades to FTS-only instead of
+  // killing the daemon on a dimension mismatch (embeddings/runtime.ts).
+  const { embedder } = await resolveEmbeddingRuntime(db, config, logger);
   const vecStore = new SqliteVecStore(embedder.dimensions);
   vecStore.initialize(db);
   const reranker = await createRerankProvider(config, logger);
