@@ -14,9 +14,21 @@ the wiki + hooks. Prefer manual? Copy a config from
 [`examples/`](../examples/), e.g.:
 
 ```bash
-# Claude Code
+# Claude Code (runs from your shell, so npx is fine)
 claude mcp add neuromcp -- npx -y neuromcp@latest
 ```
+
+For **GUI clients** (Claude Desktop, Codex Desktop) use absolute paths —
+they are launched without a login PATH and usually cannot find `node`:
+
+```jsonc
+{ "mcpServers": { "neuromcp": {
+  "command": "/absolute/path/to/node",                       // which node
+  "args": ["/absolute/path/to/neuromcp/bin/neuromcp.mjs"]    // npm root -g
+} } }
+```
+
+`npx neuromcp-init` writes exactly that form for you.
 
 First run creates `~/.neuromcp/memory.db` automatically.
 
@@ -110,11 +122,21 @@ node scripts/ab-sweep.mjs                      # retrospective A/B
 ## Something broken?
 
 ```bash
-npx neuromcp-doctor
+npx neuromcp-doctor check          # add --json for a machine-readable report
 ```
 
-Checks Node, native modules, the database, the shared daemon, Ollama and
-the ONNX fallback in one run, with a fix-hint per failure.
+Checks Node, native modules, the database, the shared daemon, Ollama, the
+ONNX fallback and whether your vector index still matches a reachable
+provider — with a fix-hint per failure.
+
+If it reports a **dimension mismatch**, the server is running in degraded
+mode (full-text search only). Restore the matching provider, or rebuild
+the index on a copy first:
+
+```bash
+npx neuromcp-reembed           # dry run on a copy
+npx neuromcp-reembed --apply   # swap in; original kept as *.pre-reembed-<ts>
+```
 
 ## Where to go next
 

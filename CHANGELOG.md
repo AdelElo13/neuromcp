@@ -3,6 +3,82 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.3] — unreleased
+
+Install-robustness release: switching embedding provider no longer bricks
+an existing database, the doctor always prints, GUI clients get a config
+that does not depend on PATH, and the ONNX fallback model no longer
+depends on an install script.
+
+### Fixed
+
+- **FATAL: switching embedding provider killed the server.** `memories_vec`
+  is a `vec0` table with a fixed width (384 ONNX / 768 Ollama). Installing
+  Ollama after the ONNX fallback had built a 384-dim index — or the `auto`
+  cascade dropping to ONNX while Ollama was briefly down on a 768-dim index
+  — made `validateEmbeddingCompatibility` throw at startup, so every client
+  sharing that database lost its memory layer entirely. Provider selection
+  is now **index-aware** (`src/embeddings/runtime.ts`): it prefers the
+  provider matching the existing index, retries an unavailable one with
+  exponential backoff (`NEUROMCP_EMBEDDING_RETRY_ATTEMPTS`,
+  `NEUROMCP_EMBEDDING_RETRY_BASE_MS`), and otherwise starts in **degraded
+  mode** — full-text search keeps working, vector search is disabled, and
+  new memories are stored without a vector and queued for
+  `backfill_embeddings`. Never throws at startup; the index is never
+  rebuilt or migrated implicitly. Set `NEUROMCP_STRICT_EMBEDDINGS=1` for
+  the old hard failure.
+- **`neuromcp-doctor` printed nothing and exited 0.** The direct-invocation
+  guard compared `import.meta.url` with `pathToFileURL(process.argv[1])`.
+  `npm install -g` exposes bins as symlinks; Node resolves `import.meta.url`
+  through realpath but leaves `argv[1]` as the symlink, so `main()` never
+  ran (reproduced against a real global install on npm 11.12.1). Fixed with
+  a realpath-aware guard in `bin/is-main.mjs`, applied to `doctor.mjs`,
+  `init.mjs` and `neuromcp-connect.mjs` (which had the same latent bug).
+  The doctor now also flushes stdout before exiting and always renders a
+  report, even when a check throws.
+- **GUI clients could not find `node`.** `neuromcp-init` wrote
+  `command: "npx"`, but Claude Desktop / Codex Desktop are launched without
+  a login PATH. It now writes an absolute `process.execPath` (routed
+  through `resolveStableNodeBin`, so a Homebrew Cellar path becomes the
+  stable `opt` symlink) plus the absolute path to `bin/neuromcp.mjs`.
+  Running from an npx cache falls back to the old `npx` entry with a
+  warning, since that path is garbage-collected. The shebang stays for
+  terminal use, and the README documents the manual form.
+- **The ONNX fallback model no longer depends on the postinstall.** It is
+  resolved from a per-user cache (`~/.neuromcp/models`, override with
+  `NEUROMCP_MODEL_DIR`) before the package directory, and downloaded
+  lazily on first use when missing — the case for installs with scripts
+  disabled and for root-owned global prefixes the server user cannot write
+  to. `NEUROMCP_DISABLE_MODEL_DOWNLOAD=1` forbids the fetch.
+
+### Added
+
+- **`neuromcp-reembed`** — documented recovery path after a provider
+  switch. Rebuilds the vector index at the new width on a **copy** made
+  with SQLite's backup API; default run is a dry run, `--apply` swaps it in
+  and keeps the original as `<db>.pre-reembed-<timestamp>`. `--limit` for a
+  smoke test, `--keep-copy` to inspect the result first.
+- **`neuromcp-download-model`** — manual fetch of the ONNX fallback model
+  for machines where install scripts are disabled.
+- **`neuromcp-doctor check --json`** — machine-readable report
+  (`{version, exit_code, checks[]}`), plus a new `embedding index` check
+  that names a dimension mismatch explicitly with the exact recovery steps.
+- Degraded mode is tool-visible: a `neuromcp_notice` field on
+  `store_memory` / `search_memory` results and an `embeddings` block in
+  `memory_stats` (status, provider, index width, memories awaiting
+  embedding).
+
+### Internal
+
+- `createEmbeddingProvider` keeps its exact 0.29.2 behaviour and error
+  text; the cascade moved into a non-throwing `selectEmbeddingProvider`
+  that can require a specific dimension.
+- No schema change — `SCHEMA_VERSION` stays 14, and databases written by
+  0.29.2 are read as-is. Degraded stores use `embedding_model = 'none'`,
+  `embedding_dim = 0`, which `validateEmbeddingCompatibility` already
+  ignores and `backfill_embeddings` already picks up.
+- Version is bumped by the release script, not by this change.
+
 ## [0.29.2] — 2026-07-13
 
 ### Fixed

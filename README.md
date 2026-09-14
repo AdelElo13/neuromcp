@@ -239,6 +239,9 @@ neuromcp auto-detects it. No config needed.
 
 ## Installation
 
+The reliable way is `npx neuromcp-init` — it writes the entry below into
+every detected client config (with a backup first). The manual form is:
+
 ### Claude Code
 
 ```jsonc
@@ -252,19 +255,37 @@ neuromcp auto-detects it. No config needed.
 }
 ```
 
-### Claude Desktop
+`npx` is fine here because Claude Code runs from your terminal and
+inherits your PATH.
+
+### Claude Desktop / Codex Desktop / any GUI client
+
+GUI apps are started by the window manager, **not** by a login shell, so
+they inherit a minimal PATH that usually has neither `node` nor `npx`
+(nvm, fnm, Volta and Homebrew all install outside `/usr/bin`). Use
+absolute paths — this is exactly what `neuromcp-init` writes since 0.29.3:
 
 ```jsonc
 // ~/Library/Application Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
     "neuromcp": {
-      "command": "npx",
-      "args": ["-y", "neuromcp"]
+      "command": "/opt/homebrew/opt/node@22/bin/node",
+      "args": ["/opt/homebrew/lib/node_modules/neuromcp/bin/neuromcp.mjs"]
     }
   }
 }
 ```
+
+Find your own two paths with:
+
+```bash
+which node                      # → "command"
+npm root -g                     # → "args": ["<that>/neuromcp/bin/neuromcp.mjs"]
+```
+
+(`bin/neuromcp.mjs` keeps its `#!/usr/bin/env node` shebang, so running it
+straight from a terminal still works.)
 
 ### Cursor / Windsurf / Cline
 
@@ -505,6 +526,11 @@ All via environment variables. Defaults work for most setups.
 | `NEUROMCP_AUTO_CONSOLIDATE` | `false` | Enable periodic consolidation |
 | `NEUROMCP_TOMBSTONE_TTL_DAYS` | `30` | Days before permanent sweep |
 | `NEUROMCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `NEUROMCP_MODEL_DIR` | `~/.neuromcp/models` | Where the ONNX fallback model is cached |
+| `NEUROMCP_DISABLE_MODEL_DOWNLOAD` | unset | `1` forbids the lazy first-run model download |
+| `NEUROMCP_STRICT_EMBEDDINGS` | unset | `1` = crash on an index/provider mismatch instead of starting degraded |
+| `NEUROMCP_EMBEDDING_RETRY_ATTEMPTS` | `3` | Passes over the provider cascade before degrading |
+| `NEUROMCP_EMBEDDING_RETRY_BASE_MS` | `500` | First backoff delay (doubles per attempt) |
 
 ## What's new
 
@@ -544,15 +570,72 @@ memory invalidated), **coexist** (0.35–0.5, both kept + linked via a
 ## Troubleshooting
 
 ```bash
-npx neuromcp-doctor
+npx neuromcp-doctor check          # human-readable report
+npx neuromcp-doctor check --json   # same checks, machine-readable
 ```
 
 One run checks: Node version, native modules actually loadable
 (`better-sqlite3`, `sqlite-vec`), database openable, shared daemon
 `/health`, Ollama reachable + `nomic-embed-text` pulled, ONNX fallback
-model present. Exit codes: `0` healthy, `1` degraded (e.g. no Ollama —
-ONNX fallback active), `2` broken. Start every bug report with its
-output.
+model present, and whether the vector index in your database still
+matches a provider this machine can reach. Exit codes: `0` healthy, `1`
+degraded (e.g. no Ollama — ONNX fallback active), `2` broken. Start every
+bug report with its output.
+
+### "Embedding dimension mismatch" / vector search is off
+
+The vector index is a `vec0` table with a **fixed** width: 384 for the
+ONNX fallback, 768 for Ollama's `nomic-embed-text`. If the provider
+changes (you installed Ollama after running on the fallback, or Ollama
+was down and the `auto` cascade dropped to ONNX), the new provider cannot
+write into the old index.
+
+Since 0.29.3 this no longer stops the server. It:
+
+1. prefers the provider that **matches** the existing index,
+2. retries a briefly-unavailable provider with backoff,
+3. and otherwise starts in **degraded mode** — full-text search keeps
+   working, vector search is disabled, and new memories are stored
+   without embeddings and queued for `backfill_embeddings`. Nothing is
+   deleted and the index is never rebuilt behind your back.
+
+`neuromcp-doctor check` names the state. To get vector search back, pick one:
+
+```bash
+# a) restore the provider that matches the index
+ollama serve && ollama pull nomic-embed-text      # 768-dim index
+# or force the fallback for a 384-dim index:
+export NEUROMCP_EMBEDDING_PROVIDER=onnx
+
+# b) rebuild the index for the provider you want (works on a COPY first)
+npx neuromcp-reembed                 # dry run: rebuild a copy, report, discard
+npx neuromcp-reembed --keep-copy     # same, but keep the copy to inspect
+npx neuromcp-reembed --apply         # swap it in; original kept as *.pre-reembed-<ts>
+```
+
+Stop every client before `--apply`. Rollback is a file move back.
+
+### Installing without Xcode / with install scripts disabled
+
+`better-sqlite3` fetches its prebuilt binary from its **install script**.
+With `npm install --ignore-scripts` (or a hardened `.npmrc`, or pnpm's
+build allowlist) the package installs but has no native binding and
+nothing works. npm 11's own default is `ignore-scripts=false`, so a plain
+install is fine:
+
+```bash
+npm install -g neuromcp                      # normal path, scripts run
+npm install -g neuromcp --ignore-scripts=false   # if your .npmrc disables them
+```
+
+If you already installed with scripts off, reinstall as above (a bare
+`npm rebuild` in a global prefix does not reliably produce the binding).
+
+The ~33 MB ONNX fallback model no longer depends on the postinstall at
+all: it is downloaded **lazily on first use** into `~/.neuromcp/models`
+(user-writable even when the package lives in a root-owned global
+prefix). Fetch it ahead of time with `npx neuromcp-download-model`, or
+forbid the download entirely with `NEUROMCP_DISABLE_MODEL_DOWNLOAD=1`.
 
 ## Comparison
 
