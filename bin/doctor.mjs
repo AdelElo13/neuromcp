@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isMainModule } from './is-main.mjs';
 import { homedir, platform } from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -31,11 +32,26 @@ const REPO_ROOT = resolve(HERE, '..');
 const DEFAULT_DAEMON_PORT = 3200;
 const PROBE_TIMEOUT_MS = 2_000;
 const LAUNCHD_LABEL = 'com.neuromcp.daemon';
+const MODEL_FILENAME = 'bge-small-en-v1.5.onnx';
 // Where scripts/download-model.mjs writes the offline fallback model.
-const ONNX_MODEL_PATH = resolve(REPO_ROOT, 'models', 'bge-small-en-v1.5.onnx');
+const ONNX_MODEL_PATH = resolve(REPO_ROOT, 'models', MODEL_FILENAME);
+// v0.29.3: the lazy first-run download writes here instead (user-writable
+// even when the package lives in a root-owned global prefix).
+const ONNX_USER_MODEL_PATH = resolve(homedir(), '.neuromcp', 'models', MODEL_FILENAME);
 
 /**
  * @typedef {{ name: string, status: 'ok'|'warn'|'fail'|'skip', info: string }} CheckResult
+ */
+
+/**
+ * Minimal better-sqlite3 surface the checks use. Declared once so the db
+ * checks and the embedding-index check agree on the handle shape.
+ *
+ * @typedef {new (path: string, opts?: object) => {
+ *   pragma: (s: string) => unknown,
+ *   prepare: (sql: string) => { get: (...a: unknown[]) => unknown, all: (...a: unknown[]) => unknown[] },
+ *   close: () => void,
+ * }} SqliteCtor
  */
 
 /**
@@ -180,20 +196,27 @@ function ollamaDownResult(name, host, reason) {
  * Check the offline ONNX fallback model that scripts/download-model.mjs
  * installs into <repo>/models/.
  *
- * @param {{ exists?: (p: string) => boolean, modelPath?: string }} [deps]
+ * @param {{ exists?: (p: string) => boolean, modelPath?: string, userModelPath?: string }} [deps]
  * @returns {CheckResult}
  */
 export function checkOnnxModel(deps = {}) {
-  const { exists = existsSync, modelPath = ONNX_MODEL_PATH } = deps;
+  const {
+    exists = existsSync,
+    modelPath = ONNX_MODEL_PATH,
+    userModelPath = ONNX_USER_MODEL_PATH,
+  } = deps;
   const name = 'onnx fallback model';
-  if (exists(modelPath)) {
-    return { name, status: 'ok', info: modelPath };
+  for (const candidate of [userModelPath, modelPath]) {
+    if (exists(candidate)) {
+      return { name, status: 'ok', info: candidate };
+    }
   }
   return {
     name,
     status: 'warn',
-    info: `missing at ${modelPath} — no offline embedding fallback. ` +
-      `Fix: \`node scripts/download-model.mjs\``,
+    info: `missing at ${userModelPath} and ${modelPath} — no offline embedding fallback yet. ` +
+      `It is downloaded automatically on first use; to fetch it now run \`npx neuromcp-download-model\` ` +
+      `(or \`node scripts/download-model.mjs\` in a checkout).`,
   };
 }
 
@@ -203,7 +226,7 @@ export function checkOnnxModel(deps = {}) {
  * path check report false negatives.
  *
  * @param {{ loadModule?: () => Promise<{ default: unknown }> }} [deps]
- * @returns {Promise<{ result: CheckResult, Database: (new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }) | null }>}
+ * @returns {Promise<{ result: CheckResult, Database: SqliteCtor | null }>}
  */
 export async function checkBetterSqlite(deps = {}) {
   const { loadModule = () => import(defaultResolveSqlite()) } = deps;
@@ -241,7 +264,7 @@ function defaultResolveSqlite() {
  * Skips with a clear message when better-sqlite3 itself did not load.
  *
  * @param {{
- *   Database: (new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }) | null,
+ *   Database: SqliteCtor | null,
  *   env?: Record<string, string | undefined>,
  *   exists?: (p: string) => boolean,
  *   home?: string,
@@ -289,6 +312,98 @@ export function checkDatabase(deps) {
 }
 
 /**
+ * Name the 0.29.2 killer explicitly: the vector index in the database has a
+ * fixed width, and the provider that is actually reachable may no longer
+ * produce that width (installed Ollama after the ONNX fallback built a
+ * 384-dim index, or Ollama is down on a 768-dim index). 0.29.3 no longer
+ * crashes on this — it starts DEGRADED — so the doctor has to say out loud
+ * which state the machine is in and how to leave it.
+ *
+ * @param {{
+ *   Database: SqliteCtor | null,
+ *   ollamaResult: Pick<CheckResult, 'status'>,
+ *   onnxResult: Pick<CheckResult, 'status'>,
+ *   env?: Record<string, string | undefined>,
+ *   exists?: (p: string) => boolean,
+ *   home?: string,
+ * }} deps
+ * @returns {CheckResult}
+ */
+export function checkEmbeddingIndex(deps) {
+  const {
+    Database,
+    ollamaResult,
+    onnxResult,
+    env = process.env,
+    exists = existsSync,
+    home = homedir(),
+  } = deps;
+  const name = 'embedding index';
+  const dbPath = env.NEUROMCP_DB_PATH ?? resolve(home, '.neuromcp', 'memory.db');
+
+  if (Database === null) {
+    return { name, status: 'skip', info: 'skipped — better-sqlite3 did not load' };
+  }
+  if (!exists(dbPath)) {
+    return { name, status: 'ok', info: 'no database yet — the first provider to run defines the index width' };
+  }
+
+  let db = null;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const row = /** @type {{ sql?: string } | undefined} */ (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_vec'").get()
+    );
+    if (row === undefined || typeof row.sql !== 'string') {
+      return { name, status: 'ok', info: 'no vector index yet — nothing to mismatch' };
+    }
+    const match = row.sql.match(/float\[(\d+)\]/);
+    const indexDim = match ? Number(match[1]) : null;
+    if (indexDim === null) {
+      return { name, status: 'warn', info: 'memories_vec exists but its width could not be parsed' };
+    }
+
+    // Which widths can this machine actually produce right now?
+    const available = [];
+    if (ollamaResult.status === 'ok') available.push({ provider: 'ollama nomic-embed-text', dim: 768 });
+    if (onnxResult.status === 'ok') available.push({ provider: 'onnx bge-small-en-v1.5', dim: 384 });
+
+    const matching = available.find((a) => a.dim === indexDim);
+    if (matching !== undefined) {
+      return {
+        name,
+        status: 'ok',
+        info: `${indexDim}-dim index in ${dbPath}, matched by ${matching.provider}`,
+      };
+    }
+    const offer = available.length === 0
+      ? 'no provider is reachable at all'
+      : `only ${available.map((a) => `${a.provider} (${a.dim}d)`).join(' and ')} reachable`;
+    return {
+      name,
+      status: 'fail',
+      info:
+        `DIMENSION MISMATCH: ${dbPath} holds a ${indexDim}-dim vector index but ${offer}. ` +
+        `neuromcp 0.29.3+ starts in DEGRADED mode here (full-text search works, vector search off, ` +
+        `new memories queued for backfill) — it does not crash. Recovery, pick one: ` +
+        `(a) restore the ${indexDim}-dim provider — for 768 start Ollama and \`ollama pull nomic-embed-text\`, ` +
+        `for 384 keep the ONNX fallback (\`npx neuromcp-download-model\`) and set NEUROMCP_EMBEDDING_PROVIDER=onnx; ` +
+        `or (b) rebuild the index for the provider you want: \`npx neuromcp-reembed\` (dry run on a COPY) then ` +
+        `\`npx neuromcp-reembed --apply\` (swaps it in, keeps a timestamped backup).`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { name, status: 'warn', info: `could not inspect ${dbPath}: ${msg}` };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // read-only handle
+    }
+  }
+}
+
+/**
  * At least one embedding route (Ollama 768d or ONNX 384d fallback) must
  * exist, otherwise store/search are dead — that is broken, not a warning.
  *
@@ -328,9 +443,12 @@ function printHelp() {
 neuromcp-doctor — install + privacy diagnostics
 
 Usage:
-  neuromcp-doctor check               env + dep + daemon + embeddings + db triage
+  neuromcp-doctor check [--json]      env + dep + daemon + embeddings + db triage
   neuromcp-doctor audit-network       proves zero-egress for 30s
   neuromcp-doctor --help              this message
+
+Options:
+  --json   machine-readable report on stdout: { version, exit_code, checks[] }
 
 Exit codes (check): 0 = healthy, 1 = warnings only, 2 = broken
 
@@ -339,7 +457,45 @@ Exit codes (check): 0 = healthy, 1 = warnings only, 2 = broken
 
 const STATUS_GLYPH = { ok: '✓', warn: '!', fail: '✗', skip: '-' };
 
-async function runCheck() {
+/**
+ * Render a finished check list. Pure + injectable so the "doctor must print
+ * something" guarantee is testable without spawning a process.
+ *
+ * @param {CheckResult[]} checks
+ * @param {{ json?: boolean, version?: string }} [opts]
+ * @returns {string} the exact text written to stdout
+ */
+export function renderChecks(checks, opts = {}) {
+  const { json = false, version = 'unknown' } = opts;
+  const code = aggregateExitCode(checks);
+  if (json) {
+    return JSON.stringify({ version, exit_code: code, checks }, null, 2) + '\n';
+  }
+  if (checks.length === 0) {
+    return 'no checks ran — this is a bug, please report it\n';
+  }
+  const w = Math.max(...checks.map((c) => c.name.length)) + 2;
+  let out = '';
+  for (const c of checks) {
+    out += `${STATUS_GLYPH[c.status]} ${c.name.padEnd(w)} ${c.info}\n`;
+  }
+  if (code === 1) {
+    out += '\nwarnings present — degraded but functional (exit 1)\n';
+  } else if (code === 2) {
+    out += '\nbroken — see ✗ lines above (exit 2)\n';
+  } else {
+    out += '\nall checks passed (exit 0)\n';
+  }
+  return out;
+}
+
+/**
+ * Collect every check. Separated from rendering so `--json` and the text
+ * report cannot drift apart.
+ *
+ * @returns {Promise<CheckResult[]>}
+ */
+export async function collectChecks() {
   /** @type {CheckResult[]} */
   const checks = [];
 
@@ -388,18 +544,35 @@ async function runCheck() {
   checks.push(daemonResult, ollamaResult, onnxResult);
   checks.push(deriveEmbeddingRoute(ollamaResult, onnxResult));
 
-  // Render
-  const w = Math.max(...checks.map((c) => c.name.length)) + 2;
-  for (const c of checks) {
-    process.stdout.write(`${STATUS_GLYPH[c.status]} ${c.name.padEnd(w)} ${c.info}\n`);
+  // 11. Vector-index width vs what this machine can actually embed.
+  checks.push(checkEmbeddingIndex({ Database, ollamaResult, onnxResult }));
+
+  return checks;
+}
+
+/**
+ * @param {{ json?: boolean }} [opts]
+ * @returns {Promise<0|1|2>}
+ */
+async function runCheck(opts = {}) {
+  /** @type {CheckResult[]} */
+  let checks;
+  try {
+    checks = await collectChecks();
+  } catch (err) {
+    // A doctor that dies silently is the worst possible doctor (that was
+    // literally bug #2 in 0.29.2). Always emit something readable.
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    checks = [/** @type {CheckResult} */ ({ name: 'doctor', status: 'fail', info: `diagnostics crashed: ${msg}` })];
   }
-  const code = aggregateExitCode(checks);
-  if (code === 1) {
-    process.stdout.write('\nwarnings present — degraded but functional (exit 1)\n');
-  } else if (code === 2) {
-    process.stdout.write('\nbroken — see ✗ lines above (exit 2)\n');
+  let version = 'unknown';
+  try {
+    version = JSON.parse(readFileSync(resolve(REPO_ROOT, 'package.json'), 'utf8')).version;
+  } catch {
+    // reported as 'unknown'
   }
-  process.exit(code);
+  process.stdout.write(renderChecks(checks, { json: opts.json === true, version }));
+  return aggregateExitCode(checks);
 }
 
 /**
@@ -576,26 +749,51 @@ dgram.createSocket = function patchedCreate(...args) {
 }
 
 async function main() {
-  const cmd = process.argv[2] ?? 'check';
+  const argv = process.argv.slice(2);
+  const json = argv.includes('--json');
+  const cmd = argv.find((a) => !a.startsWith('-')) ?? 'check';
 
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  if (argv.includes('--help') || argv.includes('-h') || cmd === 'help') {
     printHelp();
     process.exit(0);
   }
 
   if (cmd === 'check') {
-    await runCheck();
+    // process.exit can truncate a pending write on a pipe; flush first.
+    const code = await runCheck({ json });
+    await flushStdout();
+    process.exit(code);
   } else if (cmd === 'audit-network') {
-    process.exit(await runAuditNetwork());
+    const code = await runAuditNetwork();
+    await flushStdout();
+    process.exit(code);
   } else {
-    console.error(`Unknown subcommand: ${cmd}\n`);
+    process.stderr.write(`Unknown subcommand: ${cmd}\n`);
     printHelp();
+    await flushStdout();
     process.exit(2);
   }
 }
 
+/**
+ * Wait until stdout has drained. When stdout is a pipe (CI, `| tee`, a GUI
+ * client capturing output) writes are asynchronous, and process.exit() right
+ * after a write can drop the report entirely.
+ *
+ * @returns {Promise<void>}
+ */
+function flushStdout() {
+  return new Promise((resolveDone) => {
+    if (process.stdout.writableLength === 0) {
+      resolveDone();
+      return;
+    }
+    process.stdout.write('', () => resolveDone());
+  });
+}
+
 // Direct-invocation guard: run main() only when this file is the
 // entrypoint, so tests can import the pure helpers without side effects.
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   void main();
 }

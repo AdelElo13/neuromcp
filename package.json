@@ -83,7 +83,9 @@
     "neuromcp-query": "bin/query.mjs",
     "neuromcp-embed": "bin/embed.mjs",
     "neuromcp-doctor": "bin/doctor.mjs",
-    "neuromcp-obsidian-bridge": "bin/neuromcp-obsidian-bridge.mjs"
+    "neuromcp-obsidian-bridge": "bin/neuromcp-obsidian-bridge.mjs",
+    "neuromcp-reembed": "bin/reembed.mjs",
+    "neuromcp-download-model": "scripts/download-model.mjs"
   },
   "scripts": {
     "build": "tsup",
