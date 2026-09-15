@@ -28,7 +28,7 @@
  */
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
-import { existsSync, copyFileSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -126,7 +126,7 @@ export function listAttachedPids(dbPath, selfPid = process.pid) {
  *      clients that hold no lock).
  *   2. `wal_checkpoint(TRUNCATE)` refuses while any connection is actively
  *      reading/writing — and on success it has folded the pending WAL into
- *      the main file, so the `copyFileSync` backup that follows is complete.
+ *      the main file, so the pre-swap backup that follows is complete.
  *
  * @param {new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }} Database
  * @param {string} dbPath
@@ -570,8 +570,21 @@ async function main() {
     }
   }
 
+  // The rollback backup goes through SQLite's backup API too: a byte copy
+  // of the main file would miss WAL frames from a commit that landed in the
+  // guard→lock acquisition window (the swapped-in copy already includes
+  // them via the same API; the backup must be equally complete).
   const backupPath = buildBackupPath(dbPath);
-  copyFileSync(dbPath, backupPath);
+  const backupSource = new Database(dbPath, { readonly: true });
+  try {
+    await backupSource.backup(backupPath);
+  } finally {
+    try {
+      backupSource.close();
+    } catch {
+      /* ignore */
+    }
+  }
   renameSync(copyPath, dbPath);
   applyLock?.release();
   process.stdout.write(
