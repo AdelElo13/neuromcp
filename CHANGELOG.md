@@ -108,6 +108,20 @@ depends on an install script.
     validation (from the same injected env): with the override active the
     index-aware cascade no longer pins the stored model, so the documented
     mix workflow works again.
+- **Adversarial review round 4 (Codex, 7/10) — all findings fixed:**
+  - the `.pre-reembed` rollback backup goes through SQLite's backup API
+    (a byte copy could miss WAL frames from the guard→lock window); the
+    apply e2e verifies the backup's CONTENT, not just its existence;
+  - the doctor matches Ollama tags correctly (`all-minilm:latest` in the
+    config was unmatchable; untagged means `:latest`, differing explicit
+    tags do not match);
+  - the `/api/embed` dimension probe runs on the runtime's budget
+    (`NEUROMCP_EMBED_TIMEOUT_MS`, default 30 s) and a listed model whose
+    width cannot be measured is reported UNVERIFIED (warn) instead of
+    "no embedding route" (fail) — an unmeasured width is no proof of a
+    mismatch;
+  - the `embedding route` summary reports the MEASURED model + width
+    instead of hardcoded `ollama nomic-embed-text 768d`.
   - QUICKSTART no longer implies bare `npx neuromcp-init` fixes GUI
     configs — from the npx cache it deliberately falls back to the `npx`
     entry; a permanent `npm install -g` first is the documented route.
