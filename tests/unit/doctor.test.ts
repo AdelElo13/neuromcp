@@ -96,41 +96,72 @@ describe('checkDaemon', () => {
   });
 });
 
-describe('checkOllama', () => {
-  it('reports ok when Ollama answers and nomic-embed-text is installed', async () => {
-    const fetchImpl = vi.fn().mockImplementation(() =>
-      jsonResponse({ models: [{ name: 'nomic-embed-text:latest' }, { name: 'llama3.2:3b' }] }));
-    const result = await checkOllama({ fetchImpl, env: {} });
+describe('checkOllama — probes the CONFIGURED model and measures its dimension', () => {
+  // Codex round-3 [P2]: the old check only proved nomic-embed-text exists
+  // and hardcoded 768d; with NEUROMCP_EMBEDDING_MODEL set to a custom model
+  // the doctor presented the nomic probe as evidence for a model it never
+  // checked. The check now returns { result, probe } where probe carries
+  // the configured model plus its MEASURED dimension.
+  function tagsThenEmbed(models: string[], dims: number) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/api/tags')) {
+        return jsonResponse({ models: models.map((name) => ({ name })) });
+      }
+      return jsonResponse({ embeddings: [Array.from({ length: dims }, () => 0.1)] });
+    });
+  }
+
+  it('reports ok with the MEASURED dimension when the default model is installed', async () => {
+    const fetchImpl = tagsThenEmbed(['nomic-embed-text:latest', 'llama3.2:3b'], 768);
+    const { result, probe } = await checkOllama({ fetchImpl, env: {} });
     expect(result.status).toBe('ok');
-    expect(fetchImpl).toHaveBeenCalledWith(
-      'http://localhost:11434/api/tags',
-      expect.anything(),
-    );
+    expect(probe).toEqual({ model: 'nomic-embed-text', dimensions: 768 });
+    expect(fetchImpl).toHaveBeenCalledWith('http://localhost:11434/api/tags', expect.anything());
+  });
+
+  it('probes the model from NEUROMCP_EMBEDDING_MODEL, not nomic, and measures ITS width', async () => {
+    const fetchImpl = tagsThenEmbed(['all-minilm:latest'], 384);
+    const { result, probe } = await checkOllama({
+      fetchImpl,
+      env: { NEUROMCP_EMBEDDING_MODEL: 'all-minilm' },
+    });
+    expect(result.status).toBe('ok');
+    expect(probe).toEqual({ model: 'all-minilm', dimensions: 384 });
+    expect(result.info).toContain('all-minilm');
+    expect(result.info).toContain('384');
+  });
+
+  it('warns (probe null) when the CONFIGURED model is missing, even though nomic is present', async () => {
+    const fetchImpl = tagsThenEmbed(['nomic-embed-text:latest'], 768);
+    const { result, probe } = await checkOllama({
+      fetchImpl,
+      env: { NEUROMCP_EMBEDDING_MODEL: 'all-minilm' },
+    });
+    expect(result.status).toBe('warn');
+    expect(probe).toBeNull();
+    expect(result.info).toContain('ollama pull all-minilm');
   });
 
   it('honours OLLAMA_HOST from the environment', async () => {
-    const fetchImpl = vi.fn().mockImplementation(() =>
-      jsonResponse({ models: [{ name: 'nomic-embed-text' }] }));
+    const fetchImpl = tagsThenEmbed(['nomic-embed-text'], 768);
     await checkOllama({ fetchImpl, env: { OLLAMA_HOST: 'http://10.0.0.5:11434' } });
-    expect(fetchImpl).toHaveBeenCalledWith(
-      'http://10.0.0.5:11434/api/tags',
-      expect.anything(),
-    );
+    expect(fetchImpl).toHaveBeenCalledWith('http://10.0.0.5:11434/api/tags', expect.anything());
   });
 
-  it('warns with a pull hint when Ollama runs but nomic-embed-text is missing', async () => {
-    const fetchImpl = vi.fn().mockImplementation(() =>
-      jsonResponse({ models: [{ name: 'llama3.2:3b' }] }));
-    const result = await checkOllama({ fetchImpl, env: {} });
+  it('warns with a pull hint when Ollama runs but the model is missing', async () => {
+    const fetchImpl = tagsThenEmbed(['llama3.2:3b'], 768);
+    const { result, probe } = await checkOllama({ fetchImpl, env: {} });
     expect(result.status).toBe('warn');
+    expect(probe).toBeNull();
     expect(result.info).toContain('ollama pull nomic-embed-text');
     expect(result.info).toContain('ONNX');
   });
 
   it('warns about the ONNX 384d fallback when Ollama is unreachable', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('fetch failed'));
-    const result = await checkOllama({ fetchImpl, env: {} });
+    const { result, probe } = await checkOllama({ fetchImpl, env: {} });
     expect(result.status).toBe('warn');
+    expect(probe).toBeNull();
     expect(result.info).toContain('ONNX');
     expect(result.info).toContain('384');
   });
@@ -206,13 +237,14 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
     };
   }
   const ok = { status: 'ok' } as const;
+  const NOMIC = { model: 'nomic-embed-text', dimensions: 768 } as const;
   const baseDeps = { exists: () => true, home: '/home/x' };
 
   it('reports matched when a reachable default provider fits width and stored model', () => {
     const result = checkEmbeddingIndex({
       ...baseDeps,
       Database: fakeDbFor(384, [{ embedding_model: 'bge-small-en-v1.5', n: 5 }]),
-      ollamaResult: ok,
+      ollamaProbe: NOMIC,
       onnxResult: ok,
       env: {},
     });
@@ -227,7 +259,7 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
     const result = checkEmbeddingIndex({
       ...baseDeps,
       Database: fakeDbFor(384, [{ embedding_model: 'bge-small-en-v1.5', n: 5 }]),
-      ollamaResult: ok,
+      ollamaProbe: NOMIC,
       onnxResult: ok,
       env: { NEUROMCP_EMBEDDING_PROVIDER: 'ollama' },
     });
@@ -239,13 +271,70 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
     const result = checkEmbeddingIndex({
       ...baseDeps,
       Database: fakeDbFor(768, [{ embedding_model: 'some-custom-768d-model', n: 9 }]),
-      ollamaResult: ok,
+      ollamaProbe: NOMIC,
       onnxResult: ok,
       env: {},
     });
     expect(result.status).toBe('fail');
     expect(result.info).toMatch(/model/i);
     expect(result.info).toMatch(/some-custom-768d-model/);
+  });
+
+  it('fails on MIXED stored models — one matching model does not make the others compatible', () => {
+    // Codex round-3 [P2]: `some()` accepted the database as soon as ONE
+    // stored model matched; the runtime refuses when ANY foreign model is
+    // present. Doctor must apply the runtime's rule (every, not some).
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(768, [
+        { embedding_model: 'nomic-embed-text', n: 100 },
+        { embedding_model: 'other-model', n: 3 },
+      ]),
+      ollamaProbe: NOMIC,
+      onnxResult: ok,
+      env: {},
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/other-model/);
+  });
+
+  it('accepts mixed stored models when NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1 — runtime parity', () => {
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(768, [
+        { embedding_model: 'nomic-embed-text', n: 100 },
+        { embedding_model: 'other-model', n: 3 },
+      ]),
+      ollamaProbe: NOMIC,
+      onnxResult: ok,
+      env: { NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX: '1' },
+    });
+    expect(result.status).toBe('ok');
+  });
+
+  it('uses the MEASURED Ollama dimension: a custom 384d model matches a 384d index', () => {
+    // Codex round-3 [P2]: the doctor hardcoded ollama=768d, failing a
+    // perfectly matched custom-model setup that the runtime accepts.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(384, [{ embedding_model: 'all-minilm', n: 7 }]),
+      ollamaProbe: { model: 'all-minilm', dimensions: 384 },
+      onnxResult: { status: 'warn' },
+      env: { NEUROMCP_EMBEDDING_PROVIDER: 'ollama', NEUROMCP_EMBEDDING_MODEL: 'all-minilm' },
+    });
+    expect(result.status).toBe('ok');
+    expect(result.info).toMatch(/all-minilm/);
+  });
+
+  it('treats a null ollamaProbe as "not eligible" — a nomic probe is no evidence for a custom model', () => {
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(384, [{ embedding_model: 'all-minilm', n: 7 }]),
+      ollamaProbe: null,
+      onnxResult: { status: 'warn' },
+      env: { NEUROMCP_EMBEDDING_PROVIDER: 'ollama', NEUROMCP_EMBEDDING_MODEL: 'all-minilm' },
+    });
+    expect(result.status).toBe('fail');
   });
 });
 

@@ -23,7 +23,7 @@ import {
   readVecDimension,
   rebuildIndex,
   guardApplySwap,
-  openSwapSentinel,
+  acquireApplyLock,
 } from '../../bin/reembed.mjs';
 
 class FakeEmbedder {
@@ -159,46 +159,77 @@ describe('neuromcp-reembed', () => {
     });
   });
 
-  describe('openSwapSentinel — detects writes between snapshot and swap', () => {
-    // Why this exists: --apply snapshots the database BEFORE the (possibly
-    // minutes-long) re-embed. A client can write during the rebuild and
-    // disconnect before the swap guard runs; the guard then sees an idle
-    // database and installs the stale snapshot — the interim writes survive
-    // only in the backup file. The sentinel holds a connection open across
-    // the whole operation: SQLite's data_version pragma changes on that
-    // connection exactly when ANOTHER connection commits.
+  describe('acquireApplyLock — writes during the rebuild are PREVENTED, not detected', () => {
+    // Why a held write lock and not a change-detector: --apply snapshots
+    // the database BEFORE the (possibly minutes-long) re-embed; a client
+    // write during that window would be silently dropped by the swap. A
+    // data_version sentinel turned out to be unreliable for this — the
+    // guard's own wal_checkpoint(TRUNCATE) bumps it with zero commits
+    // (measured: {busy:0, log:0, checkpointed:0} still changed the value),
+    // guaranteeing a false refusal. Holding BEGIN IMMEDIATE across
+    // snapshot→rebuild→swap makes interim commits impossible instead:
+    // writers get SQLITE_BUSY (loud, at the client), readers keep working.
 
-    it('reports no change when nobody wrote', () => {
-      const p = join(dir, 'sentinel-quiet.db');
-      const db = new Database(p);
-      db.pragma('journal_mode = WAL');
-      db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY)').run();
-      db.close();
-
-      const sentinel = openSwapSentinel(Database, p);
-      try {
-        expect(sentinel.changed()).toBe(false);
-        expect(sentinel.changed()).toBe(false);
-      } finally {
-        sentinel.close();
-      }
-    });
-
-    it('reports a change after another connection commits', () => {
-      const p = join(dir, 'sentinel-write.db');
-      const db = new Database(p);
+    function makeDb(path: string): void {
+      const db = new Database(path);
       db.pragma('journal_mode = WAL');
       db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)').run();
       db.close();
+    }
 
-      const sentinel = openSwapSentinel(Database, p);
+    it('blocks other writers while held, and admits them again after release()', () => {
+      const p = join(dir, 'lock-blocks.db');
+      makeDb(p);
+
+      const lock = acquireApplyLock(Database, p, { busyTimeoutMs: 100 });
+      expect(lock.ok).toBe(true);
+
+      const writer = new Database(p);
+      writer.pragma('busy_timeout = 150');
       try {
-        const writer = new Database(p);
-        writer.prepare('INSERT INTO t (v) VALUES (?)').run('interim write');
-        writer.close();
-        expect(sentinel.changed()).toBe(true);
+        expect(() => writer.prepare('INSERT INTO t (v) VALUES (?)').run('interim')).toThrow(/SQLITE_BUSY|busy|locked/i);
+
+        (lock as { release: () => void }).release();
+        writer.prepare('INSERT INTO t (v) VALUES (?)').run('after release');
+        const n = (writer.prepare('SELECT COUNT(*) AS n FROM t').get() as { n: number }).n;
+        expect(n).toBe(1);
       } finally {
-        sentinel.close();
+        writer.close();
+      }
+    });
+
+    it('still allows READERS while held — the snapshot backup must be able to run', () => {
+      const p = join(dir, 'lock-readers.db');
+      makeDb(p);
+      const seedWriter = new Database(p);
+      seedWriter.prepare('INSERT INTO t (v) VALUES (?)').run('pre-lock row');
+      seedWriter.close();
+
+      const lock = acquireApplyLock(Database, p, { busyTimeoutMs: 100 });
+      expect(lock.ok).toBe(true);
+      try {
+        const reader = new Database(p, { readonly: true });
+        const n = (reader.prepare('SELECT COUNT(*) AS n FROM t').get() as { n: number }).n;
+        reader.close();
+        expect(n).toBe(1);
+      } finally {
+        (lock as { release: () => void }).release();
+      }
+    });
+
+    it('refuses (ok:false) when another connection already holds a write transaction', () => {
+      const p = join(dir, 'lock-contended.db');
+      makeDb(p);
+
+      const holder = new Database(p);
+      holder.prepare('BEGIN IMMEDIATE').run();
+      try {
+        const lock = acquireApplyLock(Database, p, { busyTimeoutMs: 100 });
+        expect(lock.ok).toBe(false);
+        expect(String((lock as { reason: string }).reason)).toMatch(/writ|busy|client/i);
+      } finally {
+        holder.prepare('ROLLBACK').run();
+        holder.close();
       }
     });
   });

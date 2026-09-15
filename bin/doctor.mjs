@@ -142,38 +142,74 @@ function daemonDownResult(name, url, reason, osPlatform) {
  *   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>,
  *   env?: Record<string, string | undefined>,
  * }} [deps]
- * @returns {Promise<CheckResult>}
+ * @returns {Promise<{ result: CheckResult, probe: { model: string, dimensions: number } | null }>}
  */
 export async function checkOllama(deps = {}) {
   const { fetchImpl = defaultFetch, env = process.env } = deps;
   const name = 'ollama embeddings';
   const host = env.OLLAMA_HOST ?? 'http://localhost:11434';
-  const url = `${host.replace(/\/$/, '')}/api/tags`;
+  const base = host.replace(/\/$/, '');
+  // Probe the model the runtime will actually use — presenting a nomic
+  // probe as evidence for a custom NEUROMCP_EMBEDDING_MODEL diagnosed the
+  // wrong thing entirely (Codex round 3).
+  const model =
+    env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL !== 'auto'
+      ? env.NEUROMCP_EMBEDDING_MODEL
+      : 'nomic-embed-text';
   try {
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    const res = await fetchImpl(`${base}/api/tags`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     if (!res.ok) {
-      return ollamaDownResult(name, host, `HTTP ${res.status}`);
+      return { result: ollamaDownResult(name, host, `HTTP ${res.status}`), probe: null };
     }
     const body = /** @type {{ models?: Array<{ name?: unknown }> }} */ (await res.json());
     const models = Array.isArray(body?.models) ? body.models : [];
-    const hasNomic = models.some(
-      (m) => typeof m?.name === 'string' && m.name.split(':')[0] === 'nomic-embed-text',
+    const hasModel = models.some(
+      (m) => typeof m?.name === 'string' && m.name.split(':')[0] === model,
     );
-    if (hasNomic) {
-      return { name, status: 'ok', info: `nomic-embed-text (768d) available at ${host}` };
+    if (!hasModel) {
+      return {
+        result: {
+          name,
+          status: 'warn',
+          info: `Ollama runs at ${host} but ${model} is not pulled — ` +
+            `retrieval falls back to ONNX 384d (lower quality). ` +
+            `Fix: \`ollama pull ${model}\``,
+        },
+        probe: null,
+      };
+    }
+    // Measure the model's real width instead of assuming one — a custom
+    // model can be any dimension, and the embedding-index check needs the
+    // truth to apply the runtime's compatibility rule.
+    const probeRes = await fetchImpl(`${base}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: 'dimension probe' }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    const probeBody = probeRes.ok
+      ? /** @type {{ embeddings?: number[][] }} */ (await probeRes.json())
+      : null;
+    const dims = probeBody?.embeddings?.[0]?.length;
+    if (typeof dims !== 'number' || dims <= 0) {
+      return {
+        result: {
+          name,
+          status: 'warn',
+          info: `${model} is listed at ${host} but the embed probe failed — cannot verify its dimension`,
+        },
+        probe: null,
+      };
     }
     return {
-      name,
-      status: 'warn',
-      info: `Ollama runs at ${host} but nomic-embed-text is not pulled — ` +
-        `retrieval falls back to ONNX 384d (lower quality). ` +
-        `Fix: \`ollama pull nomic-embed-text\``,
+      result: { name, status: 'ok', info: `${model} (${dims}d, measured) available at ${host}` },
+      probe: { model, dimensions: dims },
     };
   } catch (err) {
     const reason = err instanceof Error && err.name === 'AbortError'
       ? `timeout after ${PROBE_TIMEOUT_MS}ms`
       : err instanceof Error ? err.message : String(err);
-    return ollamaDownResult(name, host, reason);
+    return { result: ollamaDownResult(name, host, reason), probe: null };
   }
 }
 
@@ -327,7 +363,7 @@ export function checkDatabase(deps) {
  *
  * @param {{
  *   Database: SqliteCtor | null,
- *   ollamaResult: Pick<CheckResult, 'status'>,
+ *   ollamaProbe: { model: string, dimensions: number } | null,
  *   onnxResult: Pick<CheckResult, 'status'>,
  *   env?: Record<string, string | undefined>,
  *   exists?: (p: string) => boolean,
@@ -338,7 +374,7 @@ export function checkDatabase(deps) {
 export function checkEmbeddingIndex(deps) {
   const {
     Database,
-    ollamaResult,
+    ollamaProbe,
     onnxResult,
     env = process.env,
     exists = existsSync,
@@ -375,13 +411,15 @@ export function checkEmbeddingIndex(deps) {
     // match (its vectors are unrelated). Without this the doctor declared
     // "matched by onnx" while the runtime was degrading (Codex round 2).
     const requested = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
-    const ollamaModel =
-      env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL !== 'auto'
-        ? env.NEUROMCP_EMBEDDING_MODEL
-        : 'nomic-embed-text';
     const available = [];
-    if ((requested === 'auto' || requested === 'ollama') && ollamaResult.status === 'ok') {
-      available.push({ provider: `ollama ${ollamaModel}`, model: ollamaModel, dim: 768 });
+    if ((requested === 'auto' || requested === 'ollama') && ollamaProbe !== null) {
+      // The probe carries the MEASURED width of the CONFIGURED model — a
+      // nomic assumption here misdiagnosed every custom-model setup.
+      available.push({
+        provider: `ollama ${ollamaProbe.model}`,
+        model: ollamaProbe.model,
+        dim: ollamaProbe.dimensions,
+      });
     }
     if ((requested === 'auto' || requested === 'onnx') && onnxResult.status === 'ok') {
       available.push({ provider: 'onnx bge-small-en-v1.5', model: 'bge-small-en-v1.5', dim: 384 });
@@ -406,9 +444,13 @@ export function checkEmbeddingIndex(deps) {
       /* pre-schema database — width-only check below */
     }
 
+    // Runtime parity: a candidate matches only when EVERY stored model is
+    // its own (one foreign model already degrades the runtime), unless the
+    // documented mix-override is active.
+    const mixAllowed = env.NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX === '1';
     const widthMatches = available.filter((a) => a.dim === indexDim);
     const matching = widthMatches.find(
-      (a) => storedModels.length === 0 || storedModels.some((m) => m.embedding_model === a.model),
+      (a) => mixAllowed || storedModels.every((m) => m.embedding_model === a.model),
     );
     if (matching !== undefined) {
       return {
@@ -595,13 +637,14 @@ export async function collectChecks() {
   checks.push(checkDatabase({ Database }));
 
   // 8-10. Daemon + embedding routes (network probes run concurrently)
-  const [daemonResult, ollamaResult] = await Promise.all([checkDaemon(), checkOllama()]);
+  const [daemonResult, ollamaOutcome] = await Promise.all([checkDaemon(), checkOllama()]);
+  const ollamaResult = ollamaOutcome.result;
   const onnxResult = checkOnnxModel();
   checks.push(daemonResult, ollamaResult, onnxResult);
   checks.push(deriveEmbeddingRoute(ollamaResult, onnxResult));
 
   // 11. Vector-index width vs what this machine can actually embed.
-  checks.push(checkEmbeddingIndex({ Database, ollamaResult, onnxResult }));
+  checks.push(checkEmbeddingIndex({ Database, ollamaProbe: ollamaOutcome.probe, onnxResult }));
 
   return checks;
 }

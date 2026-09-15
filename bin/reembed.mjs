@@ -187,31 +187,61 @@ export function guardApplySwap(Database, dbPath, deps = {}) {
 }
 
 /**
- * Detect writes to the ORIGINAL database between the snapshot and the swap.
- * The re-embed can take minutes; a client can write during it and disconnect
- * before the final guard runs — the guard then sees an idle database and
- * would install the stale snapshot, losing those writes from the active
- * file. SQLite's `data_version` pragma changes on THIS connection exactly
- * when another connection commits, so a sentinel held open across the whole
- * operation sees any interim commit.
+ * PREVENT writes to the ORIGINAL database between the snapshot and the swap
+ * by holding `BEGIN IMMEDIATE` (SQLite's reserved write lock) for the whole
+ * window. The re-embed can take minutes; without this a client could write
+ * during it and the swap would install the stale snapshot, silently
+ * dropping those writes from the active file.
  *
- * @param {new (path: string, opts?: object) => { pragma: (s: string, o?: object) => unknown, close: () => void }} Database
+ * Prevention, not detection: a `data_version` sentinel was tried first and
+ * is unreliable here — the guard's own `wal_checkpoint(TRUNCATE)` bumps
+ * data_version with ZERO commits (measured: {busy:0, log:0, checkpointed:0}
+ * still changed it), guaranteeing a false refusal. With the lock held,
+ * interim commits are impossible: a straggler client gets SQLITE_BUSY
+ * (loud, at that client) while readers — including the snapshot backup —
+ * keep working.
+ *
+ * @param {new (path: string, opts?: object) => {
+ *   pragma: (s: string, o?: object) => unknown,
+ *   prepare: (sql: string) => { run: (...a: unknown[]) => unknown },
+ *   close: () => void,
+ * }} Database
  * @param {string} dbPath
- * @returns {{ changed: () => boolean, close: () => void }}
+ * @param {{ busyTimeoutMs?: number }} [deps]
+ * @returns {{ ok: true, release: () => void } | { ok: false, reason: string }}
  */
-export function openSwapSentinel(Database, dbPath) {
-  const db = new Database(dbPath, { readonly: true });
-  const read = () => Number(db.pragma('data_version', { simple: true }));
-  const initial = read();
+export function acquireApplyLock(Database, dbPath, deps = {}) {
+  const { busyTimeoutMs = 2000 } = deps;
+  const db = new Database(dbPath);
+  try {
+    db.pragma(`busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))}`);
+    db.prepare('BEGIN IMMEDIATE').run();
+  } catch (err) {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      reason:
+        `could not take the write lock (${msg}) — another connection is writing; ` +
+        'stop every neuromcp client first',
+    };
+  }
   return {
-    changed() {
-      return read() !== initial;
-    },
-    close() {
+    ok: true,
+    release() {
+      try {
+        db.prepare('ROLLBACK').run();
+      } catch {
+        /* transaction already gone */
+      }
       try {
         db.close();
       } catch {
-        /* already closed */
+        /* ignore */
       }
     },
   };
@@ -384,7 +414,9 @@ Usage:
 
 Stop every neuromcp client (Claude Desktop / Claude Code / Codex / the daemon)
 before running with --apply. The swap refuses (exit 3) while another process
-still has the database open or a connection is actively reading/writing.
+still has the database open or a connection is actively reading/writing, and
+holds SQLite's write lock for the whole rebuild — a straggler client that
+tries to write during it gets SQLITE_BUSY instead of silently losing data.
 `);
 }
 
@@ -418,9 +450,12 @@ async function main() {
   const embedder = await createEmbeddingProvider(config, logger);
 
   // --apply preflight: refuse BEFORE minutes of embedding work when a
-  // client is clearly attached, and open the write-sentinel that covers
-  // the whole snapshot→rebuild→swap window.
-  let sentinel = null;
+  // client is clearly attached, then take the write lock that makes
+  // interim writes impossible for the whole snapshot→rebuild→swap window.
+  // Order matters: the guard's wal_checkpoint(TRUNCATE) folds the WAL into
+  // the file FIRST (so the byte-copy backup is complete), the lock comes
+  // after — a checkpoint cannot complete against a held write lock.
+  let applyLock = null;
   if (args.apply && !args.force) {
     const verdict = guardApplySwap(Database, dbPath);
     if (verdict.ok !== true) {
@@ -430,7 +465,15 @@ async function main() {
       process.exit(3);
       return;
     }
-    sentinel = openSwapSentinel(Database, dbPath);
+    const lock = acquireApplyLock(Database, dbPath);
+    if (lock.ok !== true) {
+      process.stderr.write(
+        `\n✗ not starting: ${lock.reason}.\n  Nothing was changed.\n\n`,
+      );
+      process.exit(3);
+      return;
+    }
+    applyLock = lock;
   }
 
   const copyPath = buildCopyPath(dbPath);
@@ -499,41 +542,38 @@ async function main() {
     return;
   }
 
-  // Final pre-swap checks. The preflight guard ran before the snapshot;
-  // this closes the remaining window: (a) a client that attached DURING the
-  // rebuild, (b) a client that wrote during the rebuild and already
-  // disconnected — the sentinel's data_version catches that even though the
-  // database now looks idle. Refusal keeps the rebuilt copy: the expensive
-  // work is not thrown away, only the swap is blocked.
+  // Final pre-swap check. The write lock has been held since BEFORE the
+  // snapshot, so no client can have committed in between — interim writes
+  // are prevented, not merely detected (a straggler writer got SQLITE_BUSY
+  // at its own end). NO checkpoint runs here: it could not complete against
+  // our own lock, and a TRUNCATE checkpoint is exactly what made the
+  // earlier data_version sentinel fire falsely. The only remaining risk is
+  // a process that ATTACHED during the rebuild (idle, no lock yet, would
+  // write to the renamed-away inode after the swap) — re-check lsof for
+  // that. Refusal keeps the rebuilt copy: only the swap is blocked.
   if (!args.force) {
-    const verdict = guardApplySwap(Database, dbPath);
-    if (verdict.ok !== true) {
-      sentinel?.close();
+    const attachment = listAttachedPids(dbPath);
+    const problem = !attachment.available
+      ? 'cannot verify that no client attached during the rebuild (lsof unavailable)'
+      : attachment.pids.length > 0
+        ? `processes attached to the database during the rebuild (pid ${attachment.pids.join(', ')})`
+        : null;
+    if (problem !== null) {
+      applyLock?.release();
       process.stderr.write(
-        `\n✗ not swapping: ${verdict.reason}.\n` +
+        `\n✗ not swapping: ${problem}.\n` +
           `  Nothing was changed. The rebuilt copy is kept at:\n  ${copyPath}\n` +
           '  Stop the clients and re-run with --apply (or add --force to override).\n\n',
       );
       process.exit(3);
       return;
     }
-    if (sentinel !== null && sentinel.changed()) {
-      sentinel.close();
-      process.stderr.write(
-        '\n✗ not swapping: the database CHANGED during the rebuild (a client committed writes).\n' +
-          '  The rebuilt copy is a stale snapshot — applying it would drop those writes from\n' +
-          `  the active database. Nothing was changed. The copy is kept at:\n  ${copyPath}\n` +
-          '  Stop every client and re-run with --apply.\n\n',
-      );
-      process.exit(3);
-      return;
-    }
   }
-  sentinel?.close();
 
   const backupPath = buildBackupPath(dbPath);
   copyFileSync(dbPath, backupPath);
   renameSync(copyPath, dbPath);
+  applyLock?.release();
   process.stdout.write(
     `\n✓ applied. ${dbPath} now has a ${result.newDim}d index.\n` +
       `  Original kept at: ${backupPath}\n` +

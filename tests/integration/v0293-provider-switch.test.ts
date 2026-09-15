@@ -349,6 +349,26 @@ describe('v0.29.3 embedding provider switch', () => {
     expect(runtime.vectorEnabled).toBe(true);
   });
 
+  it('NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1 still admits a different same-width model — the override survives requireModel', async () => {
+    // Codex round-3 [P2]: with exactly one stored model, requireModel was
+    // enforced unconditionally, so the documented mix-override never
+    // reached the validator anymore. The override must disable the model
+    // requirement in SELECTION and be honoured by VALIDATION, consistently
+    // from the same injected env.
+    await seed(768, 'old-model');
+
+    const runtime = await resolveEmbeddingRuntime(db, config, logger, {
+      select: cascade(new FakeEmbedder('nomic-embed-text', 768)),
+      attempts: 1,
+      sleep: NEVER_SLEEP,
+      stderr: SILENT,
+      env: { NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX: '1' },
+    });
+
+    expect(runtime.mode).toBe('matched');
+    expect(runtime.embedder.name).toBe('nomic-embed-text');
+  });
+
   it('same width but a different model degrades instead of poisoning recall', async () => {
     await seed(384, 'bge-small-en-v1.5');
 

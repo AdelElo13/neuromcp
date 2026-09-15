@@ -72,13 +72,18 @@ depends on an install script.
   The whole degraded tool surface (store / search / stats / backfill) is
   now pinned by an MCP-client-level test over the in-memory transport.
 - **Adversarial review round 2 (Codex) — all findings fixed:**
-  - `reembed --apply` detects writes that happen DURING the rebuild: a
-    sentinel connection tracks SQLite's `data_version` across the whole
-    snapshot→rebuild→swap window and refuses the swap (exit 3, copy kept)
-    when any other connection committed in between — even if that client
-    already disconnected. The attachment guard also runs BEFORE the
-    snapshot, and fails closed when `lsof` is unavailable instead of
-    treating "cannot detect" as "no clients".
+  - `reembed --apply` PREVENTS writes during the rebuild instead of
+    detecting them: it holds SQLite's write lock (`BEGIN IMMEDIATE`) across
+    the whole snapshot→rebuild→swap window, so a straggler client gets
+    SQLITE_BUSY at its own end while readers keep working. (A
+    `data_version` sentinel was tried first and refused every safe apply
+    on a WAL database — the guard's own `wal_checkpoint(TRUNCATE)` bumps
+    data_version with zero commits; found independently by measurement and
+    by the round-3 Codex CLI repro, and pinned by an end-to-end CLI test
+    on a quiet WAL database.) The attachment guard runs BEFORE the
+    snapshot, re-checks `lsof` before the swap, and fails closed when
+    `lsof` is unavailable instead of treating "cannot detect" as "no
+    clients".
   - `--apply` + `--limit` is now a parse error: a limited rebuild drops
     all vectors but re-embeds only the first *n*, so applying it would
     install a partial index with stale model stamps.
@@ -94,8 +99,15 @@ depends on an install script.
     database (the native binding loads lazily — importing alone passes on
     a scripts-disabled install), and the embedding-index check applies the
     runtime's own rules: explicit `NEUROMCP_EMBEDDING_PROVIDER` narrows
-    the eligible providers and a same-width model mismatch is named as
-    such instead of being reported healthy.
+    the eligible providers, `checkOllama` probes the CONFIGURED model and
+    MEASURES its dimension (no more hardcoded nomic/768 assumption), a
+    mixed-model database fails unless `NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1`
+    (every-model rule, not any-model), and a same-width model mismatch is
+    named as such instead of being reported healthy.
+  - `NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1` reaches SELECTION as well as
+    validation (from the same injected env): with the override active the
+    index-aware cascade no longer pins the stored model, so the documented
+    mix workflow works again.
   - QUICKSTART no longer implies bare `npx neuromcp-init` fixes GUI
     configs — from the npx cache it deliberately falls back to the `npx`
     entry; a permanent `npm install -g` first is the documented route.

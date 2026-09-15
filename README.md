@@ -184,6 +184,13 @@ Windsurf), writes the `neuromcp` entry into each config (with a backup of
 the original), initializes the wiki + hooks, and checks whether Ollama is
 available. `--dry-run` previews everything without writing.
 
+For **GUI clients** (Claude Desktop, Codex Desktop) install permanently
+first: `npm install -g neuromcp && neuromcp-init`. Only a permanent
+install lets init write the absolute node + script paths those clients
+need — from the bare-`npx` cache (garbage-collected) it deliberately
+falls back to a PATH-dependent `npx` entry, which GUI clients usually
+cannot resolve.
+
 ### Manual steps (what init does under the hood)
 
 **1. Start the MCP server**

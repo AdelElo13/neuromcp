@@ -199,7 +199,7 @@ export async function resolveEmbeddingRuntime(
   // ── Case 1: no vector index yet. Nothing to be compatible with. ───────
   if (indexDimension === null) {
     const embedder = await create(config, logger);
-    validateEmbeddingCompatibility(db, embedder, logger);
+    validateEmbeddingCompatibility(db, embedder, logger, env);
     return { embedder, mode: 'fresh', vectorEnabled: true, indexDimension: null, message: null };
   }
 
@@ -207,11 +207,13 @@ export async function resolveEmbeddingRuntime(
   // Require the stored MODEL too when it is unambiguous: a same-width
   // provider of another model must not stop the cascade — the right
   // provider may be one candidate further down (Codex round-2 finding).
-  // Zero stored models (everything awaiting backfill) or a historical mix
-  // (NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX era) fall back to width-only, with
-  // validateEmbeddingCompatibility still the belt-and-braces behind it.
+  // Zero stored models (everything awaiting backfill), a historical mix,
+  // or the documented NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1 override fall
+  // back to width-only — the override must reach validation too (same env),
+  // otherwise it is silently dead (Codex round-3 finding).
+  const mixAllowed = env['NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX'] === '1';
   const storedModels = getStoredEmbeddingModels(db);
-  const requireModel = storedModels.length === 1 ? storedModels[0] : undefined;
+  const requireModel = !mixAllowed && storedModels.length === 1 ? storedModels[0] : undefined;
 
   let rejected: readonly string[] = [];
   for (let attempt = 1; attempt <= Math.max(1, attempts); attempt++) {
@@ -222,7 +224,7 @@ export async function resolveEmbeddingRuntime(
     rejected = selection.rejected;
     if (selection.provider !== null) {
       try {
-        validateEmbeddingCompatibility(db, selection.provider, logger);
+        validateEmbeddingCompatibility(db, selection.provider, logger, env);
       } catch (err) {
         // Same width, different model — vectors are unrelated. Degrade
         // rather than poison recall with noise.

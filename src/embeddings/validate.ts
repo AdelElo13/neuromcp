@@ -57,6 +57,7 @@ export function validateEmbeddingCompatibility(
   db: Database.Database,
   embedder: EmbeddingProvider,
   logger: Logger,
+  env: NodeJS.ProcessEnv = process.env,
 ): void {
   // 1. Vector-table dimension vs provider dimension
   const existingDim = getExistingVecDimension(db);
@@ -85,7 +86,7 @@ export function validateEmbeddingCompatibility(
   const foreign = models.filter((m) => m.embedding_model !== embedder.name);
   if (foreign.length > 0) {
     const detail = foreign.map((m) => `"${m.embedding_model}" (${m.n} memories)`).join(', ');
-    if (process.env['NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX'] === '1') {
+    if (env['NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX'] === '1') {
       logger.warn('embeddings', 'Embedding model mix allowed by override', {
         active: embedder.name,
         stored: detail,
