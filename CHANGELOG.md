@@ -3,7 +3,7 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.29.4] — unreleased
+## [0.29.4] — 2026-09-15
 
 ### Fixed
 
