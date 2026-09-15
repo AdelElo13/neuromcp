@@ -14,7 +14,7 @@ export function registerGraphTools(server: McpServer, deps: ServerDeps): void {
     description: 'Create or update an entity in the knowledge graph. Entities represent concepts, people, tools, or any named thing.',
     inputSchema: {
       name: z.string().describe('Entity name'),
-      entity_type: z.string().optional().describe('Entity type (default: "concept"). Examples: person, tool, project, concept, package, url'),
+      entity_type: z.string().optional().describe('Entity type (default: "concept"). Examples: person, tool, project, concept, package, url. "memory_proxy" is reserved and rejected.'),
       namespace: z.string().optional().describe('Namespace (default: config default)'),
       metadata: z.record(z.unknown()).optional().describe('Arbitrary metadata'),
     },
@@ -41,7 +41,7 @@ export function registerGraphTools(server: McpServer, deps: ServerDeps): void {
   });
 
   server.registerTool('query_graph', {
-    description: 'Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries.',
+    description: 'Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries. Without entity_id/entity_name it returns an OVERVIEW: the top-N entities of the namespace ranked by number of relations (contradicts edges not counted), with the relations among them; internal memory_proxy entities that only back contradicts edges are excluded from the overview.',
     inputSchema: {
       entity_id: z.string().optional().describe('Start entity ID'),
       entity_name: z.string().optional().describe('Start entity name (will find closest match)'),

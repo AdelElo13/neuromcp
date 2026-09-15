@@ -3,6 +3,99 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.5] — 2026-09-15
+
+Graph-hygiene release: the knowledge graph shows your entities again
+instead of the system's own plumbing.
+
+### Fixed
+
+- **FIX: the graph overview (`query_graph` without a start node, `/api/graph`,
+  the web UI) was dominated by synthetic `memory:…` proxy entities.**
+  `createContradictionEdge` creates a proxy entity for every memory without
+  an entity so a `contradicts` edge has endpoints. On a real database half
+  of all entities were such proxies, carrying 94% of all relations — and
+  because the overview ranked by raw degree, they pushed every real project,
+  person and tool out of the top-N. Proxies now carry the **reserved**
+  `entity_type: memory_proxy` (with `metadata.proxy_for_memory_id`; the
+  name embeds the full memory id — one proxy per memory), which the single
+  entity write path `upsertEntity` refuses for every caller
+  (`create_entity`, the LLM extractor, batch import) except the
+  contradiction code itself; the overview excludes exactly that type and
+  ignores `contradicts` edges when ranking. No guessing from a free-form
+  type or a name prefix, so a user's own "Working memory" or
+  "memory:working" entity stays visible. Entity-id/entity-name traversal is
+  unchanged.
+- **FIX: `contradicts` edges were created on keyword heuristics alone.**
+  Only `supersede` went through the claim-level gate; `coexist` fired on a
+  numeric difference at similarity ≥ 0.82 — linking, on the reference
+  database, `/api/embed-probe` to an unrelated wiki batch and every daily
+  consolidation report to the previous one. Both `supersede` and `coexist`
+  now require claim-level evidence (same subject, mutually-exclusive
+  predicate, different object). Without it the result is `flag`: still
+  returned in the `store_memory` result for the caller, but no longer
+  materialised as a graph edge or proxy entity. No producer-based gate
+  (`source`/`category` are free-form input and stay irrelevant to the
+  outcome).
+- **FIX: a date-anchored occurrence counted as a state claim.** The
+  daily consolidation report "Consolidation run on 2026-09-14 merged 1260 …"
+  parses as `{Consolidation, run, "on 2026-09-14 …"}`, and `run` is a
+  mutually-exclusive predicate — so every report contradicted the previous
+  one *with* claim-level evidence and the bogus edge reached
+  `explain.contradictions` in search results. The claim gate now tells a
+  *record* from a *plan*: an SVO object anchored to a full calendar date
+  ("run on 2026-06-13: …") that does not lie after the moment its memory
+  was recorded is a record of an occurrence, and two records on
+  *different* dates are a time series, not a contradiction. A date after
+  the recording moment is a plan ("the migration runs on 2026-09-20
+  exactly once") — a state a different date genuinely contradicts.
+  Deliberately narrow: only full dates anchor (IP addresses and clock
+  times do not; a recurring schedule is a state), anchors are
+  canonicalised so `14/09/2026` equals `2026-09-14` (impossible calendar
+  dates never anchor), the same date with different values is still a
+  contradiction, unknown recording moments never exempt, and the copula
+  is exempt ("the meeting is on 2026-09-13" → "… 09-20" stays a real
+  update). One boundary is a definition, not a fact the database can
+  decide: a plan recorded on its own planned day reads as a record, so
+  two such same-day-stored plan versions are reported as `flag` rather
+  than linked. The extractor itself is unchanged.
+- **FIX: `create_entity` on the name of a hidden proxy returned the proxy.**
+  The name-based upsert now *promotes* such a proxy to the requested type
+  (it keeps its memory link and edges, `metadata.promoted_from` records
+  it), so a public caller never receives an entity the overview hides.
+
+### Changed
+
+- **Schema v15** (one transaction, after the usual pre-migration backup).
+  Step 1 retypes legacy proxy entities from the free-form `memory` to
+  `memory_proxy` — only on the complete fingerprint the old code left
+  behind: legacy type + `memory:` prefix, `subject` link to a memory whose
+  legacy proxy name equals the entity name, and an automatic `contradicts`
+  edge created within 5 s after the entity (the co-creation signature of
+  the old code path; 0–40 ms for all 68 on the reference database). This
+  is a definition, not a provenance proof — legacy rows carry no origin
+  marker, so an entity that reproduces every internal fact is treated as
+  internal. What it rules out: "memory:working" of type `memory`, an
+  exact-name coincidence linked as `mention`, an entity without an
+  automatic edge, a user entity the system reused as an endpoint later
+  than 5 s after its creation. Reversible and inspectable:
+  `metadata.retyped_from`, every retyped name in the migration log, and
+  `create_entity` on that name promotes it back to a visible type. Every
+  memory the legacy 60-character name stood for is recorded. Step 2
+  soft-deletes legacy automatic `contradicts`
+  edges between two proxies whose memories carry no claim-level evidence
+  under the current rule — judged over *all* memories each proxy stands
+  for, kept if any pair has evidence (`metadata.removed_by`; nothing is
+  destroyed). On the reference database: 68/68 proxies retyped, 0 partial
+  matches; `contradicts` edges 183 → 48. New proxies embed the memory id
+  in their name, so one proxy represents exactly one memory from now on.
+
+### Docs
+
+- README: hero screenshot of the memory browser, new **Memory browser &
+  Obsidian** section, *What's new* brought up to v0.29, live CI badge
+  instead of a hard-coded test count.
+
 ## [0.29.4] — 2026-09-15
 
 ### Fixed

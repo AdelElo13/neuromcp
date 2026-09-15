@@ -244,6 +244,9 @@ export async function storeMemory(
 
   // Step 4: Contradiction detection (Phase 3). Vector-based — skipped in
   // degraded mode rather than attempted and logged as a failure per store.
+  // Runs for every memory regardless of source/category (v0.29.5: no
+  // producer-based gate — neither field is reserved, Codex PR-18 [P2]);
+  // what is gated is the graph edge, see step 9.
   let contradictions: readonly Contradiction[] = [];
   if (!degraded) {
     try {
@@ -398,8 +401,16 @@ export async function storeMemory(
         newId: id,
       });
     }
-    // For all resolutions (supersede, coexist, flag): create a 'contradicts' edge
-    // This enables later queries like "what contradicts this memory?"
+    // v0.29.5: a 'contradicts' edge is an assertion in the knowledge graph
+    // (it feeds explain.contradictions for downstream LLMs), so it requires
+    // claim-level evidence: only 'supersede' and 'coexist' — both gated on
+    // same subject + mutually-exclusive predicate + different object in
+    // detectContradictions — create one. 'flag' is heuristic-only (numeric
+    // diff / negation words) and is returned in the store result for the
+    // caller, but never materialised as an edge. Before this, the daily
+    // consolidation report ("… merged 258 …" vs "… merged 260 …") produced
+    // an edge plus two synthetic proxy entities per run.
+    if (contradiction.resolution === 'flag') continue;
     try {
       createContradictionEdge(db, id, contradiction.existing_id, namespace, {
         resolution: contradiction.resolution,

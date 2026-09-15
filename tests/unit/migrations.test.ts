@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { existsSync, unlinkSync } from 'node:fs';
 import { openDatabase, closeDatabase } from '../../src/storage/database.js';
 import { SCHEMA_VERSION } from '../../src/storage/schema.js';
-import { runMigrations } from '../../src/storage/migrations.js';
+import { runMigrations, retypeProvenMemoryProxies, pruneUnsupportedAutoContradictions } from '../../src/storage/migrations.js';
 import { createLogger } from '../../src/observability/logger.js';
+import { MEMORY_PROXY_TYPE, legacyProxyEntityName } from '../../src/graph/memory-proxy.js';
 
 function tmpDbPath(): string {
   return join(tmpdir(), `neuromcp-mig-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
@@ -190,5 +191,109 @@ describe('runMigrations', () => {
     // Version recorded as v13 (= SCHEMA_VERSION)
     const ver = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
     expect(ver.v).toBe(SCHEMA_VERSION);
+  });
+
+  it('v15: retypes legacy proxies on fingerprint + co-creation provenance; prunes only unsupported proxy-proxy edges', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = openDatabase(dbPath);
+    runMigrations(db, dbPath, logger);
+
+    const T0 = '2026-09-10T10:00:00.000Z';          // proxies + their edges: same store() call
+    const T0_EDGE = '2026-09-10T10:00:00.030Z';     // 30 ms later, as observed on the reference DB
+    const insMem = db.prepare("INSERT INTO memories (id, content_hash, content) VALUES (?, ?, ?)");
+    const insEnt = db.prepare("INSERT INTO entities (id, name, entity_type, namespace, created_at) VALUES (?, ?, ?, 'default', ?)");
+    const link = db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES (?, ?, ?)");
+    const insRel = db.prepare("INSERT INTO relations (id, source_entity_id, target_entity_id, relation_type, metadata, created_at) VALUES (?, ?, ?, 'contradicts', ?, ?)");
+    const AUTO = '{"resolution":"coexist","auto":true}';
+
+    // 1. Two daily reports, one legacy proxy each (type 'memory', legacy
+    //    name), joined by the automatic edge they were created for. No claim
+    //    evidence between reports → the edge must be pruned.
+    const reportA = 'Consolidation run on 2026-09-13 merged 258 decayed 2255 pruned 0';
+    const reportB = 'Consolidation run on 2026-09-14 merged 260 decayed 2100 pruned 3';
+    insMem.run('m-a', 'h-a', reportA); insMem.run('m-b', 'h-b', reportB);
+    insEnt.run('p-a', legacyProxyEntityName(reportA), 'memory', T0);
+    insEnt.run('p-b', legacyProxyEntityName(reportB), 'memory', T0);
+    link.run('m-a', 'p-a', 'subject'); link.run('m-b', 'p-b', 'subject');
+    insRel.run('r-ab', 'p-b', 'p-a', AUTO, T0_EDGE);
+
+    // 2. A claim-backed legacy pair whose edge must SURVIVE.
+    const claimD = 'the project uses React 18 on the customer portal';
+    const claimE = 'the project uses Svelte 5 on the customer portal';
+    insMem.run('m-d', 'h-d', claimD); insMem.run('m-e', 'h-e', claimE);
+    insEnt.run('p-d', legacyProxyEntityName(claimD), 'memory', T0);
+    insEnt.run('p-e', legacyProxyEntityName(claimE), 'memory', T0);
+    link.run('m-d', 'p-d', 'subject'); link.run('m-e', 'p-e', 'subject');
+    insRel.run('r-de', 'p-e', 'p-d', AUTO, T0_EDGE);
+
+    // 3. Shared legacy proxy (Codex round 4): two memories with the same
+    //    60-character opening share ONE proxy; only the second carries the
+    //    claim. The edge to the contradicting memory must be kept.
+    const opening = 'Weekly maintenance summary for the Atlas platform team, week 37. ';
+    const sharedA = `${opening}No changes.`;
+    const sharedB = `${opening}The project uses React 18.`;
+    const claimC = 'The project uses Svelte 5 on the portal.';
+    expect(legacyProxyEntityName(sharedA)).toBe(legacyProxyEntityName(sharedB));
+    insMem.run('m-s1', 'h-s1', sharedA); insMem.run('m-s2', 'h-s2', sharedB); insMem.run('m-c2', 'h-c2', claimC);
+    insEnt.run('p-s', legacyProxyEntityName(sharedA), 'memory', T0);
+    insEnt.run('p-c2', legacyProxyEntityName(claimC), 'memory', T0);
+    link.run('m-s1', 'p-s', 'subject'); link.run('m-s2', 'p-s', 'subject'); link.run('m-c2', 'p-c2', 'subject');
+    insRel.run('r-sc', 'p-c2', 'p-s', AUTO, T0_EDGE);
+
+    // 4. Look-alike user entities that must stay untouched:
+    //    u-1 unlinked; u-2 linked to a memory with a different derived name;
+    //    u-3 exact-name coincidence linked as 'mention', no edge;
+    //    u-4 exact name + subject link but a NON-automatic edge;
+    //    u-5 (Codex round 4): exact name + subject link + automatic edge —
+    //        but created 9 days BEFORE the edge: the system reused a user
+    //        entity as an endpoint. Fingerprint complete, provenance absent.
+    insEnt.run('u-1', 'memory:working', 'memory', T0);
+    insEnt.run('u-2', 'memory:scratch notes', 'memory', T0); link.run('m-a', 'u-2', 'mention');
+    const reportC = 'Consolidation run on 2026-09-15 merged 1 decayed 2 pruned 3';
+    insMem.run('m-c', 'h-c', reportC);
+    insEnt.run('u-3', legacyProxyEntityName(reportC), 'memory', T0); link.run('m-c', 'u-3', 'mention');
+    insMem.run('m-w', 'h-w', 'working');
+    expect(legacyProxyEntityName('working')).toBe('memory:working');
+    insEnt.run('u-4', 'memory:working', 'memory', T0); link.run('m-w', 'u-4', 'subject');
+    insRel.run('r-w', 'u-4', 'u-1', '{}', T0_EDGE);
+    const userFact = 'the project uses React 18';
+    insMem.run('m-x', 'h-x', userFact);
+    insEnt.run('u-5', legacyProxyEntityName(userFact), 'memory', '2026-09-01T00:00:00.000Z');
+    link.run('m-x', 'u-5', 'subject');
+    insRel.run('r-x5', 'u-5', 'p-a', AUTO, T0_EDGE);
+
+    db.prepare('DELETE FROM schema_version').run();
+    db.prepare(
+      "INSERT INTO schema_version (version, applied_at, description) VALUES (14, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'simulated v14')",
+    ).run();
+
+    runMigrations(db, dbPath, logger);
+
+    const typeOf = (id: string): string =>
+      (db.prepare('SELECT entity_type FROM entities WHERE id = ?').get(id) as { entity_type: string }).entity_type;
+    for (const id of ['p-a', 'p-b', 'p-d', 'p-e', 'p-s', 'p-c2']) expect(typeOf(id), id).toBe(MEMORY_PROXY_TYPE);
+    for (const id of ['u-1', 'u-2', 'u-3', 'u-4', 'u-5']) expect(typeOf(id), id).toBe('memory');
+
+    const metaOf = (id: string): { proxy_for_memory_id?: string; proxy_for_memory_ids?: string[]; retyped_from?: string } =>
+      JSON.parse((db.prepare('SELECT metadata FROM entities WHERE id = ?').get(id) as { metadata: string }).metadata);
+    expect(metaOf('p-a')).toMatchObject({ proxy_for_memory_id: 'm-a', proxy_for_memory_ids: ['m-a'], retyped_from: 'memory' });
+    expect(metaOf('p-s').proxy_for_memory_ids?.sort()).toEqual(['m-s1', 'm-s2']);
+
+    const edge = (id: string): { is_deleted: number; metadata: string } =>
+      db.prepare('SELECT is_deleted, metadata FROM relations WHERE id = ?').get(id) as { is_deleted: number; metadata: string };
+    expect(edge('r-ab').is_deleted).toBe(1);
+    expect(JSON.parse(edge('r-ab').metadata)).toMatchObject({ auto: true, removed_by: 'v15-no-claim-evidence' });
+    expect(edge('r-de').is_deleted).toBe(0);
+    expect(edge('r-sc').is_deleted).toBe(0);   // evidence via the shared proxy's second memory
+    expect(edge('r-w').is_deleted).toBe(0);    // not automatic, not proxies
+    expect(edge('r-x5').is_deleted).toBe(0);   // one endpoint is a real (user) entity
+
+    const ver = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
+    expect(ver.v).toBe(SCHEMA_VERSION);
+
+    // Idempotent: a second run retypes and prunes nothing.
+    expect(retypeProvenMemoryProxies(db)).toBe(0);
+    expect(pruneUnsupportedAutoContradictions(db)).toBe(0);
   });
 });

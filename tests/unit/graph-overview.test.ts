@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, teardownTestDb, type TestContext } from '../helpers/index.js';
-import { queryGraph, createRelation } from '../../src/tools/graph.js';
+import { queryGraph, createRelation, createEntity } from '../../src/tools/graph.js';
 import { upsertEntity } from '../../src/graph/entities.js';
+import { MEMORY_PROXY_TYPE } from '../../src/graph/memory-proxy.js';
 import type { Logger } from '../../src/observability/logger.js';
 import type { Metrics } from '../../src/observability/metrics.js';
 
@@ -68,6 +69,78 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
     );
     expect(result.nodes).toEqual([]);
     expect(result.mode).toBeUndefined();
+  });
+
+  // v0.29.5 graph hygiene. On a real DB 68/137 entities were synthetic
+  // proxies manufactured by createContradictionEdge, carrying 183/194
+  // relations — all 'contradicts'. Ranking by raw degree let those proxies
+  // push every real entity out of the top-N, so the web UI graph showed
+  // nothing but "memory:Consolidation…". Proxies now carry the RESERVED
+  // type memory_proxy; that is the only thing the overview filters on.
+  it('excludes reserved memory_proxy entities from the overview', () => {
+    upsertEntity(ctx.db, 'Alice', 'person', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default', {}, { allowReservedType: true });
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-14 merged 260', MEMORY_PROXY_TYPE, 'default', {}, { allowReservedType: true });
+
+    const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(result.nodes.map((n) => n.entity.name)).toEqual(['Alice']);
+  });
+
+  it('keeps user entities that merely LOOK like proxies (Codex PR-18 P2, rounds 1+2)', () => {
+    // Both a free-form type 'memory' and a 'memory:' name prefix are things
+    // a user may legitimately choose; neither may hide their entity.
+    upsertEntity(ctx.db, 'Working memory', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:working', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default', {}, { allowReservedType: true });
+
+    const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(result.nodes.map((n) => n.entity.name).sort()).toEqual(['Working memory', 'memory:working']);
+  });
+
+  it('create_entity on a proxy name PROMOTES the proxy to the requested type (Codex PR-18 round 3 P2)', () => {
+    // A hidden proxy must never be handed back to a public caller unchanged.
+    const proxy = upsertEntity(ctx.db, 'memory:the project uses React 18', MEMORY_PROXY_TYPE, 'default', { proxy_for_memory_id: 'm-1' }, { allowReservedType: true });
+    const promoted = createEntity({ name: 'memory:the project uses React 18', entity_type: 'concept' }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(promoted.id).toBe(proxy.id);
+    expect(promoted.entity_type).toBe('concept');
+    expect(JSON.parse(promoted.metadata)).toMatchObject({ proxy_for_memory_id: 'm-1', promoted_from: MEMORY_PROXY_TYPE });
+
+    const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(result.nodes.map((n) => n.entity.id)).toEqual([proxy.id]);
+  });
+
+  it('create_entity rejects the reserved memory_proxy type', () => {
+    expect(() =>
+      createEntity({ name: 'sneaky', entity_type: MEMORY_PROXY_TYPE }, ctx.db, ctx.config, noopLogger, noopMetrics),
+    ).toThrow(/reserved/);
+    expect(ctx.db.prepare("SELECT COUNT(*) AS n FROM entities WHERE name = 'sneaky'").get()).toEqual({ n: 0 });
+  });
+
+  it('does not count contradicts edges toward the degree ranking', () => {
+    const a = upsertEntity(ctx.db, 'Alice', 'person', 'default');
+    const b = upsertEntity(ctx.db, 'Bob', 'person', 'default');
+    const c = upsertEntity(ctx.db, 'Carol', 'person', 'default');
+    const d = upsertEntity(ctx.db, 'Dave', 'person', 'default');
+    // Bob: one real edge (knows Carol) → degree 1.
+    createRelation({
+      source_entity_id: b.id, target_entity_id: c.id,
+      relation_type: 'knows', namespace: 'default',
+    }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    // Alice: two edges, but both 'contradicts' → degree 0 for ranking.
+    createRelation({
+      source_entity_id: a.id, target_entity_id: c.id,
+      relation_type: 'contradicts', namespace: 'default',
+    }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    createRelation({
+      source_entity_id: a.id, target_entity_id: d.id,
+      relation_type: 'contradicts', namespace: 'default',
+    }, ctx.db, ctx.config, noopLogger, noopMetrics);
+
+    const result = queryGraph({ limit: 2 }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    const names = result.nodes.map((n) => n.entity.name);
+    expect(names).toContain('Bob');
+    expect(names).toContain('Carol');
+    expect(names).not.toContain('Alice');
   });
 
   it('respects limit parameter', () => {

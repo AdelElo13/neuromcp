@@ -565,3 +565,40 @@ een eigen taak — niet hier tracken.)
 
 ## [2026-07-07] Gevonden tijdens web-view graph-hardening (P3)
 - **Graph node `memory_count` overtelt vs current/linked memories.** `queryGraph` (src/tools/graph.ts:128) telt ALLE `memory_entities`-rijen voor een entity, inclusief links naar getombstonede (is_deleted=1) memories. Voorbeeld live: entity "Consolidation" badge=8, maar slechts 1 levende memory via de join (7 links wijzen naar deleted memories). Gevolg: node-badge in de web-view kan hoger zijn dan wat `/api/entity/:id/memories` (current, non-deleted) teruggeeft — verwarrend maar niet fout. Root cause: tombstone/hard-delete ruimt `memory_entities`-rijen niet op. Fix-opties: (a) queryGraph `memory_count` joinen op `memories m WHERE m.is_deleted=0`, of (b) tombstone/sweep de bijbehorende memory_entities-rijen laten verwijderen. Severity P3 (cosmetisch/telling, geen dataverlies of verkeerd antwoord). Buiten scope van de graph-view PR.
+
+## [2026-09-15] Gevonden tijdens v0.29.5 graph hygiene
+
+- **[OPGELOST in v0.29.5] `coexist` vuurde op semantisch ongerelateerde paren.**
+  Was: bij similarity > 0.82 volstond een numeriek verschil (+0.4) voor
+  `coexist`; alleen `supersede` liep door de predicaat-poort. Live bewijs:
+  edges op 0.82–0.85 tussen `/api/embed-probe` ⟷ `wiki:neuromcp 2026-07-08
+  batch 13` en ⟷ `arch`. Fix: `coexist` én `supersede` vereisen nu
+  claim-bewijs (zelfde subject, mutually-exclusive predicaat, ander object);
+  zonder bewijs → `flag`, dat wél in het store-resultaat staat maar géén
+  graph-edge/proxy meer maakt (`src/cognitive/contradiction.ts`,
+  `src/tools/store.ts` stap 9).
+
+- **[OPGELOST in v0.29.5] "Consolidation run on <datum> …" gold als
+  toestandsclaim.** `extractTriplesFromText` geeft `{Consolidation, run, "on
+  2026-09-14 …"}`; "run" staat in `predicate-classes.json`, dus het dagelijkse
+  consolidatie-rapport kreeg claim-bewijs tegen het vorige en bleef een
+  `coexist`-edge + proxy-paar per run maken — en die edges bereikten wél
+  gebruikers via `explain.contradictions` (Codex PR-18 ronde 3). Eerste poging
+  (SVO-congruentie in de extractor) verwierp geldige claims ("Alice and Bob
+  use…", "the APIs use…") — teruggedraaid (Codex ronde 4). Definitieve fix in
+  de claim-poort (`predicatesAllowSupersede`): een SVO-object dat begint met
+  een datum/tijd ("on 2026-09-14 …", "at 03:00 …") beschrijft een gebeurtenis,
+  geen toestand; twee gebeurtenissen op verschillende datums zijn een
+  tijdreeks. De copula is uitgezonderd ("the meeting is on <datum>" blijft een
+  echte update). Migratie v15 verwijdert (soft-delete) bovendien de legacy
+  auto-`contradicts`-edges tussen proxies zonder claim-bewijs.
+
+- **P3 — legacy auto-`contradicts`-edges met een ECHTE entiteit als eindpunt
+  worden door migratie v15 niet beoordeeld.** De prune in
+  `pruneUnsupportedAutoContradictions` beperkt zich tot proxy↔proxy-edges,
+  omdat alleen daar de twee memories exact bekend zijn
+  (`metadata.proxy_for_memory_id`). Referentie-DB: 24 proxy↔real + 22
+  real↔real auto-edges blijven staan. Fix-richting: `createContradictionEdge`
+  de memory-ids in de relation-metadata laten schrijven (vanaf nu), zodat een
+  latere migratie ook die edges kan toetsen. Severity P3 (deze edges zijn
+  tussen echte, gerelateerde entiteiten; ruis, geen verkeerd antwoord).

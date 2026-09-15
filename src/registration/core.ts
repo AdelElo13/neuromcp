@@ -21,7 +21,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
   const { db, vecStore, embedder, config, logger, metrics, reranker } = deps;
 
   server.registerTool('store_memory', {
-    description: 'Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found, surprise score, and extracted entities.',
+    description: 'Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found (resolution supersede/coexist are claim-backed and recorded as graph edges; flag is heuristic-only and reported here but never stored in the graph), surprise score, and extracted entities.',
     inputSchema: {
       content: z.string().describe('The memory content to store'),
       namespace: z.string().optional().describe('Namespace to store in (default: config default)'),

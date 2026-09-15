@@ -47,7 +47,97 @@ function normalizePredicate(p: string): string {
  *     "the app" and "the mapping app" are different subjects). A false
  *     supersede silently deletes a true fact — a hallucination vector.
  */
-export function predicatesAllowSupersede(newContent: string, existingContent: string): boolean {
+/**
+ * v0.29.5: an SVO object anchored to a CALENDAR DATE ("run on 2026-09-14
+ * merged 258 …") describes an occurrence on that day, not a state of the
+ * subject. Two occurrences on DIFFERENT dates are a time series, never a
+ * contradiction — the daily consolidation report ("Consolidation run on
+ * 2026-09-13 …" vs "… 2026-09-14 …") is exactly this. The rule is
+ * deliberately narrow (Codex PR-18 round 5):
+ *   - only full calendar dates anchor (ISO 2026-09-14 or dd/mm/yyyy);
+ *     IP addresses ("runs on 10.20.30.40") and clock times ("runs at
+ *     04:30 every day" — a recurring schedule is a state) do not;
+ *   - the anchors are COMPARED: the same date with different values
+ *     ("… on 2026-09-14 merged 258" vs "… merged 260") is still a
+ *     contradiction; only a different date exempts the pair;
+ *   - the copula is exempt ("the meeting is on 2026-09-13" → "… 09-20"):
+ *     there the date IS the state and a changed date is a real update.
+ */
+const BE_PREDICATES = new Set(['is', 'are', 'was', 'were']);
+// The lookahead rejects a CONTINUATION of the number (a further digit or
+// dot as in 10.20.30.40, or -/ followed by a digit) — not ordinary
+// punctuation: the real report reads "Consolidation run on 2026-06-13:
+// merged 293, …", and that colon must not un-anchor the date.
+const EVENT_ANCHOR =
+  /^(?:on|at|in|during|since|until|from|by)\s+(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})(?![\d.]|[-/]\d)/i;
+
+/**
+ * Canonical ISO date (YYYY-MM-DD) for an anchor token, so "14/09/2026" and
+ * "2026-09-14" compare equal (Codex PR-18 round 6). Slash dates are read
+ * as day/month/year; an impossible month or day yields no anchor.
+ */
+function canonicalDate(token: string): string | null {
+  let year: number;
+  let month: number;
+  let day: number;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(token);
+  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(token);
+  if (iso !== null) {
+    year = Number(iso[1]); month = Number(iso[2]); day = Number(iso[3]);
+  } else if (dmy !== null) {
+    day = Number(dmy[1]); month = Number(dmy[2]); year = Number(dmy[3]);
+  } else {
+    return null;
+  }
+  // A real calendar date only (Codex PR-18 round 7): "2026-00-13" and
+  // "31/02/2026" are not anchors. Date.UTC normalises overflow, so the
+  // round-trip check catches every impossible month/day incl. leap years.
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  if (utc.getUTCFullYear() !== year || utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** The canonical calendar date an SVO object is anchored to, or null. */
+function eventAnchor(predicate: string, object: string): string | null {
+  if (BE_PREDICATES.has(predicate.toLowerCase())) return null;
+  const m = object.trim().match(EVENT_ANCHOR);
+  return m === null ? null : canonicalDate(m[1]!);
+}
+
+/**
+ * An anchored claim is a RECORD of an occurrence when its date does not
+ * lie after the day the memory was recorded ("run on 2026-06-13" stored
+ * on 2026-06-13). A date after the recording day is a PLAN ("the
+ * migration runs on 2026-09-20 exactly once", stored 2026-09-15) — a
+ * state of the subject that a later, different date genuinely
+ * contradicts (Codex PR-18 round 6). Without a recording moment the
+ * claim is treated as a plan, i.e. never exempted.
+ *
+ * This is a DEFINITION over stored data, with one boundary no stored fact
+ * can decide (Codex PR-18 round 7): a plan recorded ON its own planned
+ * day ("runs on 2026-06-13 exactly once", stored 2026-06-13) reads as a
+ * record. Two such same-day-stored plan versions with different dates are
+ * then reported as 'flag' instead of an edge. Nothing in the database
+ * separates that memory from a report of the same day; a future
+ * explicit occurrence time on the memory (memories.happened_at) would.
+ */
+function isRecordedOccurrence(anchor: string, recordedAt: string | undefined): boolean {
+  if (recordedAt === undefined || recordedAt.length < 10) return false;
+  return anchor <= recordedAt.slice(0, 10);
+}
+
+export interface ClaimGateContext {
+  /** ISO timestamp the NEW memory is/was recorded at. */
+  readonly newRecordedAt?: string;
+  /** ISO timestamp the EXISTING memory was recorded at (memories.created_at). */
+  readonly existingRecordedAt?: string;
+}
+
+export function predicatesAllowSupersede(
+  newContent: string,
+  existingContent: string,
+  ctx: ClaimGateContext = {},
+): boolean {
   const newTriples = extractTriplesFromText(newContent);
   if (newTriples.length === 0) return false;
   const oldTriples = extractTriplesFromText(existingContent);
@@ -55,6 +145,7 @@ export function predicatesAllowSupersede(newContent: string, existingContent: st
 
   for (const nt of newTriples) {
     if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(nt.predicate.toLowerCase())) continue;
+    const newAnchor = eventAnchor(nt.predicate, nt.object);
     const ns = normalizeSubject(nt.subject);
     if (ns.length === 0) continue;
     const np = normalizePredicate(nt.predicate);
@@ -63,6 +154,15 @@ export function predicatesAllowSupersede(newContent: string, existingContent: st
       // Same predicate (normalized) required — additive facts across
       // different predicates must never auto-invalidate each other.
       if (np !== normalizePredicate(ot.predicate)) continue;
+      // Two RECORDED occurrences on different calendar dates: a time
+      // series, not competing claims. Plans (future dates) and unknown
+      // recording moments are never exempted.
+      const oldAnchor = eventAnchor(ot.predicate, ot.object);
+      if (
+        newAnchor !== null && oldAnchor !== null && newAnchor !== oldAnchor &&
+        isRecordedOccurrence(newAnchor, ctx.newRecordedAt) &&
+        isRecordedOccurrence(oldAnchor, ctx.existingRecordedAt)
+      ) continue;
       const os = normalizeSubject(ot.subject);
       // Exact subject equality — substring alignment produced false supersedes.
       if (ns !== os) continue;
@@ -118,10 +218,10 @@ export async function detectContradictions(
 
     const existing = db
       .prepare(
-        'SELECT id, content, namespace, is_deleted, valid_to FROM memories WHERE id = ? LIMIT 1',
+        'SELECT id, content, namespace, is_deleted, valid_to, created_at FROM memories WHERE id = ? LIMIT 1',
       )
       .get(neighbor.id) as
-      | { id: string; content: string; namespace: string; is_deleted: number; valid_to: string | null }
+      | { id: string; content: string; namespace: string; is_deleted: number; valid_to: string | null; created_at: string }
       | undefined;
 
     if (existing === undefined || existing.is_deleted === 1) continue;
@@ -135,19 +235,23 @@ export async function detectContradictions(
     const signals = computeContradictionSignals(contentLower, existingLower);
 
     if (signals.score > 0.3) {
-      // Resolution ladder: strong signal → supersede, medium → coexist, weak → flag
-      let resolution: 'supersede' | 'coexist' | 'flag' =
-        signals.score > 0.5 ? 'supersede' :
-        signals.score > 0.35 ? 'coexist' : 'flag';
-
       // Predicate-class gate: keyword heuristics alone (negation words,
-      // numeric diffs) are NOT enough to invalidate a memory. Auto-supersede
-      // requires claim-level evidence — same subject, mutually-exclusive
-      // predicate, different object. Otherwise downgrade to coexist so both
-      // memories survive and a human/LLM can adjudicate.
-      if (resolution === 'supersede' && !predicatesAllowSupersede(content, existing.content)) {
-        resolution = 'coexist';
-      }
+      // numeric diffs) are NOT enough to assert a contradiction. Both
+      // 'supersede' (old memory invalidated) and 'coexist' (both kept,
+      // linked by a 'contradicts' edge) require claim-level evidence — same
+      // subject, mutually-exclusive predicate, different object. Without
+      // it the result is 'flag': reported to the caller for review, never
+      // materialised in the graph. v0.29.5 extended the gate from
+      // 'supersede' only to 'coexist' as well — the heuristic alone linked
+      // "/api/embed-probe" to "wiki batch 13 code review" at similarity
+      // 0.85 and every daily consolidation report to the previous one.
+      const claimEvidence = predicatesAllowSupersede(content, existing.content, {
+        newRecordedAt: new Date().toISOString(),
+        existingRecordedAt: existing.created_at,
+      });
+      const resolution: 'supersede' | 'coexist' | 'flag' =
+        !claimEvidence ? 'flag' :
+        signals.score > 0.5 ? 'supersede' : 'coexist';
 
       contradictions.push({
         existing_id: existing.id,

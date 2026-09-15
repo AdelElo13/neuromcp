@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { createRelation } from './relations.js';
 import { upsertEntity } from './entities.js';
+import { MEMORY_PROXY_TYPE, proxyEntityName } from './memory-proxy.js';
 
 /**
  * Create a 'contradicts' relation between two memories in the knowledge graph.
@@ -55,9 +56,13 @@ function ensureMemoryEntity(
 
   if (memory === undefined) return null;
 
-  // Use first 60 chars of content as entity name
-  const name = `memory:${memory.content.slice(0, 60).replace(/[^\w\s-]/g, '').trim()}`;
-  const entity = upsertEntity(db, name, 'memory', namespace);
+  // Deterministic name (with the memory id) + RESERVED type + back-reference,
+  // so read paths exclude proxies exactly; legacy proxies without these
+  // markers are recognised by migration v15 on their full fingerprint.
+  const name = proxyEntityName(memory.content, memoryId);
+  const entity = upsertEntity(db, name, MEMORY_PROXY_TYPE, namespace, {
+    proxy_for_memory_id: memoryId,
+  }, { allowReservedType: true });
 
   // Link memory to entity
   db.prepare(

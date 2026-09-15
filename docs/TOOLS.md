@@ -22,7 +22,7 @@ what an MCP client sees.
 
 ### `store_memory`
 
-Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found, surprise score, and extracted entities.
+Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found (resolution supersede/coexist are claim-backed and recorded as graph edges; flag is heuristic-only and reported here but never stored in the graph), surprise score, and extracted entities.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -174,7 +174,7 @@ Create or update an entity in the knowledge graph. Entities represent concepts, 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | yes | Entity name |
-| `entity_type` | string | no | Entity type (default: "concept"). Examples: person, tool, project, concept, package, url |
+| `entity_type` | string | no | Entity type (default: "concept"). Examples: person, tool, project, concept, package, url. "memory_proxy" is reserved and rejected. |
 | `namespace` | string | no | Namespace (default: config default) |
 | `metadata` | record | no | Arbitrary metadata |
 
@@ -195,7 +195,7 @@ Create a typed relation between two entities in the knowledge graph. Supports te
 
 ### `query_graph`
 
-Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries.
+Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries. Without entity_id/entity_name it returns an OVERVIEW: the top-N entities of the namespace ranked by number of relations (contradicts edges not counted), with the relations among them; internal memory_proxy entities that only back contradicts edges are excluded from the overview.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
