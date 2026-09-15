@@ -17,15 +17,21 @@ instead of the system's own plumbing.
   On a real database half of all entities were such proxies, carrying 94%
   of all relations — and because the overview ranked by raw degree, they
   pushed every real project, person and tool out of the top-N. The overview
-  now excludes proxy entities and ignores `contradicts` edges when ranking.
-  Read-path fix: existing databases are clean immediately, no migration.
+  now excludes proxy entities (`entity_type: memory` **and** name prefix
+  `memory:` — a user's own entity of type `memory` stays visible) and
+  ignores `contradicts` edges when ranking. Read-path fix: the overview on
+  an existing database is clean immediately; the proxy rows themselves are
+  left in place (they still back `contradicts` edges) and the
+  entity-id/entity-name traversal is unchanged.
 - **FIX: the daily consolidation report tripped contradiction detection
-  against the previous day's report.** Reports are stored as `meta`
-  memories and differ only in date and counters, which is exactly what the
-  numeric-diff heuristic flags — every run added a bogus `contradicts` edge
-  and two proxy entities. `store_memory` no longer runs contradiction
-  detection for `category: meta` (system-generated time series, not
-  competing claims).
+  against the previous day's report.** Reports are stored with
+  `source: consolidation` and differ only in date and counters, which is
+  exactly what the numeric-diff heuristic flags — every run added a bogus
+  `contradicts` edge and two proxy entities. `store_memory` no longer runs
+  contradiction detection for `source: consolidation` (the system's own
+  output, a time series, not competing claims). The gate is on the reserved
+  source, not on a category: user memories under `category: meta` keep full
+  contradiction protection.
 
 ### Docs
 

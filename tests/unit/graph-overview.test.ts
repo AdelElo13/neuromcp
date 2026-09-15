@@ -84,6 +84,17 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
     expect(result.nodes.map((n) => n.entity.name)).toEqual(['Alice']);
   });
 
+  it('keeps a user-created entity of type memory that is not a proxy (Codex PR-18 P2)', () => {
+    // 'memory' is a free-form entity_type; only the type+prefix combination
+    // createContradictionEdge produces is plumbing. A user's own
+    // "Working memory" entity must stay visible.
+    upsertEntity(ctx.db, 'Working memory', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', 'memory', 'default');
+
+    const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(result.nodes.map((n) => n.entity.name)).toEqual(['Working memory']);
+  });
+
   it('does not count contradicts edges toward the degree ranking', () => {
     const a = upsertEntity(ctx.db, 'Alice', 'person', 'default');
     const b = upsertEntity(ctx.db, 'Bob', 'person', 'default');

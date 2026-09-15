@@ -124,12 +124,15 @@ export function queryGraph(
     const nsClause = isAll ? '1=1' : 'e.namespace = ?';
     const nsParams: string[] = isAll ? [] : [namespace];
     // v0.29.5 graph hygiene: synthetic `memory:<content>` proxies
-    // (entity_type 'memory', manufactured by createContradictionEdge so a
-    // 'contradicts' edge has endpoints) are plumbing, not knowledge — they
-    // are excluded from the overview, and 'contradicts' edges do not count
-    // toward the degree ranking. Before this, on a real DB half the entities
-    // were proxies carrying 94% of all relations, so the top-N showed nothing
-    // but "memory:Consolidation run on …" nodes.
+    // (entity_type 'memory' AND name prefix 'memory:', exactly as
+    // createContradictionEdge manufactures them so a 'contradicts' edge has
+    // endpoints) are plumbing, not knowledge — they are excluded from the
+    // overview, and 'contradicts' edges do not count toward the degree
+    // ranking. Both conditions are required: 'memory' is a free-form
+    // entity_type a user may legitimately choose, so type alone must not
+    // hide their entities (Codex PR-18 [P2]). Before this, on a real DB half
+    // the entities were proxies carrying 94% of all relations, so the top-N
+    // showed nothing but "memory:Consolidation run on …" nodes.
     const entityRows = db.prepare(`
       SELECT e.*,
              (SELECT COUNT(*) FROM memory_entities me
@@ -139,7 +142,8 @@ export function queryGraph(
                 AND r.is_deleted = 0
                 AND r.relation_type <> 'contradicts') AS degree
       FROM entities e
-      WHERE ${nsClause} AND e.is_deleted = 0 AND e.entity_type <> 'memory'
+      WHERE ${nsClause} AND e.is_deleted = 0
+        AND NOT (e.entity_type = 'memory' AND e.name LIKE 'memory:%')
       ORDER BY degree DESC, e.updated_at DESC
       LIMIT ?
     `).all(...nsParams, overviewLimit) as Array<Entity & { memory_count: number; degree: number }>;

@@ -21,9 +21,10 @@ and the database in one run.
 
 ![neuromcp memory browser — entities, relations and a topic timeline, all read from your local SQLite](docs/assets/memory-browser.png)
 
-*The built-in memory browser: every entity and relation your agents have
-stored, as a force-directed graph you can drag, zoom and click — served from
-`localhost`, never from a cloud. See [Memory browser & Obsidian](#memory-browser--obsidian).*
+*The built-in memory browser: the most-connected entities in a namespace
+and the relations between them, as a force-directed graph you can drag,
+zoom and click — served from `localhost`, never from a cloud. See
+[Memory browser & Obsidian](#memory-browser--obsidian).*
 
 ## Why neuromcp
 

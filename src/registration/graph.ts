@@ -41,7 +41,7 @@ export function registerGraphTools(server: McpServer, deps: ServerDeps): void {
   });
 
   server.registerTool('query_graph', {
-    description: 'Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries.',
+    description: 'Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries. Without entity_id/entity_name it returns an OVERVIEW: the top-N entities of the namespace ranked by number of relations (contradicts edges not counted), with the relations among them; synthetic memory:* proxy entities that only back contradicts edges are excluded from the overview.',
     inputSchema: {
       entity_id: z.string().optional().describe('Start entity ID'),
       entity_name: z.string().optional().describe('Start entity name (will find closest match)'),

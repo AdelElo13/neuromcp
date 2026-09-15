@@ -578,5 +578,5 @@ een eigen taak — niet hier tracken.)
   ruis aan downstream LLM's (hallucinatie-vector, zie project-pitfall). Fix-optie:
   `coexist` ook door `predicatesAllowSupersede`-achtige subject-match laten gaan, of
   numeric-diff alleen laten tellen als beide teksten hetzelfde subject delen.
-  v0.29.5 fixt alleen de `meta`-bron en het overview-ranking; dit is de resterende
+  v0.29.5 fixt alleen de `source: consolidation`-bron en het overview-ranking; dit is de resterende
   oorzaak. Severity P2 (correctheid van explain-output, geen dataverlies).
