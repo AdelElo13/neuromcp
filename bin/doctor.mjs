@@ -18,18 +18,19 @@
  * All checks are pure, dependency-injected helpers (fetch/fs/module-loader
  * injectable) exported for tests — same pattern as bin/neuromcp-connect.mjs.
  */
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isMainModule } from './is-main.mjs';
+import { readLaunchdDaemonPort, resolveDaemonPortWithSource } from './daemon-port.mjs';
+export { readLaunchdDaemonPort, resolveDaemonPort } from './daemon-port.mjs';
 import { homedir, platform } from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
 
-const DEFAULT_DAEMON_PORT = 3200;
 const PROBE_TIMEOUT_MS = 2_000;
 const LAUNCHD_LABEL = 'com.neuromcp.daemon';
 const MODEL_FILENAME = 'bge-small-en-v1.5.onnx';
@@ -53,63 +54,6 @@ const ONNX_USER_MODEL_PATH = resolve(homedir(), '.neuromcp', 'models', MODEL_FIL
  *   close: () => void,
  * }} SqliteCtor
  */
-
-const DAEMON_PLIST_PATH = resolve(
-  homedir(), 'Library', 'LaunchAgents', 'com.neuromcp.daemon.plist',
-);
-
-/**
- * Port from the launchd plist's EnvironmentVariables — on a standard
- * `enable-daemon` install that plist IS the configuration: the env var
- * lives there, not in the user's interactive shell. Returns null when the
- * plist, the key, or plutil is unavailable (non-darwin included).
- *
- * @param {{ exec?: (cmd: string, args: string[]) => string, exists?: (p: string) => boolean, plistPath?: string }} [deps]
- * @returns {number | null}
- */
-export function readLaunchdDaemonPort(deps = {}) {
-  const {
-    exists = existsSync,
-    plistPath = DAEMON_PLIST_PATH,
-    exec = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }),
-  } = deps;
-  if (!exists(plistPath)) return null;
-  try {
-    const raw = exec('plutil', [
-      '-extract', 'EnvironmentVariables.NEUROMCP_DAEMON_PORT', 'raw', '-o', '-', plistPath,
-    ]).trim();
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Where would the daemon actually be? Env var first (explicit override),
- * then the launchd plist (the real configuration on installed setups —
- * probing the default port there reported a healthy daemon on 33200 as
- * "not reachable"), then the default.
- *
- * @param {Record<string, string | undefined>} env
- * @param {() => number | null} [plistPort]
- * @returns {number} daemon port, default 3200
- */
-export function resolveDaemonPort(env, plistPort = readLaunchdDaemonPort) {
-  const raw = env.NEUROMCP_DAEMON_PORT;
-  if (raw !== undefined) {
-    const n = Number(raw);
-    if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
-  }
-  let fromPlist = null;
-  try {
-    fromPlist = plistPort();
-  } catch {
-    /* diagnostic fallback only */
-  }
-  if (fromPlist !== null) return fromPlist;
-  return DEFAULT_DAEMON_PORT;
-}
 
 /**
  * @param {string} url
@@ -138,7 +82,10 @@ export async function checkDaemon(deps = {}) {
     plistPort = readLaunchdDaemonPort,
   } = deps;
   const name = 'daemon health';
-  const port = resolveDaemonPort(env, plistPort);
+  const { port, source } = resolveDaemonPortWithSource(env, plistPort);
+  // Make the configuration source visible: a fresh shell-started daemon
+  // would bind 3200, so the reader must see WHY another port was probed.
+  const sourceNote = source === 'plist' ? ' (port from the launchd plist)' : '';
   // When an explicit env port fails but the launchd plist names another,
   // say so — the daemon is probably listening there.
   /** @returns {string} */
@@ -162,14 +109,14 @@ export async function checkDaemon(deps = {}) {
       } catch {
         // Non-JSON /health body — still healthy, just no version to show.
       }
-      return { name, status: 'ok', info: `v${version} responding at ${url}` };
+      return { name, status: 'ok', info: `v${version} responding at ${url}${sourceNote}` };
     }
-    return daemonDownResult(name, url, `HTTP ${res.status}` , osPlatform, plistNote());
+    return daemonDownResult(name, url, `HTTP ${res.status}` , osPlatform, sourceNote + plistNote());
   } catch (err) {
     const reason = err instanceof Error && err.name === 'AbortError'
       ? `timeout after ${PROBE_TIMEOUT_MS}ms`
       : err instanceof Error ? err.message : String(err);
-    return daemonDownResult(name, url, reason, osPlatform, plistNote());
+    return daemonDownResult(name, url, reason, osPlatform, sourceNote + plistNote());
   }
 }
 

@@ -37,8 +37,26 @@ describe('deriveHealthUrl', () => {
 });
 
 describe('parseConnectArgs', () => {
-  it('defaults to the daemon default port 3200 on loopback', () => {
-    expect(parseConnectArgs([], {})).toEqual({ mcpUrl: 'http://127.0.0.1:3200/mcp' });
+  it('defaults to the daemon default port 3200 on loopback (no plist)', () => {
+    expect(parseConnectArgs([], {}, () => null)).toEqual({ mcpUrl: 'http://127.0.0.1:3200/mcp' });
+  });
+
+  it('falls back to the launchd plist port when the env var is unset', () => {
+    // Codex PR-17 [P2]: the SAME configured-port gap as the doctor, but
+    // functional here — Claude Desktop launches connect without a login
+    // env, so it polled 3200 for 55s while the launchd daemon it
+    // kickstarts listens on the plist port.
+    expect(parseConnectArgs([], {}, () => 33200)).toEqual({ mcpUrl: 'http://127.0.0.1:33200/mcp' });
+  });
+
+  it('an explicit env port overrides the plist', () => {
+    expect(parseConnectArgs([], { NEUROMCP_DAEMON_PORT: '4000' }, () => 33200)).toEqual({
+      mcpUrl: 'http://127.0.0.1:4000/mcp',
+    });
+  });
+
+  it('an INVALID env port still throws — connect keeps its strict contract, no silent plist rescue', () => {
+    expect(() => parseConnectArgs([], { NEUROMCP_DAEMON_PORT: 'abc' }, () => 33200)).toThrow(/invalid NEUROMCP_DAEMON_PORT/);
   });
 
   it('honours NEUROMCP_DAEMON_PORT and NEUROMCP_DAEMON_HOST from the environment', () => {

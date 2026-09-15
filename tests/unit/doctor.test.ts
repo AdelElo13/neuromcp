@@ -71,13 +71,38 @@ describe('resolveDaemonPort', () => {
 });
 
 describe('readLaunchdDaemonPort', () => {
+  const darwin = { osPlatform: 'darwin' as const };
+
   it('parses the port via plutil and returns null when the plist or key is missing', () => {
     const execOk = () => '33200\n';
-    expect(readLaunchdDaemonPort({ exec: execOk, exists: () => true })).toBe(33200);
+    expect(readLaunchdDaemonPort({ ...darwin, exec: execOk, exists: () => true })).toBe(33200);
     const execThrows = () => { throw new Error('No value at that key path'); };
-    expect(readLaunchdDaemonPort({ exec: execThrows, exists: () => true })).toBeNull();
-    expect(readLaunchdDaemonPort({ exec: execOk, exists: () => false })).toBeNull();
-    expect(readLaunchdDaemonPort({ exec: () => 'garbage', exists: () => true })).toBeNull();
+    expect(readLaunchdDaemonPort({ ...darwin, exec: execThrows, exists: () => true })).toBeNull();
+    expect(readLaunchdDaemonPort({ ...darwin, exec: execOk, exists: () => false })).toBeNull();
+    expect(readLaunchdDaemonPort({ ...darwin, exec: () => 'garbage', exists: () => true })).toBeNull();
+  });
+
+  it('is darwin-only: never runs plutil on other platforms, even with a plist present', () => {
+    // Codex PR-17 [P2]: launchd + plutil are macOS concepts. A migrated
+    // home directory on Linux with a stale plist (and any binary that
+    // happens to be called plutil) must not decide the port.
+    const exec = vi.fn().mockReturnValue('33200');
+    expect(readLaunchdDaemonPort({ osPlatform: 'linux', exec, exists: () => true })).toBeNull();
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('invokes plutil with the exact raw-extract arguments for the plist path', () => {
+    const exec = vi.fn().mockReturnValue('33200');
+    readLaunchdDaemonPort({ ...darwin, exec, exists: () => true, plistPath: '/p/com.neuromcp.daemon.plist' });
+    expect(exec).toHaveBeenCalledWith('plutil', [
+      '-extract', 'EnvironmentVariables.NEUROMCP_DAEMON_PORT', 'raw', '-o', '-', '/p/com.neuromcp.daemon.plist',
+    ]);
+  });
+
+  it('rejects out-of-range and non-integer plist values', () => {
+    for (const raw of ['0', '65536', '-1', '3.5', '']) {
+      expect(readLaunchdDaemonPort({ ...darwin, exec: () => raw, exists: () => true })).toBeNull();
+    }
   });
 });
 
@@ -94,7 +119,7 @@ describe('checkDaemon', () => {
     );
   });
 
-  it('probes the port from the launchd plist when the env var is unset', async () => {
+  it('probes the port from the launchd plist when the env var is unset, and NAMES the source', async () => {
     const fetchImpl = vi.fn().mockImplementation(() =>
       jsonResponse({ status: 'ok', version: '0.29.3' }));
     const result = await checkDaemon({ fetchImpl, env: {}, plistPort: () => 33200 });
@@ -103,6 +128,22 @@ describe('checkDaemon', () => {
       'http://127.0.0.1:33200/health',
       expect.anything(),
     );
+    // Codex PR-17 [P2]: the chosen configuration source must be visible —
+    // a reader has to be able to tell WHY 33200 was probed while a fresh
+    // shell-started daemon would bind 3200.
+    expect(result.info).toMatch(/launchd|plist/i);
+  });
+
+  it('adds no NOTE when the explicit env port and the plist agree', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    const result = await checkDaemon({
+      fetchImpl,
+      env: { NEUROMCP_DAEMON_PORT: '33200' },
+      plistPort: () => 33200,
+      osPlatform: 'darwin',
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).not.toContain('NOTE');
   });
 
   it('names the plist port in the warning when an explicit env port fails but the plist differs', async () => {
