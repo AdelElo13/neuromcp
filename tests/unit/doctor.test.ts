@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 // @ts-expect-error — plain-ESM helper in bin/, no type declarations shipped
 import {
   resolveDaemonPort,
+  readLaunchdDaemonPort,
   checkDaemon,
   checkOllama,
   checkOnnxModel,
@@ -36,16 +37,72 @@ function jsonResponse(body: unknown, ok = true): Promise<Response> {
 }
 
 describe('resolveDaemonPort', () => {
-  it('defaults to 3200 when NEUROMCP_DAEMON_PORT is unset', () => {
-    expect(resolveDaemonPort({})).toBe(3200);
+  const noPlist = () => null;
+
+  it('defaults to 3200 when NEUROMCP_DAEMON_PORT is unset and no launchd plist exists', () => {
+    expect(resolveDaemonPort({}, noPlist)).toBe(3200);
   });
 
   it('honours NEUROMCP_DAEMON_PORT from the environment', () => {
-    expect(resolveDaemonPort({ NEUROMCP_DAEMON_PORT: '33200' })).toBe(33200);
+    expect(resolveDaemonPort({ NEUROMCP_DAEMON_PORT: '33200' }, noPlist)).toBe(33200);
   });
 
   it('falls back to the default on a non-numeric port', () => {
-    expect(resolveDaemonPort({ NEUROMCP_DAEMON_PORT: 'abc' })).toBe(3200);
+    expect(resolveDaemonPort({ NEUROMCP_DAEMON_PORT: 'abc' }, noPlist)).toBe(3200);
+  });
+
+  // The launchd plist IS the configuration on a standard `enable-daemon`
+  // install: NEUROMCP_DAEMON_PORT lives in its EnvironmentVariables, not
+  // in the user's interactive shell. Probing the default port there and
+  // reporting a healthy daemon as "not reachable" diagnoses the wrong
+  // machine (found live on 0.29.3: daemon healthy on 33200, doctor warned
+  // about 3200).
+  it('falls back to the launchd plist port when the env var is unset', () => {
+    expect(resolveDaemonPort({}, () => 33200)).toBe(33200);
+  });
+
+  it('an explicit env var OVERRIDES the plist — env stays the primary surface', () => {
+    expect(resolveDaemonPort({ NEUROMCP_DAEMON_PORT: '4000' }, () => 33200)).toBe(4000);
+  });
+
+  it('an invalid env var behaves like unset: plist, then default', () => {
+    expect(resolveDaemonPort({ NEUROMCP_DAEMON_PORT: 'abc' }, () => 33200)).toBe(33200);
+  });
+});
+
+describe('readLaunchdDaemonPort', () => {
+  const darwin = { osPlatform: 'darwin' as const };
+
+  it('parses the port via plutil and returns null when the plist or key is missing', () => {
+    const execOk = () => '33200\n';
+    expect(readLaunchdDaemonPort({ ...darwin, exec: execOk, exists: () => true })).toBe(33200);
+    const execThrows = () => { throw new Error('No value at that key path'); };
+    expect(readLaunchdDaemonPort({ ...darwin, exec: execThrows, exists: () => true })).toBeNull();
+    expect(readLaunchdDaemonPort({ ...darwin, exec: execOk, exists: () => false })).toBeNull();
+    expect(readLaunchdDaemonPort({ ...darwin, exec: () => 'garbage', exists: () => true })).toBeNull();
+  });
+
+  it('is darwin-only: never runs plutil on other platforms, even with a plist present', () => {
+    // Codex PR-17 [P2]: launchd + plutil are macOS concepts. A migrated
+    // home directory on Linux with a stale plist (and any binary that
+    // happens to be called plutil) must not decide the port.
+    const exec = vi.fn().mockReturnValue('33200');
+    expect(readLaunchdDaemonPort({ osPlatform: 'linux', exec, exists: () => true })).toBeNull();
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('invokes plutil with the exact raw-extract arguments for the plist path', () => {
+    const exec = vi.fn().mockReturnValue('33200');
+    readLaunchdDaemonPort({ ...darwin, exec, exists: () => true, plistPath: '/p/com.neuromcp.daemon.plist' });
+    expect(exec).toHaveBeenCalledWith('plutil', [
+      '-extract', 'EnvironmentVariables.NEUROMCP_DAEMON_PORT', 'raw', '-o', '-', '/p/com.neuromcp.daemon.plist',
+    ]);
+  });
+
+  it('rejects out-of-range and non-integer plist values', () => {
+    for (const raw of ['0', '65536', '-1', '3.5', '']) {
+      expect(readLaunchdDaemonPort({ ...darwin, exec: () => raw, exists: () => true })).toBeNull();
+    }
   });
 });
 
@@ -53,7 +110,7 @@ describe('checkDaemon', () => {
   it('reports ok with the daemon version when /health answers', async () => {
     const fetchImpl = vi.fn().mockImplementation(() =>
       jsonResponse({ status: 'ok', version: '0.26.0' }));
-    const result = await checkDaemon({ fetchImpl, env: {} });
+    const result = await checkDaemon({ fetchImpl, env: {}, plistPort: () => null });
     expect(result.status).toBe('ok');
     expect(result.info).toContain('0.26.0');
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -62,10 +119,50 @@ describe('checkDaemon', () => {
     );
   });
 
+  it('probes the port from the launchd plist when the env var is unset, and NAMES the source', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      jsonResponse({ status: 'ok', version: '0.29.3' }));
+    const result = await checkDaemon({ fetchImpl, env: {}, plistPort: () => 33200 });
+    expect(result.status).toBe('ok');
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'http://127.0.0.1:33200/health',
+      expect.anything(),
+    );
+    // Codex PR-17 [P2]: the chosen configuration source must be visible —
+    // a reader has to be able to tell WHY 33200 was probed while a fresh
+    // shell-started daemon would bind 3200.
+    expect(result.info).toMatch(/launchd|plist/i);
+  });
+
+  it('adds no NOTE when the explicit env port and the plist agree', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    const result = await checkDaemon({
+      fetchImpl,
+      env: { NEUROMCP_DAEMON_PORT: '33200' },
+      plistPort: () => 33200,
+      osPlatform: 'darwin',
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).not.toContain('NOTE');
+  });
+
+  it('names the plist port in the warning when an explicit env port fails but the plist differs', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    const result = await checkDaemon({
+      fetchImpl,
+      env: { NEUROMCP_DAEMON_PORT: '3200' },
+      plistPort: () => 33200,
+      osPlatform: 'darwin',
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).toContain('33200');
+    expect(result.info).toMatch(/launchd|plist/i);
+  });
+
   it('probes the port from NEUROMCP_DAEMON_PORT', async () => {
     const fetchImpl = vi.fn().mockImplementation(() =>
       jsonResponse({ status: 'ok', version: '0.26.0' }));
-    await checkDaemon({ fetchImpl, env: { NEUROMCP_DAEMON_PORT: '33200' } });
+    await checkDaemon({ fetchImpl, env: { NEUROMCP_DAEMON_PORT: '33200' }, plistPort: () => null });
     expect(fetchImpl).toHaveBeenCalledWith(
       'http://127.0.0.1:33200/health',
       expect.anything(),
@@ -74,7 +171,7 @@ describe('checkDaemon', () => {
 
   it('warns (not fails) when the daemon is unreachable, with a launchctl hint on darwin', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    const result = await checkDaemon({ fetchImpl, env: {}, osPlatform: 'darwin' });
+    const result = await checkDaemon({ fetchImpl, env: {}, osPlatform: 'darwin', plistPort: () => null });
     expect(result.status).toBe('warn');
     expect(result.info).toContain('optional');
     expect(result.info).toContain('launchctl print gui/$(id -u)/com.neuromcp.daemon');
@@ -82,7 +179,7 @@ describe('checkDaemon', () => {
 
   it('omits the launchctl hint on non-darwin platforms', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    const result = await checkDaemon({ fetchImpl, env: {}, osPlatform: 'linux' });
+    const result = await checkDaemon({ fetchImpl, env: {}, osPlatform: 'linux', plistPort: () => null });
     expect(result.status).toBe('warn');
     expect(result.info).not.toContain('launchctl');
   });
@@ -91,7 +188,7 @@ describe('checkDaemon', () => {
     const abort = new Error('This operation was aborted');
     abort.name = 'AbortError';
     const fetchImpl = vi.fn().mockRejectedValue(abort);
-    const result = await checkDaemon({ fetchImpl, env: {} });
+    const result = await checkDaemon({ fetchImpl, env: {}, plistPort: () => null });
     expect(result.status).toBe('warn');
   });
 });

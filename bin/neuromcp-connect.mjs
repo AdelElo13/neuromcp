@@ -31,6 +31,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { platform } from 'node:os';
 import { isMainModule } from './is-main.mjs';
+import { readLaunchdDaemonPort } from './daemon-port.mjs';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 3200;
@@ -58,9 +59,10 @@ export function deriveHealthUrl(mcpUrl) {
 /**
  * @param {string[]} argv - positional args (an optional MCP URL)
  * @param {Record<string, string | undefined>} env - process environment
+ * @param {() => number | null} [plistPort] - launchd plist port fallback
  * @returns {{ mcpUrl: string }}
  */
-export function parseConnectArgs(argv, env) {
+export function parseConnectArgs(argv, env, plistPort = readLaunchdDaemonPort) {
   const positional = argv.filter((a) => !a.startsWith('--'));
   if (positional.length > 0) {
     const raw = positional[0];
@@ -83,6 +85,18 @@ export function parseConnectArgs(argv, env) {
       throw new Error(`invalid NEUROMCP_DAEMON_PORT: ${rawPort}`);
     }
     port = n;
+  } else {
+    // Claude Desktop launches this bridge WITHOUT a login environment: the
+    // configured port lives in the launchd plist, not in env. Without this
+    // fallback connect polled the default port for its full 55s window
+    // while the daemon it kickstarts listens elsewhere.
+    let fromPlist = null;
+    try {
+      fromPlist = plistPort();
+    } catch {
+      /* fall through to the default */
+    }
+    if (fromPlist !== null) port = fromPlist;
   }
   return { mcpUrl: `http://${host}:${port}/mcp` };
 }

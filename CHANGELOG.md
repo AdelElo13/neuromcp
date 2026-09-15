@@ -3,6 +3,20 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.4] — unreleased
+
+### Fixed
+
+- **FIX: `neuromcp-doctor` probed the default daemon port instead of the
+  configured one.** On a standard `enable-daemon` install the port lives in
+  the launchd plist's `EnvironmentVariables`, not in the user's interactive
+  shell — the doctor probed 3200 and reported a healthy daemon on 33200 as
+  "not reachable" (found live right after the 0.29.3 upgrade). Port
+  resolution is now: explicit `NEUROMCP_DAEMON_PORT` env var → the launchd
+  plist (via `plutil`, darwin-only, silent fallback) → default 3200. When an
+  explicit env port fails while the plist names another, the warning says
+  so. `neuromcp-doctor check` is exit 0 out of the box on installed setups.
+
 ## [0.29.3] — 2026-09-15
 
 Install-robustness release: switching embedding provider no longer bricks
