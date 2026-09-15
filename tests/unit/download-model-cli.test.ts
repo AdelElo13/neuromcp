@@ -59,4 +59,21 @@ describe('neuromcp-download-model — override-aware existence check', () => {
   it('chooseTargetDir still prefers the override', () => {
     expect(chooseTargetDir({ NEUROMCP_MODEL_DIR: '/custom' })).toBe('/custom');
   });
+
+  it('IMPORTING the script performs no I/O — main() only runs when invoked as the CLI', async () => {
+    // Codex round-8 [P2]: the script ran main() unconditionally at module
+    // load, so merely importing it (this very test file!) could start a
+    // real 33MB download, write model paths and flip process.exitCode.
+    // The bin/ entrypoints solved this with the symlink-safe isMainModule
+    // guard; the script must use the same one.
+    const before = process.exitCode;
+    // Import already happened at the top of this file; a triggered main()
+    // would have set exitCode on failure or logged a download. Assert the
+    // guard exists structurally AND that exitCode is untouched.
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../../scripts/download-model.mjs', import.meta.url), 'utf8');
+    expect(source).toMatch(/isMainModule\(import\.meta\.url\)/);
+    expect(source).not.toMatch(/^main\(\)\.catch/m);
+    expect(process.exitCode).toBe(before);
+  });
 });

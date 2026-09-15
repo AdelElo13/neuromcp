@@ -24,6 +24,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { isMainModule } from '../bin/is-main.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MODEL_URL = 'https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx';
@@ -118,10 +119,19 @@ async function main() {
   process.stderr.write('[neuromcp] ★ If neuromcp is useful, star us: https://github.com/AdelElo13/neuromcp\n');
 }
 
-main().catch((err) => {
+// CLI-only side effects: importing this module (tests, tooling) must not
+// start a download or touch process.exitCode — same symlink-safe guard as
+// the bin/ entrypoints (Codex round 8).
+if (isMainModule(import.meta.url)) {
+  runDownloadCli();
+}
+
+function runDownloadCli() {
+  main().catch((err) => {
   process.stderr.write(
     `[neuromcp] Model download failed: ${err instanceof Error ? err.message : String(err)}\n` +
       '[neuromcp] The server downloads it lazily on first use, or run: npx neuromcp-download-model\n',
   );
   process.exitCode = 1;
 });
+}

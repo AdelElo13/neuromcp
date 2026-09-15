@@ -549,6 +549,19 @@ describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded o
     expect(result.info).not.toMatch(/fallback only/i);
   });
 
+  it('does not promise the ONNX fallback in the route text when an explicit provider excludes it', () => {
+    // Codex round-8 [P3]: explicit ollama + both providers present printed
+    // "(+ ONNX offline fallback)" — a fallback the runtime will never take.
+    const result = deriveEmbeddingRoute(
+      { status: 'ok' },
+      { status: 'ok' },
+      { model: 'nomic-embed-text', dimensions: 768 },
+      { NEUROMCP_EMBEDDING_PROVIDER: 'ollama' },
+    );
+    expect(result.status).toBe('ok');
+    expect(result.info).not.toMatch(/fallback/i);
+  });
+
   it('symmetrically: Ollama does not count under NEUROMCP_EMBEDDING_PROVIDER=onnx', () => {
     const result = deriveEmbeddingRoute({ status: 'ok' }, { status: 'warn' }, { model: 'nomic-embed-text', dimensions: 768 }, {
       NEUROMCP_EMBEDDING_PROVIDER: 'onnx',

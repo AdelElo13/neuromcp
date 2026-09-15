@@ -605,7 +605,8 @@ export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = nul
   const ollamaEligible = requestedProvider === 'auto' || requestedProvider === 'ollama';
   const onnxEligible = requestedProvider === 'auto' || requestedProvider === 'onnx';
   if (ollamaEligible && ollamaResult.status === 'ok') {
-    const fallback = onnxResult.status === 'ok' ? ' (+ ONNX offline fallback)' : '';
+    // Only promise the fallback the runtime is actually allowed to take.
+    const fallback = onnxEligible && onnxResult.status === 'ok' ? ' (+ ONNX offline fallback)' : '';
     // Report the MEASURED model and width when the probe has them — the
     // route summary claimed nomic/768 even for a measured 384d custom model.
     const route =
