@@ -36,7 +36,11 @@ import type { NeuromcpConfig } from '../config.js';
 import type { Logger } from '../observability/logger.js';
 import type { EmbeddingProvider } from './types.js';
 import { createEmbeddingProvider, selectEmbeddingProvider } from './factory.js';
-import { getExistingVecDimension, validateEmbeddingCompatibility } from './validate.js';
+import {
+  getExistingVecDimension,
+  getStoredEmbeddingModels,
+  validateEmbeddingCompatibility,
+} from './validate.js';
 
 /** Thrown by the degraded provider. Callers treat it as "skip the vector". */
 export class EmbeddingsUnavailableError extends Error {
@@ -200,10 +204,20 @@ export async function resolveEmbeddingRuntime(
   }
 
   // ── Case 2: pick the provider that matches the existing index. ────────
+  // Require the stored MODEL too when it is unambiguous: a same-width
+  // provider of another model must not stop the cascade — the right
+  // provider may be one candidate further down (Codex round-2 finding).
+  // Zero stored models (everything awaiting backfill) or a historical mix
+  // (NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX era) fall back to width-only, with
+  // validateEmbeddingCompatibility still the belt-and-braces behind it.
+  const storedModels = getStoredEmbeddingModels(db);
+  const requireModel = storedModels.length === 1 ? storedModels[0] : undefined;
+
   let rejected: readonly string[] = [];
   for (let attempt = 1; attempt <= Math.max(1, attempts); attempt++) {
     const selection = await select(config, logger, {
       requireDimension: indexDimension,
+      requireModel,
     });
     rejected = selection.rejected;
     if (selection.provider !== null) {

@@ -29,6 +29,59 @@ export interface SelectProviderOptions {
    * silently is exactly the corruption validate.ts exists to prevent.
    */
   readonly requireDimension?: number;
+  /**
+   * Only accept a provider whose `name` equals the model that produced the
+   * stored embeddings. Two models can share a width while their vector
+   * spaces are unrelated — without this, the cascade stopped at the first
+   * width match and degraded on the model check even when the RIGHT
+   * provider was one step further down.
+   */
+  readonly requireModel?: string;
+}
+
+export type AcceptVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+
+/**
+ * Pure compatibility rule between a candidate provider and the existing
+ * index. Exported so the selection cascade, its static short-circuits and
+ * the tests all share ONE definition of "acceptable".
+ */
+export function providerAcceptable(
+  provider: { readonly name: string; readonly dimensions: number },
+  options: SelectProviderOptions,
+): AcceptVerdict {
+  if (options.requireDimension !== undefined && provider.dimensions !== options.requireDimension) {
+    return {
+      ok: false,
+      reason:
+        `${provider.name} (${provider.dimensions}d, reachable but the existing index is ` +
+        `${options.requireDimension}d)`,
+    };
+  }
+  if (options.requireModel !== undefined && provider.name !== options.requireModel) {
+    return {
+      ok: false,
+      reason:
+        `${provider.name} (${provider.dimensions}d — width matches, but the stored embeddings ` +
+        `were produced by "${options.requireModel}"; mixing models turns similarity into noise)`,
+    };
+  }
+  return { ok: true };
+}
+
+/** ONNX facts that are known WITHOUT touching disk or network. */
+const ONNX_STATIC = { name: 'bge-small-en-v1.5', dimensions: 384 } as const;
+
+/**
+ * Rule the ONNX fallback out BEFORE probing it, when the requirements make
+ * a match impossible. The probe is not free: with the model file absent it
+ * starts a ~33 MB lazy download — pointless (and startup-delaying) when the
+ * fixed 384 width can never match the existing index anyway.
+ */
+export function staticOnnxSkipReason(options: SelectProviderOptions): string | null {
+  const verdict = providerAcceptable(ONNX_STATIC, options);
+  if (verdict.ok) return null;
+  return `${verdict.reason} — skipped without probing (no model download attempted)`;
 }
 
 /**
@@ -43,19 +96,18 @@ export async function selectEmbeddingProvider(
   options: SelectProviderOptions = {},
 ): Promise<ProviderSelection> {
   const requested = config.embeddingProvider;
-  const requireDimension = options.requireDimension;
   const rejected: string[] = [];
 
-  /** Accept a reachable provider only when its width matches the index. */
+  /** Accept a reachable provider only when it matches the existing index. */
   const accept = (provider: EmbeddingProvider): boolean => {
-    if (requireDimension === undefined || provider.dimensions === requireDimension) return true;
-    rejected.push(
-      `${provider.name} (${provider.dimensions}d, reachable but the existing index is ${requireDimension}d)`,
-    );
-    logger.warn('embeddings', 'Provider skipped — dimension does not match the existing vector index', {
+    const verdict = providerAcceptable(provider, options);
+    if (verdict.ok) return true;
+    rejected.push(verdict.reason);
+    logger.warn('embeddings', 'Provider skipped — does not match the existing vector index', {
       provider: provider.name,
       providerDimensions: provider.dimensions,
-      indexDimensions: requireDimension,
+      indexDimensions: options.requireDimension,
+      requiredModel: options.requireModel,
     });
     return false;
   };
@@ -120,8 +172,18 @@ export async function selectEmbeddingProvider(
     }
   }
 
-  // 3. Try ONNX (if auto or explicitly requested) — degraded quality
+  // 3. Try ONNX (if auto or explicitly requested) — degraded quality.
+  // Ruled out statically first: probing can trigger the lazy ~33 MB model
+  // download, which must never run for a provider that cannot match anyway.
   if (requested === 'auto' || requested === 'onnx') {
+    const staticSkip = staticOnnxSkipReason(options);
+    if (staticSkip !== null) {
+      rejected.push(staticSkip);
+      logger.warn('embeddings', 'ONNX ruled out statically — probe and model download skipped', {
+        reason: staticSkip,
+      });
+      return { provider: null, rejected, explicitError: null };
+    }
     const onnx = new OnnxEmbeddingProvider();
     if (await onnx.isAvailable()) {
       if (accept(onnx)) {

@@ -67,31 +67,54 @@ export function parseReembedArgs(argv) {
       throw new Error(`unknown flag: ${arg} (use --db, --apply, --keep-copy, --limit, --force)`);
     }
   }
+  if (out.apply && out.limit !== null) {
+    // A limited rebuild drops ALL vectors but re-embeds only the first n
+    // memories — applying that installs a partial index with stale
+    // embedding_model stamps on the rest: exactly the mismatch state this
+    // tool exists to fix. --limit is a dry-run smoke-test knob only.
+    throw new Error('--limit cannot be combined with --apply (a partial rebuild must never be swapped in)');
+  }
   return out;
 }
 
 /**
- * PIDs of OTHER processes that currently have the database file open,
- * via `lsof -t` (macOS/Linux). Empty when lsof is unavailable or reports
- * nothing — the caller still runs the checkpoint probe in that case.
+ * @typedef {{ available: boolean, pids: number[] }} AttachedPidsResult
+ */
+
+/**
+ * PIDs of OTHER processes that currently have the database file open, via
+ * `lsof -t` (macOS/Linux). `available: false` means the detection itself
+ * could not run (lsof missing) — the guard treats that as "safety cannot
+ * be established", NOT as "no clients": an attached-but-idle connection
+ * holds no SQLite lock, so the checkpoint probe alone cannot see it.
  *
  * @param {string} dbPath
  * @param {number} [selfPid]
- * @returns {number[]}
+ * @returns {AttachedPidsResult}
  */
 export function listAttachedPids(dbPath, selfPid = process.pid) {
-  let stdout = '';
+  /** @param {string} stdout @returns {number[]} */
+  const parse = (stdout) =>
+    stdout
+      .split('\n')
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== selfPid);
   try {
-    stdout = execFileSync('lsof', ['-t', '--', dbPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    // lsof exits 1 when no process has the file open, and may be missing
-    // entirely (minimal Linux) — both mean "nothing detected here".
-    return [];
+    const stdout = execFileSync('lsof', ['-t', '--', dbPath], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return { available: true, pids: parse(stdout) };
+  } catch (err) {
+    // lsof exits 1 with empty output when NO process has the file open —
+    // that is a successful, empty answer. Anything else (ENOENT, signal,
+    // unexpected status) means the detection layer is unavailable.
+    const e = /** @type {{ status?: unknown, stdout?: unknown, code?: unknown }} */ (err);
+    if (typeof e.status === 'number' && e.status === 1) {
+      return { available: true, pids: typeof e.stdout === 'string' ? parse(e.stdout) : [] };
+    }
+    return { available: false, pids: [] };
   }
-  return stdout
-    .split('\n')
-    .map((line) => Number(line.trim()))
-    .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== selfPid);
 }
 
 /**
@@ -107,23 +130,32 @@ export function listAttachedPids(dbPath, selfPid = process.pid) {
  *
  * @param {new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }} Database
  * @param {string} dbPath
- * @param {{ attachedPids?: (p: string) => number[] }} [deps]
+ * @param {{ attachedPids?: (p: string) => AttachedPidsResult }} [deps]
  * @returns {{ ok: true } | { ok: false, reason: string }}
  */
 export function guardApplySwap(Database, dbPath, deps = {}) {
   const { attachedPids = listAttachedPids } = deps;
 
-  let pids = [];
+  /** @type {AttachedPidsResult} */
+  let attachment = { available: false, pids: [] };
   try {
-    pids = attachedPids(dbPath);
+    attachment = attachedPids(dbPath);
   } catch {
-    // detection layer unavailable — the checkpoint probe below still runs
+    // treated as unavailable below — fail closed, not open
   }
-  if (pids.length > 0) {
+  if (!attachment.available) {
     return {
       ok: false,
       reason:
-        `other processes still have the database open (pid ${pids.join(', ')}) — ` +
+        'cannot verify that no client is attached (lsof unavailable) — an idle connection holds ' +
+        'no SQLite lock, so safety cannot be established. Install lsof, or pass --force to override',
+    };
+  }
+  if (attachment.pids.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `other processes still have the database open (pid ${attachment.pids.join(', ')}) — ` +
         'stop every neuromcp client (Claude Desktop / Claude Code / Codex / the daemon) first',
     };
   }
@@ -152,6 +184,37 @@ export function guardApplySwap(Database, dbPath, deps = {}) {
       /* ignore */
     }
   }
+}
+
+/**
+ * Detect writes to the ORIGINAL database between the snapshot and the swap.
+ * The re-embed can take minutes; a client can write during it and disconnect
+ * before the final guard runs — the guard then sees an idle database and
+ * would install the stale snapshot, losing those writes from the active
+ * file. SQLite's `data_version` pragma changes on THIS connection exactly
+ * when another connection commits, so a sentinel held open across the whole
+ * operation sees any interim commit.
+ *
+ * @param {new (path: string, opts?: object) => { pragma: (s: string, o?: object) => unknown, close: () => void }} Database
+ * @param {string} dbPath
+ * @returns {{ changed: () => boolean, close: () => void }}
+ */
+export function openSwapSentinel(Database, dbPath) {
+  const db = new Database(dbPath, { readonly: true });
+  const read = () => Number(db.pragma('data_version', { simple: true }));
+  const initial = read();
+  return {
+    changed() {
+      return read() !== initial;
+    },
+    close() {
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    },
+  };
 }
 
 /**
@@ -354,6 +417,22 @@ async function main() {
 
   const embedder = await createEmbeddingProvider(config, logger);
 
+  // --apply preflight: refuse BEFORE minutes of embedding work when a
+  // client is clearly attached, and open the write-sentinel that covers
+  // the whole snapshot→rebuild→swap window.
+  let sentinel = null;
+  if (args.apply && !args.force) {
+    const verdict = guardApplySwap(Database, dbPath);
+    if (verdict.ok !== true) {
+      process.stderr.write(
+        `\n✗ not starting: ${verdict.reason}.\n  Nothing was changed.\n\n`,
+      );
+      process.exit(3);
+      return;
+    }
+    sentinel = openSwapSentinel(Database, dbPath);
+  }
+
   const copyPath = buildCopyPath(dbPath);
   process.stdout.write(
     `\nneuromcp-reembed\n  database : ${dbPath}\n  provider : ${embedder.name} (${embedder.dimensions}d)\n`,
@@ -420,12 +499,16 @@ async function main() {
     return;
   }
 
-  // Refuse the swap while a client is still attached (writes since the copy
-  // would silently land in the renamed-away inode). On success this has also
-  // folded the WAL into the file, so the backup below is complete.
+  // Final pre-swap checks. The preflight guard ran before the snapshot;
+  // this closes the remaining window: (a) a client that attached DURING the
+  // rebuild, (b) a client that wrote during the rebuild and already
+  // disconnected — the sentinel's data_version catches that even though the
+  // database now looks idle. Refusal keeps the rebuilt copy: the expensive
+  // work is not thrown away, only the swap is blocked.
   if (!args.force) {
     const verdict = guardApplySwap(Database, dbPath);
     if (verdict.ok !== true) {
+      sentinel?.close();
       process.stderr.write(
         `\n✗ not swapping: ${verdict.reason}.\n` +
           `  Nothing was changed. The rebuilt copy is kept at:\n  ${copyPath}\n` +
@@ -434,7 +517,19 @@ async function main() {
       process.exit(3);
       return;
     }
+    if (sentinel !== null && sentinel.changed()) {
+      sentinel.close();
+      process.stderr.write(
+        '\n✗ not swapping: the database CHANGED during the rebuild (a client committed writes).\n' +
+          '  The rebuilt copy is a stale snapshot — applying it would drop those writes from\n' +
+          `  the active database. Nothing was changed. The copy is kept at:\n  ${copyPath}\n` +
+          '  Stop every client and re-run with --apply.\n\n',
+      );
+      process.exit(3);
+      return;
+    }
   }
+  sentinel?.close();
 
   const backupPath = buildBackupPath(dbPath);
   copyFileSync(dbPath, backupPath);

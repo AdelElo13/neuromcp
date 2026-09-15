@@ -89,15 +89,34 @@ export function downloadsDisabled(env: NodeJS.ProcessEnv = process.env): boolean
  * Download the model into `targetDir` (atomically: temp file + rename, so a
  * killed download never leaves a truncated model behind).
  */
+/** Hard deadline for the whole lazy download (fetch + body streaming). */
+function downloadTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['NEUROMCP_MODEL_DOWNLOAD_TIMEOUT_MS'];
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 300_000;
+}
+
 export async function downloadModel(
   targetDir: string,
   deps: {
     fetchImpl?: typeof fetch;
     url?: string;
     stderr?: { write: (s: string) => unknown };
+    /**
+     * Deadline for the WHOLE download. A hung mirror must not block a
+     * (possibly degraded) startup indefinitely — the abort surfaces as
+     * "this provider is not usable" instead. Default 5 min, override with
+     * NEUROMCP_MODEL_DOWNLOAD_TIMEOUT_MS.
+     */
+    timeoutMs?: number;
   } = {},
 ): Promise<string> {
-  const { fetchImpl = fetch, url = MODEL_URL, stderr = process.stderr } = deps;
+  const {
+    fetchImpl = fetch,
+    url = MODEL_URL,
+    stderr = process.stderr,
+    timeoutMs = downloadTimeoutMs(),
+  } = deps;
   const target = resolve(targetDir, MODEL_FILENAME);
   mkdirSync(targetDir, { recursive: true });
 
@@ -106,14 +125,19 @@ export async function downloadModel(
       `[neuromcp] This happens once. Set NEUROMCP_DISABLE_MODEL_DOWNLOAD=1 to forbid it.\n`,
   );
 
-  const response = await fetchImpl(url);
+  const signal = AbortSignal.timeout(timeoutMs);
+  const response = await fetchImpl(url, { signal });
   if (!response.ok || response.body === null) {
     throw new Error(`model download failed: HTTP ${response.status}`);
   }
 
   const tmp = `${target}.part-${process.pid}`;
   try {
-    await pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(tmp));
+    await pipeline(
+      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+      createWriteStream(tmp),
+      { signal },
+    );
     renameSync(tmp, target);
   } catch (err) {
     try {

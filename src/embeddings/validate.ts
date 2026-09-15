@@ -34,6 +34,25 @@ export function getExistingVecDimension(db: Database.Database): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/**
+ * Distinct models that produced the embeddings currently stored in this
+ * database ('none' rows — degraded-mode stores awaiting backfill — do not
+ * count). The index-aware selection uses this to require MODEL identity as
+ * well as width, so the cascade walks past a same-width wrong-model
+ * candidate instead of degrading on it.
+ */
+export function getStoredEmbeddingModels(db: Database.Database): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT embedding_model FROM memories
+        WHERE is_deleted = 0
+          AND embedding_model IS NOT NULL
+          AND embedding_model NOT IN ('none', '')`,
+    )
+    .all() as Array<{ embedding_model: string }>;
+  return rows.map((r) => r.embedding_model);
+}
+
 export function validateEmbeddingCompatibility(
   db: Database.Database,
   embedder: EmbeddingProvider,

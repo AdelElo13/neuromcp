@@ -233,10 +233,16 @@ export async function checkBetterSqlite(deps = {}) {
   const name = 'better-sqlite3 native';
   try {
     const mod = await loadModule();
-    const Database = mod.default ?? mod;
+    const Database = /** @type {SqliteCtor} */ (mod.default ?? mod);
+    // Importing the module is NOT enough: an `--ignore-scripts` install
+    // imports fine and only fails when a Database is constructed (the
+    // native binding loads lazily). Construct one, or exactly the failure
+    // mode this check documents gets diagnosed as healthy.
+    const probe = new Database(':memory:');
+    probe.close();
     return {
-      result: { name, status: 'ok', info: 'module + native binding load' },
-      Database: /** @type {never} */ (Database),
+      result: { name, status: 'ok', info: 'module + native binding load (:memory: smoke test)' },
+      Database,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -363,12 +369,47 @@ export function checkEmbeddingIndex(deps) {
       return { name, status: 'warn', info: 'memories_vec exists but its width could not be parsed' };
     }
 
-    // Which widths can this machine actually produce right now?
+    // Which providers can this machine actually use right now — under the
+    // SAME rules the runtime applies: the explicit provider setting narrows
+    // the cascade, and a same-width provider of another MODEL is not a
+    // match (its vectors are unrelated). Without this the doctor declared
+    // "matched by onnx" while the runtime was degrading (Codex round 2).
+    const requested = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
+    const ollamaModel =
+      env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL !== 'auto'
+        ? env.NEUROMCP_EMBEDDING_MODEL
+        : 'nomic-embed-text';
     const available = [];
-    if (ollamaResult.status === 'ok') available.push({ provider: 'ollama nomic-embed-text', dim: 768 });
-    if (onnxResult.status === 'ok') available.push({ provider: 'onnx bge-small-en-v1.5', dim: 384 });
+    if ((requested === 'auto' || requested === 'ollama') && ollamaResult.status === 'ok') {
+      available.push({ provider: `ollama ${ollamaModel}`, model: ollamaModel, dim: 768 });
+    }
+    if ((requested === 'auto' || requested === 'onnx') && onnxResult.status === 'ok') {
+      available.push({ provider: 'onnx bge-small-en-v1.5', model: 'bge-small-en-v1.5', dim: 384 });
+    }
 
-    const matching = available.find((a) => a.dim === indexDim);
+    // What model produced the embeddings that are already stored?
+    /** @type {Array<{ embedding_model: string, n: number }>} */
+    let storedModels = [];
+    try {
+      storedModels = /** @type {Array<{ embedding_model: string, n: number }>} */ (
+        db
+          .prepare(
+            `SELECT embedding_model, COUNT(*) AS n FROM memories
+              WHERE is_deleted = 0
+                AND embedding_model IS NOT NULL
+                AND embedding_model NOT IN ('none', '')
+              GROUP BY embedding_model`,
+          )
+          .all()
+      );
+    } catch {
+      /* pre-schema database — width-only check below */
+    }
+
+    const widthMatches = available.filter((a) => a.dim === indexDim);
+    const matching = widthMatches.find(
+      (a) => storedModels.length === 0 || storedModels.some((m) => m.embedding_model === a.model),
+    );
     if (matching !== undefined) {
       return {
         name,
@@ -376,9 +417,24 @@ export function checkEmbeddingIndex(deps) {
         info: `${indexDim}-dim index in ${dbPath}, matched by ${matching.provider}`,
       };
     }
+    if (widthMatches.length > 0) {
+      const stored = storedModels.map((m) => `"${m.embedding_model}" (${m.n})`).join(', ');
+      return {
+        name,
+        status: 'fail',
+        info:
+          `MODEL MISMATCH: ${dbPath} holds a ${indexDim}-dim index with embeddings by ${stored}, ` +
+          `but the reachable ${indexDim}d provider is ${widthMatches.map((a) => a.provider).join(' / ')} — ` +
+          `same width, different model: the runtime starts DEGRADED rather than mixing vector spaces. ` +
+          `Recovery: restore the original model, or rebuild with \`npx neuromcp-reembed\` (dry run) then ` +
+          `\`npx neuromcp-reembed --apply\`.`,
+      };
+    }
+    const scope = requested === 'auto' ? '' : ` under NEUROMCP_EMBEDDING_PROVIDER=${requested}`;
     const offer = available.length === 0
-      ? 'no provider is reachable at all'
-      : `only ${available.map((a) => `${a.provider} (${a.dim}d)`).join(' and ')} reachable`;
+      ? `no eligible provider is reachable${scope}` +
+        (requested === 'openai' ? ' (the doctor cannot verify OpenAI widths — check the daemon log)' : '')
+      : `only ${available.map((a) => `${a.provider} (${a.dim}d)`).join(' and ')} eligible${scope}`;
     return {
       name,
       status: 'fail',

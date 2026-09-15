@@ -71,6 +71,34 @@ depends on an install script.
   explaining WHY, instead of looking identical to "nothing to backfill".
   The whole degraded tool surface (store / search / stats / backfill) is
   now pinned by an MCP-client-level test over the in-memory transport.
+- **Adversarial review round 2 (Codex) — all findings fixed:**
+  - `reembed --apply` detects writes that happen DURING the rebuild: a
+    sentinel connection tracks SQLite's `data_version` across the whole
+    snapshot→rebuild→swap window and refuses the swap (exit 3, copy kept)
+    when any other connection committed in between — even if that client
+    already disconnected. The attachment guard also runs BEFORE the
+    snapshot, and fails closed when `lsof` is unavailable instead of
+    treating "cannot detect" as "no clients".
+  - `--apply` + `--limit` is now a parse error: a limited rebuild drops
+    all vectors but re-embeds only the first *n*, so applying it would
+    install a partial index with stale model stamps.
+  - Provider selection requires the stored **model**, not just the index
+    width, and keeps walking the cascade past a same-width wrong-model
+    candidate (`requireModel` in `selectEmbeddingProvider`); previously a
+    reachable correct provider one step further down was never tried.
+  - The ONNX fallback is ruled out **statically** (fixed 384d / model
+    name) before probing, so the lazy ~33 MB model download can never run
+    for a provider that cannot match — and the download itself now has a
+    hard deadline (`NEUROMCP_MODEL_DOWNLOAD_TIMEOUT_MS`, default 5 min).
+  - `neuromcp-doctor`'s better-sqlite3 check constructs a `:memory:`
+    database (the native binding loads lazily — importing alone passes on
+    a scripts-disabled install), and the embedding-index check applies the
+    runtime's own rules: explicit `NEUROMCP_EMBEDDING_PROVIDER` narrows
+    the eligible providers and a same-width model mismatch is named as
+    such instead of being reported healthy.
+  - QUICKSTART no longer implies bare `npx neuromcp-init` fixes GUI
+    configs — from the npx cache it deliberately falls back to the `npx`
+    entry; a permanent `npm install -g` first is the documented route.
 - **`neuromcp-download-model`** — manual fetch of the ONNX fallback model
   for machines where install scripts are disabled.
 - **`neuromcp-doctor check --json`** — machine-readable report

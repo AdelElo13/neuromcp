@@ -76,14 +76,19 @@ class FakeEmbedder implements EmbeddingProvider {
 
 /** A stand-in for the real cascade: "these providers are reachable". */
 function cascade(...reachable: EmbeddingProvider[]) {
+  // Mirrors the production contract: a candidate must match the index width
+  // AND (when known) the stored model — see providerAcceptable in factory.ts.
   return async (
     _config: unknown,
     _logger: unknown,
-    options: { requireDimension?: number } = {},
+    options: { requireDimension?: number; requireModel?: string } = {},
   ): Promise<ProviderSelection> => {
     const rejected: string[] = [];
     for (const p of reachable) {
-      if (options.requireDimension === undefined || p.dimensions === options.requireDimension) {
+      const widthOk =
+        options.requireDimension === undefined || p.dimensions === options.requireDimension;
+      const modelOk = options.requireModel === undefined || p.name === options.requireModel;
+      if (widthOk && modelOk) {
         return { provider: p, rejected, explicitError: null };
       }
       rejected.push(`${p.name} (${p.dimensions}d)`);
@@ -318,6 +323,30 @@ describe('v0.29.3 embedding provider switch', () => {
         env: { NEUROMCP_STRICT_EMBEDDINGS: '1' },
       }),
     ).rejects.toThrow(/dimension mismatch/i);
+  });
+
+  it('same width, wrong model FIRST in the cascade: keeps walking and picks the matching model', async () => {
+    // Codex round-2 [P2]: a 384 index built by bge-small-en-v1.5, with an
+    // Ollama all-minilm (also 384) reachable AND the correct ONNX bge
+    // reachable. The old behaviour took the first width-match (all-minilm),
+    // failed model validation, and degraded — even though the right
+    // provider was one step further down the cascade.
+    await seed(384, 'bge-small-en-v1.5');
+
+    const runtime = await resolveEmbeddingRuntime(db, config, logger, {
+      select: cascade(
+        new FakeEmbedder('all-minilm', 384),
+        new FakeEmbedder('bge-small-en-v1.5', 384),
+      ),
+      attempts: 1,
+      sleep: NEVER_SLEEP,
+      stderr: SILENT,
+      env: {},
+    });
+
+    expect(runtime.mode).toBe('matched');
+    expect(runtime.embedder.name).toBe('bge-small-en-v1.5');
+    expect(runtime.vectorEnabled).toBe(true);
   });
 
   it('same width but a different model degrades instead of poisoning recall', async () => {

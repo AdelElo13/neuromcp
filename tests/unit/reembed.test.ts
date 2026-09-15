@@ -23,6 +23,7 @@ import {
   readVecDimension,
   rebuildIndex,
   guardApplySwap,
+  openSwapSentinel,
 } from '../../bin/reembed.mjs';
 
 class FakeEmbedder {
@@ -74,12 +75,21 @@ describe('neuromcp-reembed', () => {
 
   it('parses its flags', () => {
     expect(parseReembedArgs([])).toEqual({ db: null, apply: false, keepCopy: false, limit: null, help: false, force: false });
-    expect(parseReembedArgs(['--apply', '--limit', '5'])).toMatchObject({ apply: true, limit: 5 });
+    expect(parseReembedArgs(['--limit', '5'])).toMatchObject({ apply: false, limit: 5 });
     expect(parseReembedArgs(['--db', '/tmp/x.db'])).toMatchObject({ db: '/tmp/x.db' });
     expect(parseReembedArgs(['--apply', '--force'])).toMatchObject({ apply: true, force: true });
     expect(() => parseReembedArgs(['--limit', 'zero'])).toThrow(/positive integer/);
     expect(() => parseReembedArgs(['--nope'])).toThrow(/unknown flag/);
     expect(() => parseReembedArgs(['--db'])).toThrow(/--db requires/);
+  });
+
+  it('refuses --apply combined with --limit — a partial rebuild must never be swapped in', () => {
+    // A limited rebuild drops ALL vectors but re-embeds only the first n
+    // memories, leaving the rest with stale embedding_model stamps and no
+    // vector. Applying that produces exactly the model-mismatch startup
+    // state this release exists to avoid. --limit stays a dry-run-only
+    // smoke-test knob.
+    expect(() => parseReembedArgs(['--apply', '--limit', '5'])).toThrow(/--limit.*--apply|--apply.*--limit/);
   });
 
   describe('guardApplySwap — the --apply live-client guard', () => {
@@ -101,8 +111,21 @@ describe('neuromcp-reembed', () => {
     it('passes on an idle database and leaves the WAL folded in', () => {
       const p = join(dir, 'idle.db');
       makeWalDb(p).close();
-      const verdict = guardApplySwap(Database, p, { attachedPids: () => [] });
+      const verdict = guardApplySwap(Database, p, { attachedPids: () => ({ available: true, pids: [] }) });
       expect(verdict.ok).toBe(true);
+    });
+
+    it('refuses when attachment detection is UNAVAILABLE — fail closed, not open', () => {
+      // lsof missing (minimal Linux) must not silently become "no clients":
+      // an attached-but-idle connection holds no SQLite lock, so the
+      // checkpoint probe alone cannot see it. Without detection the guard
+      // cannot establish safety and must refuse (--force remains the
+      // explicit override).
+      const p = join(dir, 'undetectable.db');
+      makeWalDb(p).close();
+      const verdict = guardApplySwap(Database, p, { attachedPids: () => ({ available: false, pids: [] }) });
+      expect(verdict.ok).toBe(false);
+      expect(String(verdict.reason)).toMatch(/cannot verify|lsof/i);
     });
 
     it('refuses while another connection holds an open read transaction', () => {
@@ -117,7 +140,7 @@ describe('neuromcp-reembed', () => {
         // More WAL content after the read mark, so TRUNCATE cannot complete.
         writer.prepare('INSERT INTO t (v) VALUES (?)').run('y');
         writer.prepare('INSERT INTO t (v) VALUES (?)').run('z');
-        const verdict = guardApplySwap(Database, p, { attachedPids: () => [] });
+        const verdict = guardApplySwap(Database, p, { attachedPids: () => ({ available: true, pids: [] }) });
         expect(verdict.ok).toBe(false);
         expect(String(verdict.reason)).toMatch(/busy|attached|client/i);
       } finally {
@@ -130,9 +153,53 @@ describe('neuromcp-reembed', () => {
     it('refuses when other processes have the database file open', () => {
       const p = join(dir, 'attached.db');
       makeWalDb(p).close();
-      const verdict = guardApplySwap(Database, p, { attachedPids: () => [4242] });
+      const verdict = guardApplySwap(Database, p, { attachedPids: () => ({ available: true, pids: [4242] }) });
       expect(verdict.ok).toBe(false);
       expect(String(verdict.reason)).toContain('4242');
+    });
+  });
+
+  describe('openSwapSentinel — detects writes between snapshot and swap', () => {
+    // Why this exists: --apply snapshots the database BEFORE the (possibly
+    // minutes-long) re-embed. A client can write during the rebuild and
+    // disconnect before the swap guard runs; the guard then sees an idle
+    // database and installs the stale snapshot — the interim writes survive
+    // only in the backup file. The sentinel holds a connection open across
+    // the whole operation: SQLite's data_version pragma changes on that
+    // connection exactly when ANOTHER connection commits.
+
+    it('reports no change when nobody wrote', () => {
+      const p = join(dir, 'sentinel-quiet.db');
+      const db = new Database(p);
+      db.pragma('journal_mode = WAL');
+      db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY)').run();
+      db.close();
+
+      const sentinel = openSwapSentinel(Database, p);
+      try {
+        expect(sentinel.changed()).toBe(false);
+        expect(sentinel.changed()).toBe(false);
+      } finally {
+        sentinel.close();
+      }
+    });
+
+    it('reports a change after another connection commits', () => {
+      const p = join(dir, 'sentinel-write.db');
+      const db = new Database(p);
+      db.pragma('journal_mode = WAL');
+      db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)').run();
+      db.close();
+
+      const sentinel = openSwapSentinel(Database, p);
+      try {
+        const writer = new Database(p);
+        writer.prepare('INSERT INTO t (v) VALUES (?)').run('interim write');
+        writer.close();
+        expect(sentinel.changed()).toBe(true);
+      } finally {
+        sentinel.close();
+      }
     });
   });
 

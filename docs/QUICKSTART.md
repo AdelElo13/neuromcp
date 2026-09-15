@@ -28,7 +28,15 @@ they are launched without a login PATH and usually cannot find `node`:
 } } }
 ```
 
-`npx neuromcp-init` writes exactly that form for you.
+`neuromcp-init` writes exactly that form for you — **from a permanent
+install**. Running it via bare `npx neuromcp-init` executes from npm's
+npx cache, which is garbage-collected: baking that path into a config
+would break later, so init then falls back to the PATH-dependent `npx`
+entry (with a warning) and the GUI problem remains. For GUI clients do:
+
+```bash
+npm install -g neuromcp && neuromcp-init
+```
 
 First run creates `~/.neuromcp/memory.db` automatically.
 

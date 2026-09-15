@@ -8,6 +8,8 @@ import {
   checkOllama,
   checkOnnxModel,
   checkDatabase,
+  checkBetterSqlite,
+  checkEmbeddingIndex,
   deriveEmbeddingRoute,
   aggregateExitCode,
   terminateChild,
@@ -147,6 +149,103 @@ describe('checkOnnxModel', () => {
     const result = checkOnnxModel({ exists });
     expect(result.status).toBe('warn');
     expect(result.info).toContain('node scripts/download-model.mjs');
+  });
+});
+
+describe('checkBetterSqlite — must exercise the NATIVE binding, not just the JS module', () => {
+  // Codex round-2 [P2]: importing better-sqlite3 succeeds even when the
+  // native binding is missing (`--ignore-scripts` install) — the binding
+  // only loads when a Database is constructed. The check has to construct
+  // one, or exactly the documented failure mode gets diagnosed as healthy.
+  it('constructs (and closes) a :memory: database as the smoke test', async () => {
+    const constructed: string[] = [];
+    const close = vi.fn();
+    class FakeDb {
+      constructor(path: string) { constructed.push(path); }
+      close(): void { close(); }
+    }
+    const { result, Database } = await checkBetterSqlite({
+      loadModule: () => Promise.resolve({ default: FakeDb }),
+    });
+    expect(result.status).toBe('ok');
+    expect(constructed).toContain(':memory:');
+    expect(close).toHaveBeenCalled();
+    expect(Database).toBe(FakeDb);
+  });
+
+  it('fails when the module imports but the native binding refuses to construct', async () => {
+    class BrokenDb {
+      constructor() { throw new Error('Could not locate the bindings file'); }
+    }
+    const { result, Database } = await checkBetterSqlite({
+      loadModule: () => Promise.resolve({ default: BrokenDb }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/bindings/i);
+    expect(Database).toBeNull();
+  });
+});
+
+describe('checkEmbeddingIndex — must apply the same rules as the runtime', () => {
+  // Fake Database whose prepare() routes on the SQL text: the vec-table DDL
+  // lookup and the stored-model aggregation are the two queries the check runs.
+  function fakeDbFor(indexDim: number | null, storedModels: Array<{ embedding_model: string; n: number }>) {
+    return class {
+      prepare(sql: string) {
+        if (sql.includes('sqlite_master')) {
+          return {
+            get: () =>
+              indexDim === null
+                ? undefined
+                : { sql: `CREATE VIRTUAL TABLE memories_vec USING vec0(id TEXT, embedding float[${indexDim}])` },
+          };
+        }
+        return { all: () => storedModels, get: () => undefined };
+      }
+      close(): void { /* noop */ }
+    };
+  }
+  const ok = { status: 'ok' } as const;
+  const baseDeps = { exists: () => true, home: '/home/x' };
+
+  it('reports matched when a reachable default provider fits width and stored model', () => {
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(384, [{ embedding_model: 'bge-small-en-v1.5', n: 5 }]),
+      ollamaResult: ok,
+      onnxResult: ok,
+      env: {},
+    });
+    expect(result.status).toBe('ok');
+    expect(result.info).toMatch(/onnx|bge/i);
+  });
+
+  it('does NOT count ONNX as a match when NEUROMCP_EMBEDDING_PROVIDER=ollama excludes it', () => {
+    // Codex round-2 [P2]: with an explicit provider the runtime will never
+    // select ONNX — a doctor that still says "matched by onnx" declares a
+    // degraded configuration healthy.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(384, [{ embedding_model: 'bge-small-en-v1.5', n: 5 }]),
+      ollamaResult: ok,
+      onnxResult: ok,
+      env: { NEUROMCP_EMBEDDING_PROVIDER: 'ollama' },
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/ollama/i);
+  });
+
+  it('fails on a stored-model mismatch even when the width matches', () => {
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(768, [{ embedding_model: 'some-custom-768d-model', n: 9 }]),
+      ollamaResult: ok,
+      onnxResult: ok,
+      env: {},
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/model/i);
+    expect(result.info).toMatch(/some-custom-768d-model/);
   });
 });
 
