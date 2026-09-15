@@ -3,7 +3,7 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.29.3] — unreleased
+## [0.29.3] — 2026-09-15
 
 Install-robustness release: switching embedding provider no longer bricks
 an existing database, the doctor always prints, GUI clients get a config
