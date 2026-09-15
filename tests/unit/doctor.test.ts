@@ -243,6 +243,10 @@ describe('checkOnnxModel', () => {
     // with the override set — and the package path does not exist either.
     expect(exists).not.toHaveBeenCalledWith('/home/x/.neuromcp/models/bge-small-en-v1.5.onnx');
     expect(result.status).toBe('warn');
+    // The message must name the path that was actually searched (the
+    // override), not the default cache it deliberately skipped.
+    expect(result.info).toContain('/custom/models');
+    expect(result.info).not.toContain('/home/x/.neuromcp/models');
   });
 
   it('honours NEUROMCP_MODEL_DIR — the runtime resolves the model there first', () => {
@@ -459,6 +463,26 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
     expect(result.info).toMatch(/unverified|verify/i);
   });
 
+  it('an explicit OpenAI-compatible CUSTOM model name is preserved, mirroring the factory rule', () => {
+    // Codex round-7 [P2]: the doctor replaced any non-text-embedding-*
+    // name with text-embedding-3-small; the factory keeps an explicit
+    // model as-is when the provider is explicitly openai — the runtime
+    // matched 'custom-embedding' at 1536d while the doctor failed it.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(1536, [{ embedding_model: 'custom-embedding', n: 4 }]),
+      ollamaProbe: null,
+      onnxResult: { status: 'warn' },
+      env: {
+        NEUROMCP_EMBEDDING_PROVIDER: 'openai',
+        NEUROMCP_EMBEDDING_MODEL: 'custom-embedding',
+        OPENAI_API_KEY: 'sk-test',
+      },
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).toContain('custom-embedding');
+  });
+
   it('an explicitly requested OpenAI provider is UNVERIFIABLE, not a proven mismatch', () => {
     // Codex round-5 [P2]: the runtime can match text-embedding-3-small
     // (1536d) while the doctor, which never probes OpenAI, declared
@@ -501,6 +525,7 @@ describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded o
       { status: 'warn' },
       { status: 'warn' },
       { model: 'nomic-embed-text', dimensions: null },
+      {},
     );
     expect(result.status).toBe('warn');
     expect(result.info).toMatch(/unverified|verify/i);
@@ -508,8 +533,28 @@ describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded o
   });
 
   it('still fails when there is truly no route at all (no probe, no ONNX)', () => {
-    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null);
+    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null, {});
     expect(result.status).toBe('fail');
+  });
+
+  it('an explicit provider FILTERS the route — ONNX does not count under NEUROMCP_EMBEDDING_PROVIDER=ollama', () => {
+    // Codex round-7 [P2]: explicit ollama + Ollama down + ONNX present
+    // reported "route ok: ONNX fallback", while the runtime with an
+    // explicit provider refuses to fall back and errors out.
+    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'ok' }, null, {
+      NEUROMCP_EMBEDDING_PROVIDER: 'ollama',
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/ollama/i);
+    expect(result.info).not.toMatch(/fallback only/i);
+  });
+
+  it('symmetrically: Ollama does not count under NEUROMCP_EMBEDDING_PROVIDER=onnx', () => {
+    const result = deriveEmbeddingRoute({ status: 'ok' }, { status: 'warn' }, { model: 'nomic-embed-text', dimensions: 768 }, {
+      NEUROMCP_EMBEDDING_PROVIDER: 'onnx',
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/onnx/i);
   });
 
   it('an OpenAI-eligible configuration is a warn route, not "no embedding route" (exit 2)', () => {
@@ -539,6 +584,7 @@ describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded o
       { status: 'ok' },
       { status: 'warn' },
       { model: 'all-minilm', dimensions: 384 },
+      {},
     );
     expect(result.status).toBe('ok');
     expect(result.info).toContain('all-minilm');
@@ -609,18 +655,18 @@ describe('checkDatabase', () => {
 
 describe('deriveEmbeddingRoute', () => {
   it('is ok when Ollama works', () => {
-    const result = deriveEmbeddingRoute({ status: 'ok' }, { status: 'warn' });
+    const result = deriveEmbeddingRoute({ status: 'ok' }, { status: 'warn' }, null, {});
     expect(result.status).toBe('ok');
   });
 
   it('is ok when only the ONNX fallback is available', () => {
-    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'ok' });
+    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'ok' }, null, {});
     expect(result.status).toBe('ok');
     expect(result.info).toContain('ONNX');
   });
 
   it('fails when no embedding route exists at all', () => {
-    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' });
+    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null, {});
     expect(result.status).toBe('fail');
   });
 });

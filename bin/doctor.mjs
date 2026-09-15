@@ -289,7 +289,7 @@ export function checkOnnxModel(deps = {}) {
   return {
     name,
     status: 'warn',
-    info: `missing at ${userModelPath} and ${modelPath} — no offline embedding fallback yet. ` +
+    info: `missing at ${userPath} and ${modelPath} — no offline embedding fallback yet. ` +
       `It is downloaded automatically on first use; to fetch it now run \`npx neuromcp-download-model\` ` +
       `(or \`node scripts/download-model.mjs\` in a checkout).`,
   };
@@ -457,10 +457,15 @@ export function checkEmbeddingIndex(deps) {
     // configuration makes OpenAI selectable, the honest verdict on a
     // non-matching index is "unverifiable", never "proven mismatch".
     if (requested === 'openai' || (requested === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '')) {
+      // Factory parity: with an EXPLICIT openai provider any configured
+      // model name is preserved; only the auto-cascade filters non-OpenAI
+      // looking names (they are almost certainly Ollama model names).
+      const explicitModel = env.NEUROMCP_EMBEDDING_MODEL;
       const openaiModel =
-        env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL.startsWith('text-embedding')
-          ? env.NEUROMCP_EMBEDDING_MODEL
-          : 'text-embedding-3-small';
+        explicitModel === undefined || explicitModel === '' || explicitModel === 'auto' ||
+        (requested === 'auto' && !explicitModel.startsWith('text-embedding'))
+          ? 'text-embedding-3-small'
+          : explicitModel;
       unverified.push({ provider: `openai ${openaiModel} (doctor cannot probe OpenAI)`, model: openaiModel });
     }
     if ((requested === 'auto' || requested === 'ollama') && ollamaProbe !== null) {
@@ -593,7 +598,13 @@ export function checkEmbeddingIndex(deps) {
  */
 export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = null, env = process.env) {
   const name = 'embedding route';
-  if (ollamaResult.status === 'ok') {
+  // An explicit provider FILTERS the route: the runtime refuses to fall
+  // back past an explicitly requested provider, so a reachable-but-
+  // ineligible one must not count (Codex round 7).
+  const requestedProvider = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
+  const ollamaEligible = requestedProvider === 'auto' || requestedProvider === 'ollama';
+  const onnxEligible = requestedProvider === 'auto' || requestedProvider === 'onnx';
+  if (ollamaEligible && ollamaResult.status === 'ok') {
     const fallback = onnxResult.status === 'ok' ? ' (+ ONNX offline fallback)' : '';
     // Report the MEASURED model and width when the probe has them — the
     // route summary claimed nomic/768 even for a measured 384d custom model.
@@ -603,10 +614,10 @@ export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = nul
         : 'ollama nomic-embed-text 768d';
     return { name, status: 'ok', info: `${route}${fallback}` };
   }
-  if (onnxResult.status === 'ok') {
+  if (onnxEligible && onnxResult.status === 'ok') {
     return { name, status: 'ok', info: 'ONNX 384d fallback only — see warnings above for the Ollama upgrade path' };
   }
-  if (ollamaProbe !== null && ollamaProbe.dimensions === null) {
+  if (ollamaEligible && ollamaProbe !== null && ollamaProbe.dimensions === null) {
     // A listed model whose width could not be measured is an UNVERIFIED
     // route, not a missing one — "no embedding route, exit 2" here dragged
     // the aggregate verdict to broken while the runtime may work fine.
@@ -620,16 +631,23 @@ export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = nul
   }
   // The doctor cannot probe OpenAI; when the configuration makes it
   // selectable, the route is unverifiable — not proven absent.
-  const requested = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
   const openaiEligible =
-    requested === 'openai' ||
-    (requested === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '');
+    requestedProvider === 'openai' ||
+    (requestedProvider === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '');
   if (openaiEligible) {
     return {
       name,
       status: 'warn',
       info: 'openai is configured and may serve embeddings, but the doctor cannot probe it — ' +
         'check the daemon log for the live verdict',
+    };
+  }
+  if (requestedProvider !== 'auto') {
+    return {
+      name,
+      status: 'fail',
+      info: `NEUROMCP_EMBEDDING_PROVIDER=${requestedProvider} is set but that provider is not usable — ` +
+        'the runtime will NOT fall back past an explicit provider. Fix that provider or unset the override.',
     };
   }
   return {

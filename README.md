@@ -246,8 +246,11 @@ neuromcp auto-detects it. No config needed.
 
 ## Installation
 
-The reliable way is `npx neuromcp-init` — it writes the entry below into
-every detected client config (with a backup first). The manual form is:
+The reliable way is `npm install -g neuromcp && neuromcp-init` — it
+writes the entry below into every detected client config (with a backup
+first). Run init from the permanent install, not via bare `npx`: from the
+npx cache it deliberately falls back to a PATH-dependent entry that GUI
+clients usually cannot resolve. The manual form is:
 
 ### Claude Code
 

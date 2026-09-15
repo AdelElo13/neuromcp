@@ -56,13 +56,35 @@ export function chooseTargetDir(env = process.env) {
   return USER_MODEL_DIR;
 }
 
+/**
+ * Runtime-parity existence check: NEUROMCP_MODEL_DIR REPLACES the default
+ * user cache (embeddings/model-cache.ts) — a model in the default cache is
+ * invisible to a runtime configured with the override, so it must not make
+ * this CLI report "already present" (Codex round 7).
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @param {{ userModelDir?: string, packageModelDir?: string }} [deps]
+ * @returns {string | null}
+ */
+export function resolveExistingModel(env = process.env, deps = {}) {
+  const { userModelDir = USER_MODEL_DIR, packageModelDir = PACKAGE_MODEL_DIR } = deps;
+  const override = env.NEUROMCP_MODEL_DIR;
+  const dirs =
+    override !== undefined && override !== ''
+      ? [override, packageModelDir]
+      : [userModelDir, packageModelDir];
+  for (const dir of dirs) {
+    const candidate = resolve(dir, MODEL_FILENAME);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 async function main() {
-  for (const dir of [USER_MODEL_DIR, PACKAGE_MODEL_DIR]) {
-    const existing = resolve(dir, MODEL_FILENAME);
-    if (existsSync(existing)) {
-      process.stderr.write(`[neuromcp] Model already present at ${existing}, skipping download.\n`);
-      return;
-    }
+  const existing = resolveExistingModel();
+  if (existing !== null) {
+    process.stderr.write(`[neuromcp] Model already present at ${existing}, skipping download.\n`);
+    return;
   }
 
   const targetDir = chooseTargetDir();
