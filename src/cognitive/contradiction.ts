@@ -47,6 +47,24 @@ function normalizePredicate(p: string): string {
  *     "the app" and "the mapping app" are different subjects). A false
  *     supersede silently deletes a true fact — a hallucination vector.
  */
+/**
+ * v0.29.5: an SVO object anchored to a calendar date or clock time
+ * ("run on 2026-09-14 …", "deploy at 03:00 …") describes an OCCURRENCE,
+ * not a state of the subject. Two occurrences on different dates are a
+ * time series, never a contradiction — the daily consolidation report
+ * ("Consolidation run on 2026-09-13 …" vs "… 2026-09-14 …") is exactly
+ * this. Only SVO verbs are affected; with the copula ("the meeting is on
+ * 2026-09-13") the date IS the state and a changed date is a real update.
+ */
+const BE_PREDICATES = new Set(['is', 'are', 'was', 'were']);
+const EVENT_ANCHORED_OBJECT =
+  /^(?:on|at|in|during|since|until|from|by)\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}:\d{2})\b/i;
+
+function isEventAnchored(predicate: string, object: string): boolean {
+  if (BE_PREDICATES.has(predicate.toLowerCase())) return false;
+  return EVENT_ANCHORED_OBJECT.test(object.trim());
+}
+
 export function predicatesAllowSupersede(newContent: string, existingContent: string): boolean {
   const newTriples = extractTriplesFromText(newContent);
   if (newTriples.length === 0) return false;
@@ -55,11 +73,13 @@ export function predicatesAllowSupersede(newContent: string, existingContent: st
 
   for (const nt of newTriples) {
     if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(nt.predicate.toLowerCase())) continue;
+    if (isEventAnchored(nt.predicate, nt.object)) continue;
     const ns = normalizeSubject(nt.subject);
     if (ns.length === 0) continue;
     const np = normalizePredicate(nt.predicate);
     for (const ot of oldTriples) {
       if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(ot.predicate.toLowerCase())) continue;
+      if (isEventAnchored(ot.predicate, ot.object)) continue;
       // Same predicate (normalized) required — additive facts across
       // different predicates must never auto-invalidate each other.
       if (np !== normalizePredicate(ot.predicate)) continue;

@@ -3,27 +3,39 @@ import type { Database } from 'better-sqlite3';
 import type { Logger } from '../observability/logger.js';
 import { applySchema, SCHEMA_VERSION } from './schema.js';
 import {
-  LEGACY_PROXY_TYPE, MEMORY_PROXY_TYPE, PROXY_NAME_PREFIX, proxyEntityName,
+  LEGACY_PROXY_TYPE, MEMORY_PROXY_TYPE, PROXY_NAME_PREFIX, legacyProxyEntityName,
 } from '../graph/memory-proxy.js';
 import { predicatesAllowSupersede } from '../cognitive/contradiction.js';
 
 /**
+ * A legacy proxy was INSERTed by ensureMemoryEntity() immediately before
+ * createContradictionEdge() wrote its first automatic 'contradicts'
+ * relation — same store() call, same JS tick. On the reference DB all 68
+ * proxies sit 0–40 ms before their first auto edge. A user entity that the
+ * system later reused as an edge endpoint predates that edge by minutes to
+ * days. 5 s is generous for a single synchronous store() and still three
+ * orders of magnitude below any human round-trip.
+ */
+const PROXY_CO_CREATION_WINDOW_S = 5;
+
+/**
  * v15 step 1: retype legacy contradiction-proxy entities from the free-form
- * type 'memory' to the reserved 'memory_proxy'. Only PROVEN proxies are
- * touched. An entity qualifies iff it carries the complete fingerprint the
- * pre-v0.29.5 ensureMemoryEntity() + createContradictionEdge() pair left
- * behind — all of:
+ * type 'memory' to the reserved 'memory_proxy'. An entity qualifies iff it
+ * carries the complete fingerprint the pre-v0.29.5 code left behind AND a
+ * provenance signal no reuse of a user entity can reproduce:
  *   1. legacy type 'memory' and the 'memory:' name prefix;
- *   2. linked with role 'subject' to a memory whose deterministic proxy
- *      name (proxyEntityName(content)) equals the entity name exactly;
- *   3. an endpoint of an AUTOMATIC 'contradicts' relation
- *      (metadata.auto = true — only createContradictionEdge writes that).
- * Look-alike user entities are left alone: "memory:working" of type
- * memory, an exact-name coincidence linked as 'mention', or one without an
- * auto contradicts edge. An entity that reproduces the whole fingerprint is
- * by construction indistinguishable from a proxy; the retype is recorded
- * as metadata.retyped_from so it can be reverted by hand. On the reference
- * DB all 68 legacy proxies satisfy the full fingerprint, 0 partially.
+ *   2. linked with role 'subject' to a memory whose legacy proxy name
+ *      (legacyProxyEntityName(content)) equals the entity name exactly;
+ *   3. CO-CREATED with an automatic 'contradicts' relation
+ *      (metadata.auto = true) that touches it: entity.created_at within
+ *      PROXY_CO_CREATION_WINDOW_S before that relation's created_at.
+ * Fingerprint alone proves use as an endpoint; the co-creation window is
+ * what proves origin (Codex PR-18 round 4 [P2]). Look-alike user entities
+ * — "memory:working", an exact-name coincidence linked as 'mention', or a
+ * user entity the system reused for an edge hours later — are left alone.
+ * The retype records metadata.retyped_from for hand-reversal and, because
+ * the legacy 60-character name let memories with the same opening share
+ * one proxy, EVERY matching memory is recorded (proxy_for_memory_ids).
  * Exported for the migration test.
  */
 export function retypeProvenMemoryProxies(db: Database): number {
@@ -38,26 +50,35 @@ export function retypeProvenMemoryProxies(db: Database): number {
           WHERE (r.source_entity_id = e.id OR r.target_entity_id = e.id)
             AND r.relation_type = 'contradicts'
             AND json_extract(r.metadata, '$.auto') = 1
+            AND (julianday(r.created_at) - julianday(e.created_at)) * 86400.0 BETWEEN 0 AND ?
        )
-  `).all(LEGACY_PROXY_TYPE, `${PROXY_NAME_PREFIX}%`) as Array<{
+     ORDER BY e.id, m.created_at
+  `).all(LEGACY_PROXY_TYPE, `${PROXY_NAME_PREFIX}%`, PROXY_CO_CREATION_WINDOW_S) as Array<{
     entity_id: string; name: string; memory_id: string; content: string;
   }>;
+
+  const matches = new Map<string, string[]>();
+  for (const row of rows) {
+    if (legacyProxyEntityName(row.content) !== row.name) continue;
+    const list = matches.get(row.entity_id) ?? [];
+    list.push(row.memory_id);
+    matches.set(row.entity_id, list);
+  }
 
   const update = db.prepare(`
     UPDATE entities
        SET entity_type = ?,
-           metadata = json_set(metadata, '$.proxy_for_memory_id', ?, '$.retyped_from', ?),
+           metadata = json_set(metadata,
+             '$.proxy_for_memory_id', ?,
+             '$.proxy_for_memory_ids', json(?),
+             '$.retyped_from', ?),
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE id = ? AND entity_type = ?
   `);
 
   let retyped = 0;
-  const seen = new Set<string>();
-  for (const row of rows) {
-    if (seen.has(row.entity_id)) continue;
-    if (proxyEntityName(row.content) !== row.name) continue;
-    update.run(MEMORY_PROXY_TYPE, row.memory_id, LEGACY_PROXY_TYPE, row.entity_id, LEGACY_PROXY_TYPE);
-    seen.add(row.entity_id);
+  for (const [entityId, memoryIds] of matches) {
+    update.run(MEMORY_PROXY_TYPE, memoryIds[0]!, JSON.stringify(memoryIds), LEGACY_PROXY_TYPE, entityId, LEGACY_PROXY_TYPE);
     retyped++;
   }
   return retyped;
@@ -68,25 +89,31 @@ export function retypeProvenMemoryProxies(db: Database): number {
  * rule would not create. Since v0.29.5 an edge requires claim-level
  * evidence (predicatesAllowSupersede); legacy edges were created on
  * keyword heuristics alone and feed explain.contradictions in every
- * search result. Only edges whose BOTH endpoints are proxies are judged —
- * there the two memories are known exactly (metadata.proxy_for_memory_id);
- * an edge touching a real entity is left as is. Soft delete (is_deleted =
- * 1, metadata.removed_by) — nothing is destroyed. Exported for the test.
+ * search result. Only edges whose BOTH endpoints are proxies are judged;
+ * an edge touching a real entity is left as is. Because a legacy proxy may
+ * represent several memories, ALL memories linked to each endpoint with
+ * role 'subject' are considered and the edge is kept if ANY pair carries
+ * evidence (Codex PR-18 round 4 [P2]). Soft delete (is_deleted = 1,
+ * metadata.removed_by) — nothing is destroyed. Exported for the test.
  */
 export function pruneUnsupportedAutoContradictions(db: Database): number {
-  const rows = db.prepare(`
-    SELECT r.id AS relation_id, ms.content AS source_content, mt.content AS target_content
+  const edges = db.prepare(`
+    SELECT r.id AS relation_id, r.source_entity_id AS source_id, r.target_entity_id AS target_id
       FROM relations r
       JOIN entities es ON es.id = r.source_entity_id AND es.entity_type = ?
       JOIN entities et ON et.id = r.target_entity_id AND et.entity_type = ?
-      JOIN memories ms ON ms.id = json_extract(es.metadata, '$.proxy_for_memory_id')
-      JOIN memories mt ON mt.id = json_extract(et.metadata, '$.proxy_for_memory_id')
      WHERE r.relation_type = 'contradicts' AND r.is_deleted = 0
        AND json_extract(r.metadata, '$.auto') = 1
   `).all(MEMORY_PROXY_TYPE, MEMORY_PROXY_TYPE) as Array<{
-    relation_id: string; source_content: string; target_content: string;
+    relation_id: string; source_id: string; target_id: string;
   }>;
 
+  const contentsOf = db.prepare(`
+    SELECT m.content AS content
+      FROM memory_entities me
+      JOIN memories m ON m.id = me.memory_id
+     WHERE me.entity_id = ? AND me.role = 'subject'
+  `);
   const remove = db.prepare(`
     UPDATE relations
        SET is_deleted = 1,
@@ -95,12 +122,14 @@ export function pruneUnsupportedAutoContradictions(db: Database): number {
   `);
 
   let pruned = 0;
-  for (const row of rows) {
-    const supported =
-      predicatesAllowSupersede(row.source_content, row.target_content) ||
-      predicatesAllowSupersede(row.target_content, row.source_content);
+  for (const edge of edges) {
+    const sources = (contentsOf.all(edge.source_id) as Array<{ content: string }>).map((r) => r.content);
+    const targets = (contentsOf.all(edge.target_id) as Array<{ content: string }>).map((r) => r.content);
+    // predicatesAllowSupersede is symmetric in its current form; one
+    // direction per pair suffices.
+    const supported = sources.some((s) => targets.some((t) => predicatesAllowSupersede(s, t)));
     if (supported) continue;
-    remove.run(row.relation_id);
+    remove.run(edge.relation_id);
     pruned++;
   }
   return pruned;

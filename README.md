@@ -634,8 +634,8 @@ Contradiction resolution is three-tier, and the two tiers that touch the
 graph require **claim-level evidence** — same subject, mutually-exclusive
 predicate (`is`, `uses`, `runs`, … see `src/config/predicate-classes.json`),
 different object: **supersede** (evidence + heuristic score > 0.5: old
-memory invalidated), **coexist** (evidence + score ≤ 0.5: both kept, linked
-via a `contradicts` graph edge), **flag** (heuristic signal only — numeric
+memory invalidated), **coexist** (evidence + score in (0.3, 0.5]: both
+kept, linked via a `contradicts` graph edge), **flag** (heuristic signal only — numeric
 difference, negation words — reported in the `store_memory` result for
 review, never materialised in the graph). Keyword heuristics alone can
 never invalidate a memory or assert a contradiction: a false one is a

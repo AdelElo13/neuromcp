@@ -10,7 +10,10 @@
  *
  * v0.29.5: proxies carry a RESERVED entity type so read paths can exclude
  * them exactly, instead of guessing from a free-form type or a name prefix
- * (both of which a user may legitimately choose — Codex PR-18 [P2]).
+ * (both of which a user may legitimately choose — Codex PR-18 [P2]), and
+ * the proxy name embeds the memory id so one proxy represents exactly one
+ * memory (the legacy 60-character name let memories with the same opening
+ * share a proxy — Codex PR-18 round 4 [P2]).
  */
 
 /** Reserved entity_type for contradiction-edge proxies. Rejected by create_entity. */
@@ -22,12 +25,23 @@ export const LEGACY_PROXY_TYPE = 'memory';
 /** Name prefix every proxy carries; kept for readability of the edge. */
 export const PROXY_NAME_PREFIX = 'memory:';
 
+function contentStem(content: string): string {
+  return content.slice(0, 60).replace(/[^\w\s-]/g, '').trim();
+}
+
 /**
- * Deterministic proxy name for a memory's content. This is the ONLY way a
- * proxy name is ever produced, so equality with this function's output for
- * a linked memory is structural proof that an entity is a proxy — the
- * migration that retypes legacy proxies relies on exactly that.
+ * Proxy name for a memory: readable stem + the memory id, so two memories
+ * can never share a proxy and a user name can only collide by copying the
+ * id on purpose.
  */
-export function proxyEntityName(content: string): string {
-  return `${PROXY_NAME_PREFIX}${content.slice(0, 60).replace(/[^\w\s-]/g, '').trim()}`;
+export function proxyEntityName(content: string, memoryId: string): string {
+  return `${PROXY_NAME_PREFIX}${contentStem(content)} #${memoryId.slice(0, 8)}`;
+}
+
+/**
+ * The pre-v0.29.5 derivation (stem only). The v15 migration uses it to
+ * recognise legacy proxies; nothing writes names in this form any more.
+ */
+export function legacyProxyEntityName(content: string): string {
+  return `${PROXY_NAME_PREFIX}${contentStem(content)}`;
 }

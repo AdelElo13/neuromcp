@@ -34,15 +34,17 @@ instead of the system's own plumbing.
   materialised as a graph edge or proxy entity. No producer-based gate
   (`source`/`category` are free-form input and stay irrelevant to the
   outcome).
-- **FIX: the claim extractor read the noun "run" as a verb.**
-  "Consolidation run on 2026-09-14 merged 1260 …" became the claim
-  `{Consolidation, run, "on 2026-09-14 …"}` — and `run` is a
-  mutually-exclusive predicate, so every daily consolidation report
-  contradicted the previous one *with* claim-level evidence and the bogus
-  edge reached `explain.contradictions` in search results. The SVO pattern
-  now applies subject/verb agreement: the bare form (`run`, `use`, `store`)
-  is a verb only after a plural or pronoun subject; after a singular noun it
-  is a noun and yields no claim.
+- **FIX: a date-anchored occurrence counted as a state claim.** The
+  daily consolidation report "Consolidation run on 2026-09-14 merged 1260 …"
+  parses as `{Consolidation, run, "on 2026-09-14 …"}`, and `run` is a
+  mutually-exclusive predicate — so every report contradicted the previous
+  one *with* claim-level evidence and the bogus edge reached
+  `explain.contradictions` in search results. The claim gate now treats an
+  SVO object that starts with a calendar date or clock time ("on
+  2026-09-14 …", "at 03:00 …") as an occurrence, not a state: two
+  occurrences on different dates are a time series. The copula is exempt
+  ("the meeting is on 2026-09-13" → "… 09-20" stays a real update). The
+  extractor itself is unchanged.
 - **FIX: `create_entity` on the name of a hidden proxy returned the proxy.**
   The name-based upsert now *promotes* such a proxy to the requested type
   (it keeps its memory link and edges, `metadata.promoted_from` records
@@ -53,17 +55,21 @@ instead of the system's own plumbing.
 - **Schema v15** (one transaction, after the usual pre-migration backup).
   Step 1 retypes legacy proxy entities from the free-form `memory` to
   `memory_proxy` — only on the complete fingerprint the old code left
-  behind: legacy type + `memory:` prefix, linked with role `subject` to a
-  memory whose deterministic proxy name equals the entity name, **and** an
-  endpoint of an *automatic* `contradicts` edge. Look-alike user entities
-  — "memory:working", an exact-name coincidence linked as `mention`, or one
-  without an automatic edge — are left alone; the retype is recorded as
-  `metadata.retyped_from` so it can be reverted by hand. Step 2 soft-deletes
-  legacy automatic `contradicts` edges between two proxies whose memories
-  carry no claim-level evidence under the current rule
-  (`metadata.removed_by = v15-no-claim-evidence`; nothing is destroyed) —
-  these were the edges still surfacing in `explain.contradictions`. On the
-  reference database: 68/68 proxies retyped, 0 partial matches.
+  behind (legacy type + `memory:` prefix, `subject` link to a memory whose
+  legacy proxy name equals the entity name) **plus** a provenance signal no
+  reuse of a user entity can reproduce: the entity was created within 5 s
+  before the automatic `contradicts` edge it belongs to — same `store()`
+  call (on the reference database: 0–40 ms for all 68). A user entity the
+  system reused as an edge endpoint hours later is left alone; so are
+  look-alikes without an automatic edge. The retype records
+  `metadata.retyped_from` and every memory the (legacy, 60-character)
+  proxy name stood for. Step 2 soft-deletes legacy automatic `contradicts`
+  edges between two proxies whose memories carry no claim-level evidence
+  under the current rule — judged over *all* memories each proxy stands
+  for, kept if any pair has evidence (`metadata.removed_by`; nothing is
+  destroyed). On the reference database: 68/68 proxies retyped, 0 partial
+  matches; `contradicts` edges 183 → 48. New proxies embed the memory id
+  in their name, so one proxy represents exactly one memory from now on.
 
 ### Docs
 
