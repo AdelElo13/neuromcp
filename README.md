@@ -9,7 +9,7 @@ neuromcp is the first **Sovereign Memory** layer for AI: an open-source MCP serv
 [![npm version](https://img.shields.io/npm/v/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![npm downloads](https://img.shields.io/npm/dw/neuromcp)](https://www.npmjs.com/package/neuromcp)
 [![license: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
-[![tests](https://img.shields.io/badge/tests-471%20passing-brightgreen)](./tests)
+[![CI](https://github.com/AdelElo13/neuromcp/actions/workflows/ci.yml/badge.svg)](https://github.com/AdelElo13/neuromcp/actions/workflows/ci.yml)
 
 ```bash
 npx neuromcp-init   # one command: detects your MCP clients, writes configs, sets up the wiki
@@ -18,6 +18,12 @@ npx neuromcp-init   # one command: detects your MCP clients, writes configs, set
 Or run the bare server without any setup: `npx neuromcp`. Something not
 working? `npx neuromcp-doctor` diagnoses the daemon, Ollama, embeddings
 and the database in one run.
+
+![neuromcp memory browser — entities, relations and a topic timeline, all read from your local SQLite](docs/assets/memory-browser.png)
+
+*The built-in memory browser: every entity and relation your agents have
+stored, as a force-directed graph you can drag, zoom and click — served from
+`localhost`, never from a cloud. See [Memory browser & Obsidian](#memory-browser--obsidian).*
 
 ## Why neuromcp
 
@@ -357,6 +363,42 @@ design inside that boundary. Uninstall: `npx neuromcp-enable-daemon --uninstall`
 }
 ```
 
+## Memory browser & Obsidian
+
+Memory you cannot see is memory you cannot trust. neuromcp ships two ways
+to look at what your agents actually know — both local, both read-only.
+
+### Built-in web view
+
+When the [shared daemon](#shared-daemon-recommended-when-you-run-multiple-clients)
+is running, open **`http://127.0.0.1:<port>/ui`** (default port 3200):
+
+- **Graph** — the top entities in a namespace and the relations between
+  them, as a force-directed canvas. Drag nodes, scroll to zoom, click a node
+  to list the memories linked to it (current memories only; superseded
+  ones are hidden unless you ask for them).
+- **Timeline** — type a topic and see how the facts about it evolved over
+  time, including which memory superseded which.
+
+The UI is a single page with no external assets (strict CSP, no CDN), and
+it is only served on loopback: bind the daemon to a non-loopback host and
+the `/ui` and `/api/*` routes are disabled entirely.
+
+### Obsidian graph of the wiki
+
+The wiki (`~/.neuromcp/wiki`) is plain Markdown, so it opens directly as an
+[Obsidian](https://obsidian.md) vault. Obsidian draws its graph from
+`[[wikilinks]]` while neuromcp keeps relationships in frontmatter, so run
+the bridge once (idempotent, `--dry-run` supported):
+
+```bash
+npx neuromcp-obsidian-bridge
+```
+
+`neuromcp-init-wiki` also seeds a minimal `wiki/.obsidian/` (colour groups
+per page type, no plugins) — **only if none exists**; an existing vault
+setup is never touched. Details: [docs/OBSIDIAN.md](docs/OBSIDIAN.md).
+
 ## MCP Surface
 
 **46 tools** across 8 families — the full auto-generated reference with
@@ -546,6 +588,20 @@ All via environment variables. Defaults work for most setups.
 
 Full history in [CHANGELOG.md](CHANGELOG.md). Recent highlights:
 
+- **v0.29** — *current-validity everywhere*: superseded memories are hidden
+  from every read path by default (`include_superseded` / `valid_at` to
+  opt in); built-in web memory browser with force-directed graph +
+  timeline; Obsidian bridge and non-destructive vault seed; cold-boot race
+  fix (daemon binds its port at process start); `neuromcp-doctor` and
+  `neuromcp-connect` find the daemon on its configured port; switching
+  embedding provider no longer bricks an existing database (`neuromcp-reembed`,
+  degraded mode); npm releases via Trusted Publishing (no tokens); graph
+  overview no longer polluted by the system's own contradiction plumbing.
+- **v0.28** — `neuromcp-init` one-command setup (detects clients, writes
+  configs with backups); `neuromcp-doctor` rebuilt as real triage;
+  auto-generated `docs/TOOLS.md` + `docs/BENCHMARK.md`; `examples/` client
+  configs; store-time namespace pushdown; entity prefix-merge now needs
+  evidence.
 - **v0.27** — security release: CWE-22 path-traversal fix in `wiki_ingest`,
   MCP-spec `Origin` validation on the daemon, `neuromcp-connect`
   boot-race-safe Claude Desktop bridge, runtime health-check hook.

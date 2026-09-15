@@ -3,6 +3,36 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.5] — 2026-09-15
+
+Graph-hygiene release: the knowledge graph shows your entities again
+instead of the system's own plumbing.
+
+### Fixed
+
+- **FIX: the graph overview (`query_graph` without a start node, `/api/graph`,
+  the web UI) was dominated by synthetic `memory:…` proxy entities.**
+  `createContradictionEdge` creates a proxy entity (`entity_type: memory`)
+  for every memory without an entity so a `contradicts` edge has endpoints.
+  On a real database half of all entities were such proxies, carrying 94%
+  of all relations — and because the overview ranked by raw degree, they
+  pushed every real project, person and tool out of the top-N. The overview
+  now excludes proxy entities and ignores `contradicts` edges when ranking.
+  Read-path fix: existing databases are clean immediately, no migration.
+- **FIX: the daily consolidation report tripped contradiction detection
+  against the previous day's report.** Reports are stored as `meta`
+  memories and differ only in date and counters, which is exactly what the
+  numeric-diff heuristic flags — every run added a bogus `contradicts` edge
+  and two proxy entities. `store_memory` no longer runs contradiction
+  detection for `category: meta` (system-generated time series, not
+  competing claims).
+
+### Docs
+
+- README: hero screenshot of the memory browser, new **Memory browser &
+  Obsidian** section, *What's new* brought up to v0.29, live CI badge
+  instead of a hard-coded test count.
+
 ## [0.29.4] — 2026-09-15
 
 ### Fixed
