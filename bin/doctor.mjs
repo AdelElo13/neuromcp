@@ -161,10 +161,11 @@ export async function checkOllama(deps = {}) {
   // match a tagged configuration (Codex round 4).
   /** @param {string} listed @param {string} wanted @returns {boolean} */
   const modelMatches = (listed, wanted) => {
-    if (listed === wanted) return true;
+    // Normalize BOTH sides to an explicit tag: `ollama run all-minilm`
+    // resolves to :latest specifically, so a listed :v2 must not satisfy
+    // an untagged configuration (the runtime's embed call would fail).
     const [listedBase, listedTag = 'latest'] = listed.split(':');
-    const [wantedBase, wantedTag] = wanted.split(':');
-    if (wantedTag === undefined) return listedBase === wantedBase;
+    const [wantedBase, wantedTag = 'latest'] = wanted.split(':');
     return listedBase === wantedBase && listedTag === wantedTag;
   };
   // The embed probe uses the RUNTIME's budget (a cold model load easily
@@ -256,7 +257,7 @@ function ollamaDownResult(name, host, reason) {
  * Check the offline ONNX fallback model that scripts/download-model.mjs
  * installs into <repo>/models/.
  *
- * @param {{ exists?: (p: string) => boolean, modelPath?: string, userModelPath?: string }} [deps]
+ * @param {{ exists?: (p: string) => boolean, modelPath?: string, userModelPath?: string, env?: Record<string, string | undefined> }} [deps]
  * @returns {CheckResult}
  */
 export function checkOnnxModel(deps = {}) {
@@ -264,9 +265,18 @@ export function checkOnnxModel(deps = {}) {
     exists = existsSync,
     modelPath = ONNX_MODEL_PATH,
     userModelPath = ONNX_USER_MODEL_PATH,
+    env = process.env,
   } = deps;
   const name = 'onnx fallback model';
-  for (const candidate of [userModelPath, modelPath]) {
+  // NEUROMCP_MODEL_DIR is where the runtime resolves the model FIRST
+  // (embeddings/model-cache.ts) — a doctor that never looks there calls a
+  // working custom-dir install route-less.
+  const customDir = env.NEUROMCP_MODEL_DIR;
+  const candidates =
+    customDir !== undefined && customDir !== ''
+      ? [resolve(customDir, MODEL_FILENAME), userModelPath, modelPath]
+      : [userModelPath, modelPath];
+  for (const candidate of candidates) {
     if (exists(candidate)) {
       return { name, status: 'ok', info: candidate };
     }
@@ -438,6 +448,16 @@ export function checkEmbeddingIndex(deps) {
     const available = [];
     /** @type {Array<{ provider: string, model: string }>} */
     const unverified = [];
+    // The doctor never probes OpenAI (no free probe exists). When the
+    // configuration makes OpenAI selectable, the honest verdict on a
+    // non-matching index is "unverifiable", never "proven mismatch".
+    if (requested === 'openai' || (requested === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '')) {
+      const openaiModel =
+        env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL.startsWith('text-embedding')
+          ? env.NEUROMCP_EMBEDDING_MODEL
+          : 'text-embedding-3-small';
+      unverified.push({ provider: `openai ${openaiModel} (doctor cannot probe OpenAI)`, model: openaiModel });
+    }
     if ((requested === 'auto' || requested === 'ollama') && ollamaProbe !== null) {
       // The probe carries the MEASURED width of the CONFIGURED model — a
       // nomic assumption here misdiagnosed every custom-model setup. A
@@ -491,6 +511,23 @@ export function checkEmbeddingIndex(deps) {
         info: `${indexDim}-dim index in ${dbPath}, matched by ${matching.provider}`,
       };
     }
+    if (unverified.length > 0) {
+      // Uncertainty outranks the hard verdicts below: an unverified
+      // candidate may be exactly the matching provider, so neither a
+      // measured same-width model mismatch nor a width mismatch is PROOF
+      // of a broken install while it is in play.
+      const mismatchNote = widthMatches.length > 0
+        ? ` (${widthMatches.map((a) => a.provider).join(' / ')} matches the width but not the stored model)`
+        : '';
+      return {
+        name,
+        status: 'warn',
+        info:
+          `${indexDim}-dim index in ${dbPath}; ${unverified.map((u) => u.provider).join(' / ')} could not be ` +
+          `verified (dimension UNVERIFIED)${mismatchNote} — the runtime may still match. ` +
+          `Retry, raise NEUROMCP_EMBED_TIMEOUT_MS, or check the daemon log for the live verdict.`,
+      };
+    }
     if (widthMatches.length > 0) {
       const stored = storedModels.map((m) => `"${m.embedding_model}" (${m.n})`).join(', ');
       return {
@@ -502,16 +539,6 @@ export function checkEmbeddingIndex(deps) {
           `same width, different model: the runtime starts DEGRADED rather than mixing vector spaces. ` +
           `Recovery: restore the original model, or rebuild with \`npx neuromcp-reembed\` (dry run) then ` +
           `\`npx neuromcp-reembed --apply\`.`,
-      };
-    }
-    if (unverified.length > 0) {
-      return {
-        name,
-        status: 'warn',
-        info:
-          `${indexDim}-dim index in ${dbPath}; ${unverified.map((u) => u.provider).join(' / ')} is reachable ` +
-          `but its dimension is UNVERIFIED (embed probe failed or timed out) — the runtime may still match. ` +
-          `Retry, raise NEUROMCP_EMBED_TIMEOUT_MS, or check the daemon log for the live verdict.`,
       };
     }
     const scope = requested === 'auto' ? '' : ` under NEUROMCP_EMBEDDING_PROVIDER=${requested}`;
@@ -566,6 +593,18 @@ export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = nul
   }
   if (onnxResult.status === 'ok') {
     return { name, status: 'ok', info: 'ONNX 384d fallback only — see warnings above for the Ollama upgrade path' };
+  }
+  if (ollamaProbe !== null && ollamaProbe.dimensions === null) {
+    // A listed model whose width could not be measured is an UNVERIFIED
+    // route, not a missing one — "no embedding route, exit 2" here dragged
+    // the aggregate verdict to broken while the runtime may work fine.
+    return {
+      name,
+      status: 'warn',
+      info: `ollama ${ollamaProbe.model} is listed but its dimension is UNVERIFIED ` +
+        '(embed probe failed or timed out) — the runtime may still work; ' +
+        'retry or raise NEUROMCP_EMBED_TIMEOUT_MS',
+    };
   }
   return {
     name,

@@ -172,6 +172,21 @@ describe('checkOllama — probes the CONFIGURED model and measures its dimension
     expect(result.info).toContain('ollama pull all-minilm:v2');
   });
 
+  it('an UNTAGGED config means :latest — a different listed tag is NOT a match', async () => {
+    // Codex round-5 [P3]: `ollama run all-minilm` resolves to :latest
+    // specifically; the runtime's embed probe fails when only :v2 is
+    // pulled. The doctor accepting any tag reported UNVERIFIED where the
+    // truthful diagnosis is "model missing, pull it".
+    const fetchImpl = tagsThenEmbed(['all-minilm:v2'], 384);
+    const { result, probe } = await checkOllama({
+      fetchImpl,
+      env: { NEUROMCP_EMBEDDING_MODEL: 'all-minilm' },
+    });
+    expect(result.status).toBe('warn');
+    expect(probe).toBeNull();
+    expect(result.info).toContain('ollama pull all-minilm');
+  });
+
   it('reports the model as UNVERIFIED (dimensions null) when the embed probe fails — not as absent', async () => {
     // Codex round-4 [P2]: a slow model (cold load) blew the 2s probe budget
     // and the doctor concluded "no embedding route" (exit 2) while the
@@ -211,6 +226,19 @@ describe('checkOllama — probes the CONFIGURED model and measures its dimension
 });
 
 describe('checkOnnxModel', () => {
+  it('honours NEUROMCP_MODEL_DIR — the runtime resolves the model there first', () => {
+    // Codex round-5 [P2]: the doctor only looked at the default user dir
+    // and the package dir; a model that lives only in the configured
+    // custom dir made a WORKING install look route-less.
+    const exists = vi.fn().mockImplementation((p: string) => String(p).startsWith('/custom/models'));
+    const result = checkOnnxModel({
+      exists,
+      env: { NEUROMCP_MODEL_DIR: '/custom/models' },
+    });
+    expect(result.status).toBe('ok');
+    expect(result.info).toContain('/custom/models');
+  });
+
   it('reports ok when the fallback model file exists', () => {
     const exists = vi.fn().mockReturnValue(true);
     const result = checkOnnxModel({ exists });
@@ -380,6 +408,38 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
     expect(result.status).toBe('fail');
   });
 
+  it('UNVERIFIED outranks a measured model-mismatch fail — uncertainty must soften the verdict', () => {
+    // Codex round-5 [P2]: a measured same-width wrong-model candidate
+    // (ONNX bge on an all-minilm index) returned FAIL before the
+    // unverified branch was reached — while the unverified Ollama probe
+    // could be exactly the matching model.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(384, [{ embedding_model: 'all-minilm', n: 7 }]),
+      ollamaProbe: { model: 'all-minilm', dimensions: null },
+      onnxResult: ok,
+      env: {},
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).toMatch(/unverified|verify/i);
+  });
+
+  it('an explicitly requested OpenAI provider is UNVERIFIABLE, not a proven mismatch', () => {
+    // Codex round-5 [P2]: the runtime can match text-embedding-3-small
+    // (1536d) while the doctor, which never probes OpenAI, declared
+    // DIMENSION MISMATCH with reembed advice. Unverifiable ≠ mismatched.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(1536, [{ embedding_model: 'text-embedding-3-small', n: 4 }]),
+      ollamaProbe: null,
+      onnxResult: { status: 'warn' },
+      env: { NEUROMCP_EMBEDDING_PROVIDER: 'openai', OPENAI_API_KEY: 'sk-test' },
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).toMatch(/openai/i);
+    expect(result.info).toMatch(/unverified|verify|cannot/i);
+  });
+
   it('warns (not fail) when the only candidate is listed but its dimension is UNVERIFIED', () => {
     // Codex round-4 [P2]: an unmeasured width is not proof of a mismatch.
     // The runtime may still match with its own (longer) embed budget, so
@@ -398,6 +458,25 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
 });
 
 describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded one', () => {
+  it('an UNVERIFIED ollama probe without ONNX is a warn, NOT "no embedding route" (exit 2)', () => {
+    // Codex round-5 [P2]: checkEmbeddingIndex learned to warn on an
+    // unverified probe, but THIS check still concluded "no embedding
+    // route at all — fail", dragging the aggregate exit code back to 2.
+    const result = deriveEmbeddingRoute(
+      { status: 'warn' },
+      { status: 'warn' },
+      { model: 'nomic-embed-text', dimensions: null },
+    );
+    expect(result.status).toBe('warn');
+    expect(result.info).toMatch(/unverified|verify/i);
+    expect(result.info).toMatch(/nomic-embed-text/);
+  });
+
+  it('still fails when there is truly no route at all (no probe, no ONNX)', () => {
+    const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null);
+    expect(result.status).toBe('fail');
+  });
+
   it('names the measured model and width when a probe is available', () => {
     // Codex round-4 [P3]: with a measured all-minilm 384d the summary
     // still claimed "ollama nomic-embed-text 768d".
