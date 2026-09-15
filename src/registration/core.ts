@@ -209,7 +209,9 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
     inputSchema: {},
   }, async () => {
     const result = await backfillEmbeddings(db, vecStore, embedder, logger, metrics);
-    return textResult(result);
+    // Degraded runs return {embedded: 0} — the notice says WHY, otherwise
+    // this is indistinguishable from "nothing needed backfilling".
+    return textResult(withDegradedNotice(embedder, result));
   });
 
   server.registerTool('search_all', {

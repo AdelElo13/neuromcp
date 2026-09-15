@@ -22,6 +22,7 @@ import {
   buildBackupPath,
   readVecDimension,
   rebuildIndex,
+  guardApplySwap,
 } from '../../bin/reembed.mjs';
 
 class FakeEmbedder {
@@ -72,12 +73,67 @@ describe('neuromcp-reembed', () => {
   });
 
   it('parses its flags', () => {
-    expect(parseReembedArgs([])).toEqual({ db: null, apply: false, keepCopy: false, limit: null, help: false });
+    expect(parseReembedArgs([])).toEqual({ db: null, apply: false, keepCopy: false, limit: null, help: false, force: false });
     expect(parseReembedArgs(['--apply', '--limit', '5'])).toMatchObject({ apply: true, limit: 5 });
     expect(parseReembedArgs(['--db', '/tmp/x.db'])).toMatchObject({ db: '/tmp/x.db' });
+    expect(parseReembedArgs(['--apply', '--force'])).toMatchObject({ apply: true, force: true });
     expect(() => parseReembedArgs(['--limit', 'zero'])).toThrow(/positive integer/);
     expect(() => parseReembedArgs(['--nope'])).toThrow(/unknown flag/);
     expect(() => parseReembedArgs(['--db'])).toThrow(/--db requires/);
+  });
+
+  describe('guardApplySwap — the --apply live-client guard', () => {
+    // Why this exists: --apply backs the original up with copyFileSync and
+    // then renames the rebuilt copy over it. A client that is still attached
+    // keeps writing to the OLD inode — those writes vanish silently. The
+    // guard (a) folds pending WAL into the main file so the backup copy is
+    // complete, and (b) refuses to swap while another connection is actively
+    // reading/writing (wal_checkpoint(TRUNCATE) reports busy).
+
+    function makeWalDb(path: string): InstanceType<typeof Database> {
+      const db = new Database(path);
+      db.pragma('journal_mode = WAL');
+      db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)').run();
+      db.prepare('INSERT INTO t (v) VALUES (?)').run('x');
+      return db;
+    }
+
+    it('passes on an idle database and leaves the WAL folded in', () => {
+      const p = join(dir, 'idle.db');
+      makeWalDb(p).close();
+      const verdict = guardApplySwap(Database, p, { attachedPids: () => [] });
+      expect(verdict.ok).toBe(true);
+    });
+
+    it('refuses while another connection holds an open read transaction', () => {
+      const p = join(dir, 'busy.db');
+      const writer = makeWalDb(p);
+      const reader = new Database(p);
+      // A half-consumed iterator keeps a read transaction (and its WAL read
+      // mark) open on the reader connection.
+      const cursor = reader.prepare('SELECT * FROM t').iterate();
+      try {
+        cursor.next();
+        // More WAL content after the read mark, so TRUNCATE cannot complete.
+        writer.prepare('INSERT INTO t (v) VALUES (?)').run('y');
+        writer.prepare('INSERT INTO t (v) VALUES (?)').run('z');
+        const verdict = guardApplySwap(Database, p, { attachedPids: () => [] });
+        expect(verdict.ok).toBe(false);
+        expect(String(verdict.reason)).toMatch(/busy|attached|client/i);
+      } finally {
+        cursor.return?.(undefined);
+        reader.close();
+        writer.close();
+      }
+    });
+
+    it('refuses when other processes have the database file open', () => {
+      const p = join(dir, 'attached.db');
+      makeWalDb(p).close();
+      const verdict = guardApplySwap(Database, p, { attachedPids: () => [4242] });
+      expect(verdict.ok).toBe(false);
+      expect(String(verdict.reason)).toContain('4242');
+    });
   });
 
   it('resolves the database path from the flag, then the env, then the default', () => {

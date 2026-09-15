@@ -27,6 +27,7 @@
  *   npx neuromcp-reembed --keep-copy         # dry run, but leave the copy on disk
  */
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 import { existsSync, copyFileSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -37,7 +38,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
 
 /**
- * @typedef {{ db: string | null, apply: boolean, keepCopy: boolean, limit: number | null, help: boolean }} ReembedArgs
+ * @typedef {{ db: string | null, apply: boolean, keepCopy: boolean, limit: number | null, help: boolean, force: boolean }} ReembedArgs
  */
 
 /**
@@ -46,11 +47,12 @@ const REPO_ROOT = resolve(HERE, '..');
  */
 export function parseReembedArgs(argv) {
   /** @type {ReembedArgs} */
-  const out = { db: null, apply: false, keepCopy: false, limit: null, help: false };
+  const out = { db: null, apply: false, keepCopy: false, limit: null, help: false, force: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--apply') out.apply = true;
     else if (arg === '--keep-copy') out.keepCopy = true;
+    else if (arg === '--force') out.force = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else if (arg === '--db') {
       const v = argv[++i];
@@ -62,10 +64,94 @@ export function parseReembedArgs(argv) {
       if (!Number.isInteger(n) || n <= 0) throw new Error('--limit requires a positive integer');
       out.limit = n;
     } else {
-      throw new Error(`unknown flag: ${arg} (use --db, --apply, --keep-copy, --limit)`);
+      throw new Error(`unknown flag: ${arg} (use --db, --apply, --keep-copy, --limit, --force)`);
     }
   }
   return out;
+}
+
+/**
+ * PIDs of OTHER processes that currently have the database file open,
+ * via `lsof -t` (macOS/Linux). Empty when lsof is unavailable or reports
+ * nothing — the caller still runs the checkpoint probe in that case.
+ *
+ * @param {string} dbPath
+ * @param {number} [selfPid]
+ * @returns {number[]}
+ */
+export function listAttachedPids(dbPath, selfPid = process.pid) {
+  let stdout = '';
+  try {
+    stdout = execFileSync('lsof', ['-t', '--', dbPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    // lsof exits 1 when no process has the file open, and may be missing
+    // entirely (minimal Linux) — both mean "nothing detected here".
+    return [];
+  }
+  return stdout
+    .split('\n')
+    .map((line) => Number(line.trim()))
+    .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== selfPid);
+}
+
+/**
+ * Refuse to swap the rebuilt copy in while the original database is still in
+ * use. A client that stays attached across the swap keeps writing to the OLD
+ * inode — those writes silently vanish. Two layers, both best-effort:
+ *
+ *   1. `lsof` names other processes holding the file open (covers idle
+ *      clients that hold no lock).
+ *   2. `wal_checkpoint(TRUNCATE)` refuses while any connection is actively
+ *      reading/writing — and on success it has folded the pending WAL into
+ *      the main file, so the `copyFileSync` backup that follows is complete.
+ *
+ * @param {new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }} Database
+ * @param {string} dbPath
+ * @param {{ attachedPids?: (p: string) => number[] }} [deps]
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function guardApplySwap(Database, dbPath, deps = {}) {
+  const { attachedPids = listAttachedPids } = deps;
+
+  let pids = [];
+  try {
+    pids = attachedPids(dbPath);
+  } catch {
+    // detection layer unavailable — the checkpoint probe below still runs
+  }
+  if (pids.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `other processes still have the database open (pid ${pids.join(', ')}) — ` +
+        'stop every neuromcp client (Claude Desktop / Claude Code / Codex / the daemon) first',
+    };
+  }
+
+  const db = new Database(dbPath);
+  try {
+    const rows = db.pragma('wal_checkpoint(TRUNCATE)');
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    const busy =
+      row !== null && typeof row === 'object' && typeof (/** @type {{busy?: unknown}} */ (row).busy) === 'number'
+        ? /** @type {{busy: number}} */ (row).busy
+        : 1;
+    if (busy !== 0) {
+      return {
+        ok: false,
+        reason:
+          'the database is busy (another connection is reading or writing) — ' +
+          'stop every neuromcp client first',
+      };
+    }
+    return { ok: true };
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /**
@@ -223,7 +309,7 @@ function printHelp() {
 neuromcp-reembed — rebuild the vector index for a new embedding provider
 
 Usage:
-  neuromcp-reembed [--db <path>] [--apply] [--keep-copy] [--limit <n>]
+  neuromcp-reembed [--db <path>] [--apply] [--keep-copy] [--limit <n>] [--force]
 
   (no flags)    dry run: rebuild on a COPY, report, delete the copy
   --apply       rebuild on a copy, then swap it in (original kept as
@@ -231,9 +317,11 @@ Usage:
   --keep-copy   dry run but leave the rebuilt copy on disk for inspection
   --limit <n>   only embed the first n memories (smoke test)
   --db <path>   database to work on (default: $NEUROMCP_DB_PATH or ~/.neuromcp/memory.db)
+  --force       skip the live-client guard on --apply (NOT recommended)
 
 Stop every neuromcp client (Claude Desktop / Claude Code / Codex / the daemon)
-before running with --apply.
+before running with --apply. The swap refuses (exit 3) while another process
+still has the database open or a connection is actively reading/writing.
 `);
 }
 
@@ -330,6 +418,22 @@ async function main() {
     }
     process.exit(0);
     return;
+  }
+
+  // Refuse the swap while a client is still attached (writes since the copy
+  // would silently land in the renamed-away inode). On success this has also
+  // folded the WAL into the file, so the backup below is complete.
+  if (!args.force) {
+    const verdict = guardApplySwap(Database, dbPath);
+    if (verdict.ok !== true) {
+      process.stderr.write(
+        `\n✗ not swapping: ${verdict.reason}.\n` +
+          `  Nothing was changed. The rebuilt copy is kept at:\n  ${copyPath}\n` +
+          '  Stop the clients and re-run with --apply (or add --force to override).\n\n',
+      );
+      process.exit(3);
+      return;
+    }
   }
 
   const backupPath = buildBackupPath(dbPath);

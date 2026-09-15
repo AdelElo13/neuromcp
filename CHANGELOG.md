@@ -58,6 +58,19 @@ depends on an install script.
   with SQLite's backup API; default run is a dry run, `--apply` swaps it in
   and keeps the original as `<db>.pre-reembed-<timestamp>`. `--limit` for a
   smoke test, `--keep-copy` to inspect the result first.
+- **`neuromcp-reembed --apply` refuses to swap under a live client.** A
+  client still attached across the swap keeps writing to the renamed-away
+  inode — those writes would vanish silently. Two-layer guard before the
+  swap: `lsof` names other processes holding the file open, and
+  `wal_checkpoint(TRUNCATE)` refuses while a connection is actively
+  reading/writing (on success it has also folded the pending WAL into the
+  file, making the backup complete). Refusal is exit 3, keeps the rebuilt
+  copy, changes nothing; `--force` overrides.
+- Degraded mode is also visible on `backfill_embeddings` results — a
+  degraded run returns `{embedded: 0}` with the `neuromcp_notice`
+  explaining WHY, instead of looking identical to "nothing to backfill".
+  The whole degraded tool surface (store / search / stats / backfill) is
+  now pinned by an MCP-client-level test over the in-memory transport.
 - **`neuromcp-download-model`** — manual fetch of the ONNX fallback model
   for machines where install scripts are disabled.
 - **`neuromcp-doctor check --json`** — machine-readable report
