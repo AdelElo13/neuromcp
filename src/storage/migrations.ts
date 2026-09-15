@@ -120,7 +120,7 @@ export function pruneUnsupportedAutoContradictions(db: Database): number {
   }>;
 
   const contentsOf = db.prepare(`
-    SELECT m.content AS content
+    SELECT m.content AS content, m.created_at AS created_at
       FROM memory_entities me
       JOIN memories m ON m.id = me.memory_id
      WHERE me.entity_id = ? AND me.role = 'subject'
@@ -134,11 +134,16 @@ export function pruneUnsupportedAutoContradictions(db: Database): number {
 
   let pruned = 0;
   for (const edge of edges) {
-    const sources = (contentsOf.all(edge.source_id) as Array<{ content: string }>).map((r) => r.content);
-    const targets = (contentsOf.all(edge.target_id) as Array<{ content: string }>).map((r) => r.content);
+    type Row = { content: string; created_at: string };
+    const sources = contentsOf.all(edge.source_id) as Row[];
+    const targets = contentsOf.all(edge.target_id) as Row[];
     // predicatesAllowSupersede is symmetric in its current form; one
-    // direction per pair suffices.
-    const supported = sources.some((s) => targets.some((t) => predicatesAllowSupersede(s, t)));
+    // direction per pair suffices. Recording moments are passed so a
+    // dated RECORD ("run on 2026-06-13", stored that day) is told apart
+    // from a PLAN with a future date.
+    const supported = sources.some((s) => targets.some((t) =>
+      predicatesAllowSupersede(s.content, t.content, { newRecordedAt: s.created_at, existingRecordedAt: t.created_at }),
+    ));
     if (supported) continue;
     remove.run(edge.relation_id);
     pruned++;

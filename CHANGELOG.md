@@ -42,14 +42,19 @@ instead of the system's own plumbing.
   parses as `{Consolidation, run, "on 2026-09-14 …"}`, and `run` is a
   mutually-exclusive predicate — so every report contradicted the previous
   one *with* claim-level evidence and the bogus edge reached
-  `explain.contradictions` in search results. The claim gate now compares
-  the calendar date an SVO object is anchored to ("on 2026-09-14 …"):
-  two occurrences on *different* dates are a time series, not a
-  contradiction. Deliberately narrow — only full dates anchor (IP
-  addresses and clock times do not; a recurring schedule is a state), the
-  same date with different values is still a contradiction, and the
-  copula is exempt ("the meeting is on 2026-09-13" → "… 09-20" stays a
-  real update). The extractor itself is unchanged.
+  `explain.contradictions` in search results. The claim gate now tells a
+  *record* from a *plan*: an SVO object anchored to a full calendar date
+  ("run on 2026-06-13: …") that does not lie after the moment its memory
+  was recorded is a record of an occurrence, and two records on
+  *different* dates are a time series, not a contradiction. A date after
+  the recording moment is a plan ("the migration runs on 2026-09-20
+  exactly once") — a state a different date genuinely contradicts.
+  Deliberately narrow: only full dates anchor (IP addresses and clock
+  times do not; a recurring schedule is a state), anchors are
+  canonicalised so `14/09/2026` equals `2026-09-14`, the same date with
+  different values is still a contradiction, unknown recording moments
+  never exempt, and the copula is exempt ("the meeting is on 2026-09-13"
+  → "… 09-20" stays a real update). The extractor itself is unchanged.
 - **FIX: `create_entity` on the name of a hidden proxy returned the proxy.**
   The name-based upsert now *promotes* such a proxy to the requested type
   (it keeps its memory link and edges, `metadata.promoted_from` records

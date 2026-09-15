@@ -56,8 +56,9 @@ function ensureMemoryEntity(
 
   if (memory === undefined) return null;
 
-  // Deterministic name + RESERVED type + back-reference, so read paths can
-  // exclude proxies exactly and a migration can prove legacy ones.
+  // Deterministic name (with the memory id) + RESERVED type + back-reference,
+  // so read paths exclude proxies exactly; legacy proxies without these
+  // markers are recognised by migration v15 on their full fingerprint.
   const name = proxyEntityName(memory.content, memoryId);
   const entity = upsertEntity(db, name, MEMORY_PROXY_TYPE, namespace, {
     proxy_for_memory_id: memoryId,
