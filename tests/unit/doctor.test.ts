@@ -226,6 +226,25 @@ describe('checkOllama — probes the CONFIGURED model and measures its dimension
 });
 
 describe('checkOnnxModel', () => {
+  it('NEUROMCP_MODEL_DIR REPLACES the default user cache — runtime parity, not augmentation', () => {
+    // Codex round-6 [P2]: the runtime's userModelDir() returns the
+    // override INSTEAD OF ~/.neuromcp/models. A doctor that still finds a
+    // model in the default cache reports a route the runtime cannot see.
+    const exists = vi
+      .fn()
+      .mockImplementation((p: string) => String(p) === '/home/x/.neuromcp/models/bge-small-en-v1.5.onnx');
+    const result = checkOnnxModel({
+      exists,
+      env: { NEUROMCP_MODEL_DIR: '/custom/models' },
+      userModelPath: '/home/x/.neuromcp/models/bge-small-en-v1.5.onnx',
+      modelPath: '/nonexistent/pkg/models/bge-small-en-v1.5.onnx',
+    });
+    // Default user cache has the file, but the runtime will not look there
+    // with the override set — and the package path does not exist either.
+    expect(exists).not.toHaveBeenCalledWith('/home/x/.neuromcp/models/bge-small-en-v1.5.onnx');
+    expect(result.status).toBe('warn');
+  });
+
   it('honours NEUROMCP_MODEL_DIR — the runtime resolves the model there first', () => {
     // Codex round-5 [P2]: the doctor only looked at the default user dir
     // and the package dir; a model that lives only in the configured
@@ -408,6 +427,22 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
     expect(result.status).toBe('fail');
   });
 
+  it('an unverified candidate whose KNOWN MODEL is already incompatible does NOT soften the verdict', () => {
+    // Codex round-6 [P2]: stored all-minilm, measured ONNX bge (mismatch),
+    // unverified Ollama candidate is nomic-embed-text — its NAME already
+    // rules it out regardless of width, so "the runtime may still match"
+    // is false and the honest verdict is the hard model-mismatch fail.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(384, [{ embedding_model: 'all-minilm', n: 7 }]),
+      ollamaProbe: { model: 'nomic-embed-text', dimensions: null },
+      onnxResult: ok,
+      env: {},
+    });
+    expect(result.status).toBe('fail');
+    expect(result.info).toMatch(/model/i);
+  });
+
   it('UNVERIFIED outranks a measured model-mismatch fail — uncertainty must soften the verdict', () => {
     // Codex round-5 [P2]: a measured same-width wrong-model candidate
     // (ONNX bge on an all-minilm index) returned FAIL before the
@@ -475,6 +510,26 @@ describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded o
   it('still fails when there is truly no route at all (no probe, no ONNX)', () => {
     const result = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null);
     expect(result.status).toBe('fail');
+  });
+
+  it('an OpenAI-eligible configuration is a warn route, not "no embedding route" (exit 2)', () => {
+    // Codex round-6 [P2]: checkEmbeddingIndex learned OpenAI, but the
+    // route summary still failed a runtime-matched openai setup.
+    const explicit = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null, {
+      NEUROMCP_EMBEDDING_PROVIDER: 'openai',
+      OPENAI_API_KEY: 'sk-test',
+    });
+    expect(explicit.status).toBe('warn');
+    expect(explicit.info).toMatch(/openai/i);
+
+    const auto = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null, {
+      OPENAI_API_KEY: 'sk-test',
+    });
+    expect(auto.status).toBe('warn');
+
+    // Without a key, auto cannot reach OpenAI either — fail stands.
+    const noKey = deriveEmbeddingRoute({ status: 'warn' }, { status: 'warn' }, null, {});
+    expect(noKey.status).toBe('fail');
   });
 
   it('names the measured model and width when a probe is available', () => {

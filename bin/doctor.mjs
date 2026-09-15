@@ -271,11 +271,16 @@ export function checkOnnxModel(deps = {}) {
   // NEUROMCP_MODEL_DIR is where the runtime resolves the model FIRST
   // (embeddings/model-cache.ts) — a doctor that never looks there calls a
   // working custom-dir install route-less.
+  // Runtime parity (embeddings/model-cache.ts userModelDir): the override
+  // REPLACES the default user cache — it does not come on top of it. A
+  // model that only lives in the default cache is invisible to a runtime
+  // configured with NEUROMCP_MODEL_DIR.
   const customDir = env.NEUROMCP_MODEL_DIR;
-  const candidates =
+  const userPath =
     customDir !== undefined && customDir !== ''
-      ? [resolve(customDir, MODEL_FILENAME), userModelPath, modelPath]
-      : [userModelPath, modelPath];
+      ? resolve(customDir, MODEL_FILENAME)
+      : userModelPath;
+  const candidates = [userPath, modelPath];
   for (const candidate of candidates) {
     if (exists(candidate)) {
       return { name, status: 'ok', info: candidate };
@@ -511,7 +516,13 @@ export function checkEmbeddingIndex(deps) {
         info: `${indexDim}-dim index in ${dbPath}, matched by ${matching.provider}`,
       };
     }
-    if (unverified.length > 0) {
+    // Uncertainty only counts for a candidate that could still match: its
+    // width is unknown, but its MODEL NAME is known — a stored-model
+    // conflict already rules it out regardless of width (Codex round 6).
+    const openUnverified = unverified.filter(
+      (u) => mixAllowed || storedModels.every((m) => m.embedding_model === u.model),
+    );
+    if (openUnverified.length > 0) {
       // Uncertainty outranks the hard verdicts below: an unverified
       // candidate may be exactly the matching provider, so neither a
       // measured same-width model mismatch nor a width mismatch is PROOF
@@ -523,7 +534,7 @@ export function checkEmbeddingIndex(deps) {
         name,
         status: 'warn',
         info:
-          `${indexDim}-dim index in ${dbPath}; ${unverified.map((u) => u.provider).join(' / ')} could not be ` +
+          `${indexDim}-dim index in ${dbPath}; ${openUnverified.map((u) => u.provider).join(' / ')} could not be ` +
           `verified (dimension UNVERIFIED)${mismatchNote} — the runtime may still match. ` +
           `Retry, raise NEUROMCP_EMBED_TIMEOUT_MS, or check the daemon log for the live verdict.`,
       };
@@ -577,9 +588,10 @@ export function checkEmbeddingIndex(deps) {
  * @param {Pick<CheckResult, 'status'>} ollamaResult
  * @param {Pick<CheckResult, 'status'>} onnxResult
  * @param {{ model: string, dimensions: number | null } | null} [ollamaProbe]
+ * @param {Record<string, string | undefined>} [env]
  * @returns {CheckResult}
  */
-export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = null) {
+export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = null, env = process.env) {
   const name = 'embedding route';
   if (ollamaResult.status === 'ok') {
     const fallback = onnxResult.status === 'ok' ? ' (+ ONNX offline fallback)' : '';
@@ -604,6 +616,20 @@ export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = nul
       info: `ollama ${ollamaProbe.model} is listed but its dimension is UNVERIFIED ` +
         '(embed probe failed or timed out) — the runtime may still work; ' +
         'retry or raise NEUROMCP_EMBED_TIMEOUT_MS',
+    };
+  }
+  // The doctor cannot probe OpenAI; when the configuration makes it
+  // selectable, the route is unverifiable — not proven absent.
+  const requested = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
+  const openaiEligible =
+    requested === 'openai' ||
+    (requested === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '');
+  if (openaiEligible) {
+    return {
+      name,
+      status: 'warn',
+      info: 'openai is configured and may serve embeddings, but the doctor cannot probe it — ' +
+        'check the daemon log for the live verdict',
     };
   }
   return {
