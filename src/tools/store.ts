@@ -244,8 +244,13 @@ export async function storeMemory(
 
   // Step 4: Contradiction detection (Phase 3). Vector-based — skipped in
   // degraded mode rather than attempted and logged as a failure per store.
+  // v0.29.5: also skipped for `meta` memories. Those are system-generated
+  // reports (the daily consolidation summary) that differ from the previous
+  // one only in date and counters — a time series, not competing claims.
+  // The numeric-diff heuristic flagged every run as a contradiction and
+  // polluted the graph with a synthetic proxy entity per report.
   let contradictions: readonly Contradiction[] = [];
-  if (!degraded) {
+  if (!degraded && category !== 'meta') {
     try {
       contradictions = await detectContradictions(
         input.content, namespace, db, vecStore, embedder, config.contradictionThreshold,

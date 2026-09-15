@@ -123,15 +123,23 @@ export function queryGraph(
     const isAll = namespace === '*';
     const nsClause = isAll ? '1=1' : 'e.namespace = ?';
     const nsParams: string[] = isAll ? [] : [namespace];
+    // v0.29.5 graph hygiene: synthetic `memory:<content>` proxies
+    // (entity_type 'memory', manufactured by createContradictionEdge so a
+    // 'contradicts' edge has endpoints) are plumbing, not knowledge — they
+    // are excluded from the overview, and 'contradicts' edges do not count
+    // toward the degree ranking. Before this, on a real DB half the entities
+    // were proxies carrying 94% of all relations, so the top-N showed nothing
+    // but "memory:Consolidation run on …" nodes.
     const entityRows = db.prepare(`
       SELECT e.*,
              (SELECT COUNT(*) FROM memory_entities me
               WHERE me.entity_id = e.id) AS memory_count,
              (SELECT COUNT(*) FROM relations r
               WHERE (r.source_entity_id = e.id OR r.target_entity_id = e.id)
-                AND r.is_deleted = 0) AS degree
+                AND r.is_deleted = 0
+                AND r.relation_type <> 'contradicts') AS degree
       FROM entities e
-      WHERE ${nsClause} AND e.is_deleted = 0
+      WHERE ${nsClause} AND e.is_deleted = 0 AND e.entity_type <> 'memory'
       ORDER BY degree DESC, e.updated_at DESC
       LIMIT ?
     `).all(...nsParams, overviewLimit) as Array<Entity & { memory_count: number; degree: number }>;

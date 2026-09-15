@@ -70,6 +70,47 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
     expect(result.mode).toBeUndefined();
   });
 
+  // v0.29.5 graph hygiene. On a real DB 68/137 entities were synthetic
+  // `memory:<content>` proxies (entity_type 'memory') manufactured by
+  // createContradictionEdge, carrying 183/194 relations — all 'contradicts'.
+  // Ranking by raw degree let those proxies push every real entity out of
+  // the top-N, so the web UI graph showed nothing but "memory:Consolidation…".
+  it('excludes synthetic memory: proxy entities from the overview', () => {
+    upsertEntity(ctx.db, 'Alice', 'person', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-14 merged 260', 'memory', 'default');
+
+    const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(result.nodes.map((n) => n.entity.name)).toEqual(['Alice']);
+  });
+
+  it('does not count contradicts edges toward the degree ranking', () => {
+    const a = upsertEntity(ctx.db, 'Alice', 'person', 'default');
+    const b = upsertEntity(ctx.db, 'Bob', 'person', 'default');
+    const c = upsertEntity(ctx.db, 'Carol', 'person', 'default');
+    const d = upsertEntity(ctx.db, 'Dave', 'person', 'default');
+    // Bob: one real edge (knows Carol) → degree 1.
+    createRelation({
+      source_entity_id: b.id, target_entity_id: c.id,
+      relation_type: 'knows', namespace: 'default',
+    }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    // Alice: two edges, but both 'contradicts' → degree 0 for ranking.
+    createRelation({
+      source_entity_id: a.id, target_entity_id: c.id,
+      relation_type: 'contradicts', namespace: 'default',
+    }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    createRelation({
+      source_entity_id: a.id, target_entity_id: d.id,
+      relation_type: 'contradicts', namespace: 'default',
+    }, ctx.db, ctx.config, noopLogger, noopMetrics);
+
+    const result = queryGraph({ limit: 2 }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    const names = result.nodes.map((n) => n.entity.name);
+    expect(names).toContain('Bob');
+    expect(names).toContain('Carol');
+    expect(names).not.toContain('Alice');
+  });
+
   it('respects limit parameter', () => {
     for (let i = 0; i < 10; i++) {
       upsertEntity(ctx.db, `Person${i}`, 'person', 'default');
