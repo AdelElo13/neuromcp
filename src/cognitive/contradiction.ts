@@ -77,13 +77,24 @@ const EVENT_ANCHOR =
  * as day/month/year; an impossible month or day yields no anchor.
  */
 function canonicalDate(token: string): string | null {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(token)) return token;
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(token);
-  if (m === null) return null;
-  const day = Number(m[1]);
-  const month = Number(m[2]);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  return `${m[3]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  let year: number;
+  let month: number;
+  let day: number;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(token);
+  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(token);
+  if (iso !== null) {
+    year = Number(iso[1]); month = Number(iso[2]); day = Number(iso[3]);
+  } else if (dmy !== null) {
+    day = Number(dmy[1]); month = Number(dmy[2]); year = Number(dmy[3]);
+  } else {
+    return null;
+  }
+  // A real calendar date only (Codex PR-18 round 7): "2026-00-13" and
+  // "31/02/2026" are not anchors. Date.UTC normalises overflow, so the
+  // round-trip check catches every impossible month/day incl. leap years.
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  if (utc.getUTCFullYear() !== year || utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 /** The canonical calendar date an SVO object is anchored to, or null. */
@@ -94,13 +105,21 @@ function eventAnchor(predicate: string, object: string): string | null {
 }
 
 /**
- * An anchored claim is a RECORD of an occurrence only when its date does
- * not lie after the moment the memory was recorded ("run on 2026-06-13"
- * stored on 2026-06-13). A date after the recording moment is a PLAN
- * ("the migration runs on 2026-09-20 exactly once", stored 2026-09-15) —
- * a state of the subject that a later, different date genuinely
+ * An anchored claim is a RECORD of an occurrence when its date does not
+ * lie after the day the memory was recorded ("run on 2026-06-13" stored
+ * on 2026-06-13). A date after the recording day is a PLAN ("the
+ * migration runs on 2026-09-20 exactly once", stored 2026-09-15) — a
+ * state of the subject that a later, different date genuinely
  * contradicts (Codex PR-18 round 6). Without a recording moment the
  * claim is treated as a plan, i.e. never exempted.
+ *
+ * This is a DEFINITION over stored data, with one boundary no stored fact
+ * can decide (Codex PR-18 round 7): a plan recorded ON its own planned
+ * day ("runs on 2026-06-13 exactly once", stored 2026-06-13) reads as a
+ * record. Two such same-day-stored plan versions with different dates are
+ * then reported as 'flag' instead of an edge. Nothing in the database
+ * separates that memory from a report of the same day; a future
+ * explicit occurrence time on the memory (memories.happened_at) would.
  */
 function isRecordedOccurrence(anchor: string, recordedAt: string | undefined): boolean {
   if (recordedAt === undefined || recordedAt.length < 10) return false;

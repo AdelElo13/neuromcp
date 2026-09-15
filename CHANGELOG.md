@@ -51,10 +51,14 @@ instead of the system's own plumbing.
   exactly once") — a state a different date genuinely contradicts.
   Deliberately narrow: only full dates anchor (IP addresses and clock
   times do not; a recurring schedule is a state), anchors are
-  canonicalised so `14/09/2026` equals `2026-09-14`, the same date with
-  different values is still a contradiction, unknown recording moments
-  never exempt, and the copula is exempt ("the meeting is on 2026-09-13"
-  → "… 09-20" stays a real update). The extractor itself is unchanged.
+  canonicalised so `14/09/2026` equals `2026-09-14` (impossible calendar
+  dates never anchor), the same date with different values is still a
+  contradiction, unknown recording moments never exempt, and the copula
+  is exempt ("the meeting is on 2026-09-13" → "… 09-20" stays a real
+  update). One boundary is a definition, not a fact the database can
+  decide: a plan recorded on its own planned day reads as a record, so
+  two such same-day-stored plan versions are reported as `flag` rather
+  than linked. The extractor itself is unchanged.
 - **FIX: `create_entity` on the name of a hidden proxy returned the proxy.**
   The name-based upsert now *promotes* such a proxy to the requested type
   (it keeps its memory link and edges, `metadata.promoted_from` records

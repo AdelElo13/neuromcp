@@ -76,6 +76,43 @@ describe('predicatesAllowSupersede — date-anchored SVO objects', () => {
     )).toBe(true);
   });
 
+  it('impossible calendar dates do not anchor (round-7 nit): the pair still contradicts', () => {
+    expect(predicatesAllowSupersede(
+      'Consolidation run on 2026-00-13 merged 260',
+      'Consolidation run on 2026-06-12 merged 258',
+      { newRecordedAt: '2026-06-13T03:00:00.000Z', existingRecordedAt: '2026-06-12T03:00:00.000Z' },
+    )).toBe(true);
+    expect(predicatesAllowSupersede(
+      'the batch run on 31/02/2026 wrote 12 files',
+      'the batch run on 27/02/2026 wrote 10 files',
+      { newRecordedAt: '2026-03-01T00:00:00.000Z', existingRecordedAt: '2026-02-27T12:00:00.000Z' },
+    )).toBe(true);
+    // Leap day is a real date.
+    expect(predicatesAllowSupersede(
+      'the batch run on 29/02/2028 wrote 12 files',
+      'the batch run on 28/02/2028 wrote 10 files',
+      { newRecordedAt: '2028-02-29T23:00:00.000Z', existingRecordedAt: '2028-02-28T23:00:00.000Z' },
+    )).toBe(false);
+  });
+
+  it('DEFINITION BOUNDARY: a plan recorded on its own planned day reads as a record (documented, round 7)', () => {
+    // No stored fact separates "runs on 2026-06-13 exactly once" stored on
+    // 2026-06-13 from a report of that day's run. Two such same-day-stored
+    // versions are therefore a time series under the rule (→ 'flag').
+    expect(predicatesAllowSupersede(
+      'The migration runs on 2026-06-14 exactly once',
+      'The migration runs on 2026-06-13 exactly once',
+      { newRecordedAt: '2026-06-14T08:00:00.000Z', existingRecordedAt: '2026-06-13T08:00:00.000Z' },
+    )).toBe(false);
+    // The moment either version is recorded BEFORE its date it is a plan
+    // again and the pair contradicts.
+    expect(predicatesAllowSupersede(
+      'The migration runs on 2026-06-14 exactly once',
+      'The migration runs on 2026-06-13 exactly once',
+      { newRecordedAt: '2026-06-13T20:00:00.000Z', existingRecordedAt: '2026-06-13T08:00:00.000Z' },
+    )).toBe(true);
+  });
+
   it('without recording moments nothing is exempted (conservative default)', () => {
     expect(predicatesAllowSupersede(
       'Consolidation run on 2026-09-14 merged 1260 decayed 97',
