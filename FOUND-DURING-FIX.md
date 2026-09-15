@@ -566,17 +566,29 @@ een eigen taak — niet hier tracken.)
 ## [2026-07-07] Gevonden tijdens web-view graph-hardening (P3)
 - **Graph node `memory_count` overtelt vs current/linked memories.** `queryGraph` (src/tools/graph.ts:128) telt ALLE `memory_entities`-rijen voor een entity, inclusief links naar getombstonede (is_deleted=1) memories. Voorbeeld live: entity "Consolidation" badge=8, maar slechts 1 levende memory via de join (7 links wijzen naar deleted memories). Gevolg: node-badge in de web-view kan hoger zijn dan wat `/api/entity/:id/memories` (current, non-deleted) teruggeeft — verwarrend maar niet fout. Root cause: tombstone/hard-delete ruimt `memory_entities`-rijen niet op. Fix-opties: (a) queryGraph `memory_count` joinen op `memories m WHERE m.is_deleted=0`, of (b) tombstone/sweep de bijbehorende memory_entities-rijen laten verwijderen. Severity P3 (cosmetisch/telling, geen dataverlies of verkeerd antwoord). Buiten scope van de graph-view PR.
 
-## [2026-09-15] Gevonden tijdens v0.29.5 graph hygiene (P2)
-- **Contradiction-detector `coexist` vuurt op semantisch ongerelateerde paren.**
-  `src/cognitive/contradiction.ts:107-160` — bij similarity > `contradictionThreshold`
-  (0.82) volstaat een numeriek verschil (+0.4) voor `coexist` (score > 0.35). Live
-  bewijs in `~/.neuromcp/memory.db`: edges van 2026-09-15 op 0.82–0.85 tussen
-  `/api/embed-probe` ⟷ `wiki:neuromcp 2026-07-08 batch 13 — code review v028`, en
-  ⟷ `arch`. 183/194 relaties in die DB zijn `contradicts`, bijna alle `coexist`.
-  De v0.29-predicaatpoort beschermt alleen `supersede`; `coexist`/`flag` hebben
-  géén claim-level check. Gevolg: `explain.contradictions` in search-results toont
-  ruis aan downstream LLM's (hallucinatie-vector, zie project-pitfall). Fix-optie:
-  `coexist` ook door `predicatesAllowSupersede`-achtige subject-match laten gaan, of
-  numeric-diff alleen laten tellen als beide teksten hetzelfde subject delen.
-  v0.29.5 fixt alleen de `source: consolidation`-bron en het overview-ranking; dit is de resterende
-  oorzaak. Severity P2 (correctheid van explain-output, geen dataverlies).
+## [2026-09-15] Gevonden tijdens v0.29.5 graph hygiene
+
+- **[OPGELOST in v0.29.5] `coexist` vuurde op semantisch ongerelateerde paren.**
+  Was: bij similarity > 0.82 volstond een numeriek verschil (+0.4) voor
+  `coexist`; alleen `supersede` liep door de predicaat-poort. Live bewijs:
+  edges op 0.82–0.85 tussen `/api/embed-probe` ⟷ `wiki:neuromcp 2026-07-08
+  batch 13` en ⟷ `arch`. Fix: `coexist` én `supersede` vereisen nu
+  claim-bewijs (zelfde subject, mutually-exclusive predicaat, ander object);
+  zonder bewijs → `flag`, dat wél in het store-resultaat staat maar géén
+  graph-edge/proxy meer maakt (`src/cognitive/contradiction.ts`,
+  `src/tools/store.ts` stap 9).
+
+- **P3 — claims-extractor leest het zelfstandig naamwoord "run" als
+  predicaat.** `extractTriplesFromText('Consolidation run on 2026-09-14 merged
+  1260 …')` → `{subject: "Consolidation", predicate: "run", object: "on
+  2026-09-14 merged 1260 …"}`; "run" staat in `predicate-classes.json`
+  (mutually_exclusive), dus het dagelijkse consolidatie-rapport krijgt
+  (spurious) claim-bewijs en blijft een `coexist`-edge + twee `memory_proxy`-
+  entiteiten per run produceren. Sinds v0.29.5 zijn die proxies onzichtbaar
+  in de overview (gereserveerd type), dus het is opslag-ruis, geen
+  zichtbaar productgebrek. Fix-richting: in `src/cognitive/claims.ts` een
+  predicaat pas accepteren als het token als werkwoord staat (bv. niet direct
+  na een hoofdletter-subject zonder hulpwerkwoord, of via een kleine
+  noun-blacklist voor "run/build/test" wanneer gevolgd door "on <datum>").
+  Bewust NIET gefixt met een producent-gate (source/category zijn vrij
+  invoerbaar — Codex PR-18 [P2], twee rondes). Severity P3.

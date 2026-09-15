@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { existsSync, unlinkSync } from 'node:fs';
 import { openDatabase, closeDatabase } from '../../src/storage/database.js';
 import { SCHEMA_VERSION } from '../../src/storage/schema.js';
-import { runMigrations } from '../../src/storage/migrations.js';
+import { runMigrations, retypeProvenMemoryProxies } from '../../src/storage/migrations.js';
 import { createLogger } from '../../src/observability/logger.js';
+import { MEMORY_PROXY_TYPE, proxyEntityName } from '../../src/graph/memory-proxy.js';
 
 function tmpDbPath(): string {
   return join(tmpdir(), `neuromcp-mig-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
@@ -190,5 +191,54 @@ describe('runMigrations', () => {
     // Version recorded as v13 (= SCHEMA_VERSION)
     const ver = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
     expect(ver.v).toBe(SCHEMA_VERSION);
+  });
+
+  it('v15: retypes PROVEN legacy contradiction proxies only, on structural evidence', () => {
+    const dbPath = tmpDbPath();
+    cleanupPaths.push(dbPath);
+    const db = openDatabase(dbPath);
+    runMigrations(db, dbPath, logger);
+
+    // Simulate a v14 database: two memories, one legacy proxy per memory
+    // (type 'memory', name derived from the content — exactly what the
+    // pre-v0.29.5 createContradictionEdge wrote) …
+    const reportA = 'Consolidation run on 2026-09-13 merged 258 decayed 2255 pruned 0';
+    const reportB = 'Consolidation run on 2026-09-14 merged 260 decayed 2100 pruned 3';
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('m-a', 'h-a', ?)").run(reportA);
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('m-b', 'h-b', ?)").run(reportB);
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('p-a', ?, 'memory', 'default')").run(proxyEntityName(reportA));
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('p-b', ?, 'memory', 'default')").run(proxyEntityName(reportB));
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-a', 'p-a', 'subject')").run();
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-b', 'p-b', 'subject')").run();
+    // … plus two user entities that merely LOOK like proxies: one unlinked,
+    // one linked to a memory whose derived name differs.
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('u-1', 'memory:working', 'memory', 'default')").run();
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('u-2', 'memory:scratch notes', 'memory', 'default')").run();
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-a', 'u-2', 'mention')").run();
+
+    db.prepare('DELETE FROM schema_version').run();
+    db.prepare(
+      "INSERT INTO schema_version (version, applied_at, description) VALUES (14, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'simulated v14')",
+    ).run();
+
+    runMigrations(db, dbPath, logger);
+
+    const typeOf = (id: string): string =>
+      (db.prepare('SELECT entity_type FROM entities WHERE id = ?').get(id) as { entity_type: string }).entity_type;
+    expect(typeOf('p-a')).toBe(MEMORY_PROXY_TYPE);
+    expect(typeOf('p-b')).toBe(MEMORY_PROXY_TYPE);
+    expect(typeOf('u-1')).toBe('memory');
+    expect(typeOf('u-2')).toBe('memory');
+
+    const meta = JSON.parse(
+      (db.prepare('SELECT metadata FROM entities WHERE id = ?').get('p-a') as { metadata: string }).metadata,
+    ) as { proxy_for_memory_id?: string };
+    expect(meta.proxy_for_memory_id).toBe('m-a');
+
+    const ver = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
+    expect(ver.v).toBe(SCHEMA_VERSION);
+
+    // Idempotent: a second run retypes nothing.
+    expect(retypeProvenMemoryProxies(db)).toBe(0);
   });
 });

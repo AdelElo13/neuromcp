@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, teardownTestDb, type TestContext } from '../helpers/index.js';
-import { queryGraph, createRelation } from '../../src/tools/graph.js';
+import { queryGraph, createRelation, createEntity } from '../../src/tools/graph.js';
 import { upsertEntity } from '../../src/graph/entities.js';
+import { MEMORY_PROXY_TYPE } from '../../src/graph/memory-proxy.js';
 import type { Logger } from '../../src/observability/logger.js';
 import type { Metrics } from '../../src/observability/metrics.js';
 
@@ -71,28 +72,36 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
   });
 
   // v0.29.5 graph hygiene. On a real DB 68/137 entities were synthetic
-  // `memory:<content>` proxies (entity_type 'memory') manufactured by
-  // createContradictionEdge, carrying 183/194 relations — all 'contradicts'.
-  // Ranking by raw degree let those proxies push every real entity out of
-  // the top-N, so the web UI graph showed nothing but "memory:Consolidation…".
-  it('excludes synthetic memory: proxy entities from the overview', () => {
+  // proxies manufactured by createContradictionEdge, carrying 183/194
+  // relations — all 'contradicts'. Ranking by raw degree let those proxies
+  // push every real entity out of the top-N, so the web UI graph showed
+  // nothing but "memory:Consolidation…". Proxies now carry the RESERVED
+  // type memory_proxy; that is the only thing the overview filters on.
+  it('excludes reserved memory_proxy entities from the overview', () => {
     upsertEntity(ctx.db, 'Alice', 'person', 'default');
-    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', 'memory', 'default');
-    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-14 merged 260', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-14 merged 260', MEMORY_PROXY_TYPE, 'default');
 
     const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
     expect(result.nodes.map((n) => n.entity.name)).toEqual(['Alice']);
   });
 
-  it('keeps a user-created entity of type memory that is not a proxy (Codex PR-18 P2)', () => {
-    // 'memory' is a free-form entity_type; only the type+prefix combination
-    // createContradictionEdge produces is plumbing. A user's own
-    // "Working memory" entity must stay visible.
+  it('keeps user entities that merely LOOK like proxies (Codex PR-18 P2, rounds 1+2)', () => {
+    // Both a free-form type 'memory' and a 'memory:' name prefix are things
+    // a user may legitimately choose; neither may hide their entity.
     upsertEntity(ctx.db, 'Working memory', 'memory', 'default');
-    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:working', 'memory', 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default');
 
     const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
-    expect(result.nodes.map((n) => n.entity.name)).toEqual(['Working memory']);
+    expect(result.nodes.map((n) => n.entity.name).sort()).toEqual(['Working memory', 'memory:working']);
+  });
+
+  it('create_entity rejects the reserved memory_proxy type', () => {
+    expect(() =>
+      createEntity({ name: 'sneaky', entity_type: MEMORY_PROXY_TYPE }, ctx.db, ctx.config, noopLogger, noopMetrics),
+    ).toThrow(/reserved/);
+    expect(ctx.db.prepare("SELECT COUNT(*) AS n FROM entities WHERE name = 'sneaky'").get()).toEqual({ n: 0 });
   });
 
   it('does not count contradicts edges toward the degree ranking', () => {

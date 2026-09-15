@@ -2,6 +2,49 @@ import { existsSync, unlinkSync } from 'node:fs';
 import type { Database } from 'better-sqlite3';
 import type { Logger } from '../observability/logger.js';
 import { applySchema, SCHEMA_VERSION } from './schema.js';
+import {
+  LEGACY_PROXY_TYPE, MEMORY_PROXY_TYPE, PROXY_NAME_PREFIX, proxyEntityName,
+} from '../graph/memory-proxy.js';
+
+/**
+ * v15: retype legacy contradiction-proxy entities from the free-form type
+ * 'memory' to the reserved 'memory_proxy'. Only PROVEN proxies are touched:
+ * an entity qualifies iff it is linked to a memory whose deterministic
+ * proxy name (proxyEntityName(content)) equals the entity name exactly —
+ * the one way such a name is ever produced. A user's own entity that
+ * merely looks like one ("memory:working", type memory) is left alone.
+ * Exported for the migration test.
+ */
+export function retypeProvenMemoryProxies(db: Database): number {
+  const rows = db.prepare(`
+    SELECT e.id AS entity_id, e.name AS name, m.id AS memory_id, m.content AS content
+      FROM entities e
+      JOIN memory_entities me ON me.entity_id = e.id
+      JOIN memories m ON m.id = me.memory_id
+     WHERE e.entity_type = ? AND e.name LIKE ?
+  `).all(LEGACY_PROXY_TYPE, `${PROXY_NAME_PREFIX}%`) as Array<{
+    entity_id: string; name: string; memory_id: string; content: string;
+  }>;
+
+  const update = db.prepare(`
+    UPDATE entities
+       SET entity_type = ?,
+           metadata = json_set(metadata, '$.proxy_for_memory_id', ?),
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = ? AND entity_type = ?
+  `);
+
+  let retyped = 0;
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.entity_id)) continue;
+    if (proxyEntityName(row.content) !== row.name) continue;
+    update.run(MEMORY_PROXY_TYPE, row.memory_id, row.entity_id, LEGACY_PROXY_TYPE);
+    seen.add(row.entity_id);
+    retyped++;
+  }
+  return retyped;
+}
 
 /**
  * Run an idempotent ALTER TABLE ... ADD COLUMN. Swallows ONLY the
@@ -314,6 +357,13 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
     db.prepare(
       'UPDATE memories SET effective_importance = importance WHERE effective_importance IS NULL',
     ).run();
+    applySchema(db);
+  }
+
+  if (currentVersion < 15) {
+    logger.info('migrations', 'Running v14 to v15 migration: retype proven contradiction-proxy entities to memory_proxy');
+    const retyped = retypeProvenMemoryProxies(db);
+    logger.info('migrations', 'v15: proxy entities retyped', { retyped });
     applySchema(db);
   }
 

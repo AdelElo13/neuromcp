@@ -135,19 +135,20 @@ export async function detectContradictions(
     const signals = computeContradictionSignals(contentLower, existingLower);
 
     if (signals.score > 0.3) {
-      // Resolution ladder: strong signal → supersede, medium → coexist, weak → flag
-      let resolution: 'supersede' | 'coexist' | 'flag' =
-        signals.score > 0.5 ? 'supersede' :
-        signals.score > 0.35 ? 'coexist' : 'flag';
-
       // Predicate-class gate: keyword heuristics alone (negation words,
-      // numeric diffs) are NOT enough to invalidate a memory. Auto-supersede
-      // requires claim-level evidence — same subject, mutually-exclusive
-      // predicate, different object. Otherwise downgrade to coexist so both
-      // memories survive and a human/LLM can adjudicate.
-      if (resolution === 'supersede' && !predicatesAllowSupersede(content, existing.content)) {
-        resolution = 'coexist';
-      }
+      // numeric diffs) are NOT enough to assert a contradiction. Both
+      // 'supersede' (old memory invalidated) and 'coexist' (both kept,
+      // linked by a 'contradicts' edge) require claim-level evidence — same
+      // subject, mutually-exclusive predicate, different object. Without
+      // it the result is 'flag': reported to the caller for review, never
+      // materialised in the graph. v0.29.5 extended the gate from
+      // 'supersede' only to 'coexist' as well — the heuristic alone linked
+      // "/api/embed-probe" to "wiki batch 13 code review" at similarity
+      // 0.85 and every daily consolidation report to the previous one.
+      const claimEvidence = predicatesAllowSupersede(content, existing.content);
+      const resolution: 'supersede' | 'coexist' | 'flag' =
+        !claimEvidence ? 'flag' :
+        signals.score > 0.5 ? 'supersede' : 'coexist';
 
       contradictions.push({
         existing_id: existing.id,

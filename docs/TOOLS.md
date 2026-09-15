@@ -174,7 +174,7 @@ Create or update an entity in the knowledge graph. Entities represent concepts, 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | yes | Entity name |
-| `entity_type` | string | no | Entity type (default: "concept"). Examples: person, tool, project, concept, package, url |
+| `entity_type` | string | no | Entity type (default: "concept"). Examples: person, tool, project, concept, package, url. "memory_proxy" is reserved and rejected. |
 | `namespace` | string | no | Namespace (default: config default) |
 | `metadata` | record | no | Arbitrary metadata |
 
@@ -195,7 +195,7 @@ Create a typed relation between two entities in the knowledge graph. Supports te
 
 ### `query_graph`
 
-Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries. Without entity_id/entity_name it returns an OVERVIEW: the top-N entities of the namespace ranked by number of relations (contradicts edges not counted), with the relations among them; synthetic memory:* proxy entities that only back contradicts edges are excluded from the overview.
+Traverse the knowledge graph starting from an entity. Returns connected nodes and edges up to max_depth hops. Supports temporal queries. Without entity_id/entity_name it returns an OVERVIEW: the top-N entities of the namespace ranked by number of relations (contradicts edges not counted), with the relations among them; internal memory_proxy entities that only back contradicts edges are excluded from the overview.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

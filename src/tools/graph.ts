@@ -6,6 +6,7 @@ import type { Entity, Relation, GraphQueryResult, GraphNode, GraphEdge } from '.
 import { upsertEntity, searchEntities } from '../graph/entities.js';
 import { createRelation as createRel } from '../graph/relations.js';
 import { traverseGraph } from '../graph/traverse.js';
+import { MEMORY_PROXY_TYPE } from '../graph/memory-proxy.js';
 
 // ─── create_entity ──────────────────────────────────────────────────
 export interface CreateEntityInput {
@@ -24,6 +25,11 @@ export function createEntity(
 ): Entity {
   const namespace = input.namespace ?? config.defaultNamespace;
   const entityType = input.entity_type ?? 'concept';
+  // The proxy type is reserved for contradiction-edge plumbing; a public
+  // entity of that type would be hidden from the overview by design.
+  if (entityType === MEMORY_PROXY_TYPE) {
+    throw new Error(`entity_type "${MEMORY_PROXY_TYPE}" is reserved for internal contradiction proxies`);
+  }
 
   const entity = upsertEntity(db, input.name, entityType, namespace, input.metadata);
 
@@ -123,16 +129,16 @@ export function queryGraph(
     const isAll = namespace === '*';
     const nsClause = isAll ? '1=1' : 'e.namespace = ?';
     const nsParams: string[] = isAll ? [] : [namespace];
-    // v0.29.5 graph hygiene: synthetic `memory:<content>` proxies
-    // (entity_type 'memory' AND name prefix 'memory:', exactly as
-    // createContradictionEdge manufactures them so a 'contradicts' edge has
-    // endpoints) are plumbing, not knowledge — they are excluded from the
-    // overview, and 'contradicts' edges do not count toward the degree
-    // ranking. Both conditions are required: 'memory' is a free-form
-    // entity_type a user may legitimately choose, so type alone must not
-    // hide their entities (Codex PR-18 [P2]). Before this, on a real DB half
-    // the entities were proxies carrying 94% of all relations, so the top-N
-    // showed nothing but "memory:Consolidation run on …" nodes.
+    // v0.29.5 graph hygiene: synthetic proxies that createContradictionEdge
+    // manufactures so a 'contradicts' edge has endpoints carry the RESERVED
+    // entity_type 'memory_proxy' (create_entity rejects it; legacy
+    // 'memory'-typed proxies are retyped by migration v15 on structural
+    // proof). They are plumbing, not knowledge — excluded from the
+    // overview — and 'contradicts' edges do not count toward the degree
+    // ranking. Before this, on a real DB half the entities were proxies
+    // carrying 94% of all relations, so the top-N showed nothing but
+    // "memory:Consolidation run on …" nodes. No guessing from a free-form
+    // type or a name prefix (Codex PR-18 [P2], two rounds).
     const entityRows = db.prepare(`
       SELECT e.*,
              (SELECT COUNT(*) FROM memory_entities me
@@ -142,8 +148,7 @@ export function queryGraph(
                 AND r.is_deleted = 0
                 AND r.relation_type <> 'contradicts') AS degree
       FROM entities e
-      WHERE ${nsClause} AND e.is_deleted = 0
-        AND NOT (e.entity_type = 'memory' AND e.name LIKE 'memory:%')
+      WHERE ${nsClause} AND e.is_deleted = 0 AND e.entity_type <> '${MEMORY_PROXY_TYPE}'
       ORDER BY degree DESC, e.updated_at DESC
       LIMIT ?
     `).all(...nsParams, overviewLimit) as Array<Entity & { memory_count: number; degree: number }>;

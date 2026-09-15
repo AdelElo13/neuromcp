@@ -12,26 +12,37 @@ instead of the system's own plumbing.
 
 - **FIX: the graph overview (`query_graph` without a start node, `/api/graph`,
   the web UI) was dominated by synthetic `memory:…` proxy entities.**
-  `createContradictionEdge` creates a proxy entity (`entity_type: memory`)
-  for every memory without an entity so a `contradicts` edge has endpoints.
-  On a real database half of all entities were such proxies, carrying 94%
-  of all relations — and because the overview ranked by raw degree, they
-  pushed every real project, person and tool out of the top-N. The overview
-  now excludes proxy entities (`entity_type: memory` **and** name prefix
-  `memory:` — a user's own entity of type `memory` stays visible) and
-  ignores `contradicts` edges when ranking. Read-path fix: the overview on
-  an existing database is clean immediately; the proxy rows themselves are
-  left in place (they still back `contradicts` edges) and the
-  entity-id/entity-name traversal is unchanged.
-- **FIX: the daily consolidation report tripped contradiction detection
-  against the previous day's report.** Reports are stored with
-  `source: consolidation` and differ only in date and counters, which is
-  exactly what the numeric-diff heuristic flags — every run added a bogus
-  `contradicts` edge and two proxy entities. `store_memory` no longer runs
-  contradiction detection for `source: consolidation` (the system's own
-  output, a time series, not competing claims). The gate is on the reserved
-  source, not on a category: user memories under `category: meta` keep full
-  contradiction protection.
+  `createContradictionEdge` creates a proxy entity for every memory without
+  an entity so a `contradicts` edge has endpoints. On a real database half
+  of all entities were such proxies, carrying 94% of all relations — and
+  because the overview ranked by raw degree, they pushed every real project,
+  person and tool out of the top-N. Proxies now carry the **reserved**
+  `entity_type: memory_proxy` (with `metadata.proxy_for_memory_id`), which
+  `create_entity` rejects; the overview excludes exactly that type and
+  ignores `contradicts` edges when ranking. No guessing from a free-form
+  type or a name prefix, so a user's own "Working memory" or
+  "memory:working" entity stays visible. Entity-id/entity-name traversal is
+  unchanged.
+- **FIX: `contradicts` edges were created on keyword heuristics alone.**
+  Only `supersede` went through the claim-level gate; `coexist` fired on a
+  numeric difference at similarity ≥ 0.82 — linking, on the reference
+  database, `/api/embed-probe` to an unrelated wiki batch and every daily
+  consolidation report to the previous one. Both `supersede` and `coexist`
+  now require claim-level evidence (same subject, mutually-exclusive
+  predicate, different object). Without it the result is `flag`: still
+  returned in the `store_memory` result for the caller, but no longer
+  materialised as a graph edge or proxy entity. No producer-based gate
+  (`source`/`category` are free-form input and stay irrelevant to the
+  outcome).
+
+### Changed
+
+- **Schema v15.** One-time migration retypes legacy proxy entities from the
+  free-form `memory` to `memory_proxy` — only on structural proof (the
+  entity name equals the deterministic proxy name of a linked memory), so
+  look-alike user entities are left alone. Backed up before the run like
+  every migration; on the reference database all 68 legacy proxies
+  qualified, 0 did not.
 
 ### Docs
 

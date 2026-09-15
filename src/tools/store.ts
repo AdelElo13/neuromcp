@@ -244,16 +244,11 @@ export async function storeMemory(
 
   // Step 4: Contradiction detection (Phase 3). Vector-based — skipped in
   // degraded mode rather than attempted and logged as a failure per store.
-  // v0.29.5: also skipped for memories with source 'consolidation'. That
-  // source is reserved for the system's own output — the daily
-  // consolidation report — which differs from the previous one only in
-  // date and counters: a time series, not competing claims. The
-  // numeric-diff heuristic flagged every run as a contradiction and
-  // polluted the graph with a synthetic proxy entity per report. Gate on
-  // the reserved source, NOT on category: `meta` is a free-form category
-  // users do put real facts under (Codex PR-18 [P2]).
+  // Runs for every memory regardless of source/category (v0.29.5: no
+  // producer-based gate — neither field is reserved, Codex PR-18 [P2]);
+  // what is gated is the graph edge, see step 9.
   let contradictions: readonly Contradiction[] = [];
-  if (!degraded && source !== 'consolidation') {
+  if (!degraded) {
     try {
       contradictions = await detectContradictions(
         input.content, namespace, db, vecStore, embedder, config.contradictionThreshold,
@@ -406,8 +401,16 @@ export async function storeMemory(
         newId: id,
       });
     }
-    // For all resolutions (supersede, coexist, flag): create a 'contradicts' edge
-    // This enables later queries like "what contradicts this memory?"
+    // v0.29.5: a 'contradicts' edge is an assertion in the knowledge graph
+    // (it feeds explain.contradictions for downstream LLMs), so it requires
+    // claim-level evidence: only 'supersede' and 'coexist' — both gated on
+    // same subject + mutually-exclusive predicate + different object in
+    // detectContradictions — create one. 'flag' is heuristic-only (numeric
+    // diff / negation words) and is returned in the store result for the
+    // caller, but never materialised as an edge. Before this, the daily
+    // consolidation report ("… merged 258 …" vs "… merged 260 …") produced
+    // an edge plus two synthetic proxy entities per run.
+    if (contradiction.resolution === 'flag') continue;
     try {
       createContradictionEdge(db, id, contradiction.existing_id, namespace, {
         resolution: contradiction.resolution,
