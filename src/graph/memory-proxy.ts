@@ -30,12 +30,13 @@ function contentStem(content: string): string {
 }
 
 /**
- * Proxy name for a memory: readable stem + the memory id, so two memories
- * can never share a proxy and a user name can only collide by copying the
- * id on purpose.
+ * Proxy name for a memory: readable stem + the FULL memory id, so two
+ * memories can never share a proxy (a truncated id could still collide —
+ * Codex PR-18 round 5) and a user name can only collide by copying the id
+ * on purpose.
  */
 export function proxyEntityName(content: string, memoryId: string): string {
-  return `${PROXY_NAME_PREFIX}${contentStem(content)} #${memoryId.slice(0, 8)}`;
+  return `${PROXY_NAME_PREFIX}${contentStem(content)} #${memoryId}`;
 }
 
 /**

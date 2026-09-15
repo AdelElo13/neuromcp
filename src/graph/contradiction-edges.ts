@@ -61,7 +61,7 @@ function ensureMemoryEntity(
   const name = proxyEntityName(memory.content, memoryId);
   const entity = upsertEntity(db, name, MEMORY_PROXY_TYPE, namespace, {
     proxy_for_memory_id: memoryId,
-  });
+  }, { allowReservedType: true });
 
   // Link memory to entity
   db.prepare(

@@ -48,21 +48,34 @@ function normalizePredicate(p: string): string {
  *     supersede silently deletes a true fact — a hallucination vector.
  */
 /**
- * v0.29.5: an SVO object anchored to a calendar date or clock time
- * ("run on 2026-09-14 …", "deploy at 03:00 …") describes an OCCURRENCE,
- * not a state of the subject. Two occurrences on different dates are a
- * time series, never a contradiction — the daily consolidation report
- * ("Consolidation run on 2026-09-13 …" vs "… 2026-09-14 …") is exactly
- * this. Only SVO verbs are affected; with the copula ("the meeting is on
- * 2026-09-13") the date IS the state and a changed date is a real update.
+ * v0.29.5: an SVO object anchored to a CALENDAR DATE ("run on 2026-09-14
+ * merged 258 …") describes an occurrence on that day, not a state of the
+ * subject. Two occurrences on DIFFERENT dates are a time series, never a
+ * contradiction — the daily consolidation report ("Consolidation run on
+ * 2026-09-13 …" vs "… 2026-09-14 …") is exactly this. The rule is
+ * deliberately narrow (Codex PR-18 round 5):
+ *   - only full calendar dates anchor (ISO 2026-09-14 or dd/mm/yyyy);
+ *     IP addresses ("runs on 10.20.30.40") and clock times ("runs at
+ *     04:30 every day" — a recurring schedule is a state) do not;
+ *   - the anchors are COMPARED: the same date with different values
+ *     ("… on 2026-09-14 merged 258" vs "… merged 260") is still a
+ *     contradiction; only a different date exempts the pair;
+ *   - the copula is exempt ("the meeting is on 2026-09-13" → "… 09-20"):
+ *     there the date IS the state and a changed date is a real update.
  */
 const BE_PREDICATES = new Set(['is', 'are', 'was', 'were']);
-const EVENT_ANCHORED_OBJECT =
-  /^(?:on|at|in|during|since|until|from|by)\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}:\d{2})\b/i;
+// The lookahead rejects a CONTINUATION of the number (a further digit or
+// dot as in 10.20.30.40, or -/ followed by a digit) — not ordinary
+// punctuation: the real report reads "Consolidation run on 2026-06-13:
+// merged 293, …", and that colon must not un-anchor the date.
+const EVENT_ANCHOR =
+  /^(?:on|at|in|during|since|until|from|by)\s+(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})(?![\d.]|[-/]\d)/i;
 
-function isEventAnchored(predicate: string, object: string): boolean {
-  if (BE_PREDICATES.has(predicate.toLowerCase())) return false;
-  return EVENT_ANCHORED_OBJECT.test(object.trim());
+/** The calendar date an SVO object is anchored to, or null. */
+function eventAnchor(predicate: string, object: string): string | null {
+  if (BE_PREDICATES.has(predicate.toLowerCase())) return null;
+  const m = object.trim().match(EVENT_ANCHOR);
+  return m === null ? null : m[1]!;
 }
 
 export function predicatesAllowSupersede(newContent: string, existingContent: string): boolean {
@@ -73,16 +86,18 @@ export function predicatesAllowSupersede(newContent: string, existingContent: st
 
   for (const nt of newTriples) {
     if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(nt.predicate.toLowerCase())) continue;
-    if (isEventAnchored(nt.predicate, nt.object)) continue;
+    const newAnchor = eventAnchor(nt.predicate, nt.object);
     const ns = normalizeSubject(nt.subject);
     if (ns.length === 0) continue;
     const np = normalizePredicate(nt.predicate);
     for (const ot of oldTriples) {
       if (!MUTUALLY_EXCLUSIVE_PREDICATES.has(ot.predicate.toLowerCase())) continue;
-      if (isEventAnchored(ot.predicate, ot.object)) continue;
       // Same predicate (normalized) required — additive facts across
       // different predicates must never auto-invalidate each other.
       if (np !== normalizePredicate(ot.predicate)) continue;
+      // Two occurrences on different calendar dates: a time series.
+      const oldAnchor = eventAnchor(ot.predicate, ot.object);
+      if (newAnchor !== null && oldAnchor !== null && newAnchor !== oldAnchor) continue;
       const os = normalizeSubject(ot.subject);
       // Exact subject equality — substring alignment produced false supersedes.
       if (ns !== os) continue;

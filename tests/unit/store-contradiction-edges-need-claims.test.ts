@@ -26,10 +26,11 @@ import { MEMORY_PROXY_TYPE } from '../../src/graph/memory-proxy.js';
 const EVENT_A = 'the nightly deploy took 45 minutes on 2026-09-13 for the api';
 const EVENT_B = 'the nightly deploy took 90 minutes on 2026-09-14 for the web';
 
-// The real daily consolidation report (similarity 0.867 in the window).
-// Since v0.29.5 the triple extractor no longer reads the noun "run" as a
-// predicate after a singular subject, so this pair carries no claim
-// evidence: numeric diff → 'flag' → nothing in the graph.
+// The real daily consolidation report (similarity 0.867 in the window). The
+// extractor still parses it as {Consolidation, run, "on <date> …"}, but the
+// claim gate treats two occurrences on different calendar dates as a time
+// series, so the pair carries no evidence: numeric diff → 'flag' → nothing
+// in the graph.
 const REPORT_A = 'Consolidation run on 2026-09-13 merged 258 decayed 2255 pruned 0 promoted 4';
 const REPORT_B = 'Consolidation run on 2026-09-14 merged 1260 decayed 97 pruned 33 promoted 12';
 

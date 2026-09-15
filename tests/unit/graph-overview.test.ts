@@ -79,8 +79,8 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
   // type memory_proxy; that is the only thing the overview filters on.
   it('excludes reserved memory_proxy entities from the overview', () => {
     upsertEntity(ctx.db, 'Alice', 'person', 'default');
-    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default');
-    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-14 merged 260', MEMORY_PROXY_TYPE, 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default', {}, { allowReservedType: true });
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-14 merged 260', MEMORY_PROXY_TYPE, 'default', {}, { allowReservedType: true });
 
     const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
     expect(result.nodes.map((n) => n.entity.name)).toEqual(['Alice']);
@@ -91,7 +91,7 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
     // a user may legitimately choose; neither may hide their entity.
     upsertEntity(ctx.db, 'Working memory', 'memory', 'default');
     upsertEntity(ctx.db, 'memory:working', 'memory', 'default');
-    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default');
+    upsertEntity(ctx.db, 'memory:Consolidation run on 2026-09-13 merged 258', MEMORY_PROXY_TYPE, 'default', {}, { allowReservedType: true });
 
     const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
     expect(result.nodes.map((n) => n.entity.name).sort()).toEqual(['Working memory', 'memory:working']);
@@ -99,7 +99,7 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
 
   it('create_entity on a proxy name PROMOTES the proxy to the requested type (Codex PR-18 round 3 P2)', () => {
     // A hidden proxy must never be handed back to a public caller unchanged.
-    const proxy = upsertEntity(ctx.db, 'memory:the project uses React 18', MEMORY_PROXY_TYPE, 'default', { proxy_for_memory_id: 'm-1' });
+    const proxy = upsertEntity(ctx.db, 'memory:the project uses React 18', MEMORY_PROXY_TYPE, 'default', { proxy_for_memory_id: 'm-1' }, { allowReservedType: true });
     const promoted = createEntity({ name: 'memory:the project uses React 18', entity_type: 'concept' }, ctx.db, ctx.config, noopLogger, noopMetrics);
     expect(promoted.id).toBe(proxy.id);
     expect(promoted.entity_type).toBe('concept');

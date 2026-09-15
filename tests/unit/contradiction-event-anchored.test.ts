@@ -3,7 +3,7 @@ import { predicatesAllowSupersede } from '../../src/cognitive/contradiction.js';
 import { extractTriplesFromText } from '../../src/cognitive/claims.js';
 
 /**
- * v0.29.5 — event-anchored objects are occurrences, not states.
+ * v0.29.5 — occurrences on different calendar dates are not contradictions.
  *
  * The daily consolidation report "Consolidation run on 2026-09-14 merged
  * 1260 …" parses as the SVO triple {Consolidation, run, "on 2026-09-14 …"}
@@ -12,16 +12,15 @@ import { extractTriplesFromText } from '../../src/cognitive/claims.js';
  * 'contradicts' edge (+ two proxy entities) per run, surfaced in
  * explain.contradictions of every search that hit a report.
  *
- * Fix: in the claim gate, an SVO object anchored to a calendar date or a
- * clock time describes when something happened, not what the subject IS;
- * two occurrences on different dates are a time series. The copula is
- * exempt: "the meeting is on 2026-09-13" → "… 2026-09-20" is a real update.
- * The extractor itself is untouched (a grammar heuristic there rejected
- * valid plural/pronoun subjects — Codex PR-18 round 4 [P2]).
+ * Fix, in the claim gate only (the extractor is untouched): when BOTH
+ * objects are anchored to a full calendar date and the dates DIFFER, the
+ * pair is a time series. Everything else keeps its evidence — IP
+ * addresses, clock times (a recurring schedule is a state), the same date
+ * with different values, and the copula ("the meeting is on <date>").
  */
 
-describe('predicatesAllowSupersede — event-anchored SVO objects', () => {
-  it('the extractor still parses the report (no extractor regression)', () => {
+describe('predicatesAllowSupersede — date-anchored SVO objects', () => {
+  it('the extractor still parses the report (no extractor change)', () => {
     expect(extractTriplesFromText('Consolidation run on 2026-09-14 merged 1260 decayed 97')).toEqual([
       { subject: 'Consolidation', predicate: 'run', object: 'on 2026-09-14 merged 1260 decayed 97' },
     ]);
@@ -32,17 +31,34 @@ describe('predicatesAllowSupersede — event-anchored SVO objects', () => {
       'Consolidation run on 2026-09-14 merged 1260 decayed 97 pruned 33 promoted 12',
       'Consolidation run on 2026-09-13 merged 258 decayed 2255 pruned 0 promoted 4',
     )).toBe(false);
+    // The exact shape on the reference DB: date followed by a colon (the
+    // sentence splitter cuts there, so the object is "on 2026-06-13:").
+    expect(predicatesAllowSupersede(
+      'Consolidation run on 2026-06-14: merged 14, decayed 1400, pruned 0, swept 0. Total memories: 1398.',
+      'Consolidation run on 2026-06-13: merged 293, decayed 1634, pruned 0, swept 0. Total memories: 1408.',
+    )).toBe(false);
+    expect(predicatesAllowSupersede(
+      'the release runs on 16/09/2026 for all tenants',
+      'the release runs on 15/09/2026 for all tenants',
+    )).toBe(false);
   });
 
-  it('a scheduled occurrence on another date is not a contradiction either', () => {
+  it('the SAME date with different values is still a contradiction', () => {
     expect(predicatesAllowSupersede(
-      'the backup job runs at 03:00 on the primary',
-      'the backup job runs at 04:30 on the primary',
-    )).toBe(false);
+      'Consolidation run on 2026-09-14 merged 260 decayed 97',
+      'Consolidation run on 2026-09-14 merged 258 decayed 97',
+    )).toBe(true);
+  });
+
+  it('IP addresses and clock times are states, not date anchors (round-5 cases)', () => {
     expect(predicatesAllowSupersede(
-      'the release runs on 15/09/2026 for all tenants',
-      'the release runs on 16/09/2026 for all tenants',
-    )).toBe(false);
+      'the service runs on 10.20.30.41 behind the proxy',
+      'the service runs on 10.20.30.40 behind the proxy',
+    )).toBe(true);
+    expect(predicatesAllowSupersede(
+      'the backup job runs at 03:00 every day now',
+      'the backup job runs at 04:30 every day',
+    )).toBe(true);
   });
 
   it('the copula keeps a changed date as a real update', () => {
@@ -67,7 +83,7 @@ describe('predicatesAllowSupersede — event-anchored SVO objects', () => {
     )).toBe(true);
   });
 
-  it('a state with a date somewhere later in the object is still a state', () => {
+  it('a date later in the object does not anchor the claim', () => {
     expect(predicatesAllowSupersede(
       'the project uses React 19 since 2026-09-01',
       'the project uses React 18 since 2026-01-01',

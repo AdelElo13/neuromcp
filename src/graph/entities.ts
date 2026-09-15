@@ -17,7 +17,15 @@ export function upsertEntity(
   entityType: string,
   namespace: string,
   metadata?: Record<string, unknown>,
+  opts?: { readonly allowReservedType?: boolean },
 ): Entity {
+  // The proxy type is reserved for contradiction-edge plumbing. Enforced
+  // HERE — the single write path — so no caller (create_entity, the LLM
+  // extractor, batch import, scripts) can manufacture a hidden entity;
+  // only createContradictionEdge opts in (Codex PR-18 round 5 [P2]).
+  if (entityType === MEMORY_PROXY_TYPE && opts?.allowReservedType !== true) {
+    throw new Error(`entity_type "${MEMORY_PROXY_TYPE}" is reserved for internal contradiction proxies`);
+  }
   const normalizedName = name.trim().toLowerCase();
 
   // Canonical dedup key is (LOWER(TRIM(name)), namespace) — deliberately

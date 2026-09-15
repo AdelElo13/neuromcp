@@ -3,6 +3,7 @@ import type { Entity } from '../types.js';
 import { upsertEntity, linkMemoryEntity } from './entities.js';
 import { createRelation } from './relations.js';
 import { extractWithLLM } from './llm-extract.js';
+import { MEMORY_PROXY_TYPE } from './memory-proxy.js';
 
 /**
  * Dispatch entity extraction: LLM first (if available), regex fallback.
@@ -21,9 +22,12 @@ export async function extractEntitiesDispatch(
       const entities: Entity[] = [];
       const entityMap = new Map<string, Entity>();
 
-      // Upsert entities (filter out file paths, URLs, and sentence-like names)
+      // Upsert entities (filter out file paths, URLs, sentence-like names,
+      // and the reserved proxy type a model could emit — upsertEntity would
+      // throw on it and abort the whole extraction).
       for (const e of result.entities) {
         if (isNoiseEntity(e.name, e.type)) continue;
+        if (e.type === MEMORY_PROXY_TYPE) continue;
         const entity = upsertEntity(db, e.name, e.type, namespace);
         linkMemoryEntity(db, memoryId, entity.id);
         entities.push(entity);
