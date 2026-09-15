@@ -26,11 +26,10 @@ import { MEMORY_PROXY_TYPE } from '../../src/graph/memory-proxy.js';
 const EVENT_A = 'the nightly deploy took 45 minutes on 2026-09-13 for the api';
 const EVENT_B = 'the nightly deploy took 90 minutes on 2026-09-14 for the web';
 
-// The real daily consolidation report. NOTE: the triple extractor reads the
-// noun "run" as the predicate "run" ({Consolidation, run, "on 2026-09-14 …"}),
-// so this pair DOES carry (spurious) claim evidence — tracked as P3 in
-// FOUND-DURING-FIX.md. It is used here only to prove there is no
-// producer-based gate: source/category never change the outcome.
+// The real daily consolidation report (similarity 0.867 in the window).
+// Since v0.29.5 the triple extractor no longer reads the noun "run" as a
+// predicate after a singular subject, so this pair carries no claim
+// evidence: numeric diff → 'flag' → nothing in the graph.
 const REPORT_A = 'Consolidation run on 2026-09-13 merged 258 decayed 2255 pruned 0 promoted 4';
 const REPORT_B = 'Consolidation run on 2026-09-14 merged 1260 decayed 97 pruned 33 promoted 12';
 
@@ -88,28 +87,28 @@ describe('storeMemory — contradicts edges require claim-level evidence', () =>
     expect(proxyEntities(ctx)).toBe(0);
   });
 
+  it('the daily consolidation report never creates an edge or a proxy — the original pollution', async () => {
+    const b1 = await storeMemory({ content: REPORT_A, source: 'consolidation', category: 'meta' }, deps(ctx));
+    const b2 = await storeMemory({ content: REPORT_B, source: 'consolidation', category: 'meta' }, deps(ctx));
+    expect(b1.matched).toBe(false);
+    expect(b2.matched).toBe(false);
+    expect(b2.contradictions?.map((c) => c.resolution)).toEqual(['flag']);
+    expect(contradictsEdges(ctx)).toBe(0);
+    expect(proxyEntities(ctx)).toBe(0);
+  });
+
   it('source and category never change the outcome — no producer-based gate (Codex PR-18 P2)', async () => {
-    // Same pair stored as the system would store it and as a user would:
-    // identical result either way. (Whatever the extractor decides about
-    // the report pair, it must decide it the same for both producers.)
-    const asSystem = setupTestDb();
-    try {
-      await storeMemory({ content: REPORT_A, source: 'consolidation', category: 'meta' }, deps(asSystem));
-      await storeMemory({ content: REPORT_B, source: 'consolidation', category: 'meta' }, deps(asSystem));
-      await storeMemory({ content: REPORT_A, source: 'user', category: 'general' }, deps(ctx));
-      await storeMemory({ content: REPORT_B, source: 'user', category: 'general' }, deps(ctx));
-      expect(contradictsEdges(asSystem)).toBe(contradictsEdges(ctx));
-      expect(proxyEntities(asSystem)).toBe(proxyEntities(ctx));
-    } finally {
-      teardownTestDb(asSystem);
-    }
+    // The same report pair stored as a plain user memory: identical result.
+    await storeMemory({ content: REPORT_A, source: 'user', category: 'general' }, deps(ctx));
+    await storeMemory({ content: REPORT_B, source: 'user', category: 'general' }, deps(ctx));
+    expect(contradictsEdges(ctx)).toBe(0);
+    expect(proxyEntities(ctx)).toBe(0);
 
     // And a user memory under category meta keeps full detection: the
     // claim-backed pair still links.
-    const before = contradictsEdges(ctx);
     await storeMemory({ content: CLAIM_A, source: 'user', category: 'meta' }, deps(ctx));
     await storeMemory({ content: CLAIM_B, source: 'user', category: 'meta' }, deps(ctx));
-    expect(contradictsEdges(ctx)).toBe(before + 1);
+    expect(contradictsEdges(ctx)).toBe(1);
   });
 
   it('proxy entities carry the reserved type and a back-reference to their memory', async () => {

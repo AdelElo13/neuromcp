@@ -5,23 +5,40 @@ import { applySchema, SCHEMA_VERSION } from './schema.js';
 import {
   LEGACY_PROXY_TYPE, MEMORY_PROXY_TYPE, PROXY_NAME_PREFIX, proxyEntityName,
 } from '../graph/memory-proxy.js';
+import { predicatesAllowSupersede } from '../cognitive/contradiction.js';
 
 /**
- * v15: retype legacy contradiction-proxy entities from the free-form type
- * 'memory' to the reserved 'memory_proxy'. Only PROVEN proxies are touched:
- * an entity qualifies iff it is linked to a memory whose deterministic
- * proxy name (proxyEntityName(content)) equals the entity name exactly —
- * the one way such a name is ever produced. A user's own entity that
- * merely looks like one ("memory:working", type memory) is left alone.
+ * v15 step 1: retype legacy contradiction-proxy entities from the free-form
+ * type 'memory' to the reserved 'memory_proxy'. Only PROVEN proxies are
+ * touched. An entity qualifies iff it carries the complete fingerprint the
+ * pre-v0.29.5 ensureMemoryEntity() + createContradictionEdge() pair left
+ * behind — all of:
+ *   1. legacy type 'memory' and the 'memory:' name prefix;
+ *   2. linked with role 'subject' to a memory whose deterministic proxy
+ *      name (proxyEntityName(content)) equals the entity name exactly;
+ *   3. an endpoint of an AUTOMATIC 'contradicts' relation
+ *      (metadata.auto = true — only createContradictionEdge writes that).
+ * Look-alike user entities are left alone: "memory:working" of type
+ * memory, an exact-name coincidence linked as 'mention', or one without an
+ * auto contradicts edge. An entity that reproduces the whole fingerprint is
+ * by construction indistinguishable from a proxy; the retype is recorded
+ * as metadata.retyped_from so it can be reverted by hand. On the reference
+ * DB all 68 legacy proxies satisfy the full fingerprint, 0 partially.
  * Exported for the migration test.
  */
 export function retypeProvenMemoryProxies(db: Database): number {
   const rows = db.prepare(`
     SELECT e.id AS entity_id, e.name AS name, m.id AS memory_id, m.content AS content
       FROM entities e
-      JOIN memory_entities me ON me.entity_id = e.id
+      JOIN memory_entities me ON me.entity_id = e.id AND me.role = 'subject'
       JOIN memories m ON m.id = me.memory_id
      WHERE e.entity_type = ? AND e.name LIKE ?
+       AND EXISTS (
+         SELECT 1 FROM relations r
+          WHERE (r.source_entity_id = e.id OR r.target_entity_id = e.id)
+            AND r.relation_type = 'contradicts'
+            AND json_extract(r.metadata, '$.auto') = 1
+       )
   `).all(LEGACY_PROXY_TYPE, `${PROXY_NAME_PREFIX}%`) as Array<{
     entity_id: string; name: string; memory_id: string; content: string;
   }>;
@@ -29,7 +46,7 @@ export function retypeProvenMemoryProxies(db: Database): number {
   const update = db.prepare(`
     UPDATE entities
        SET entity_type = ?,
-           metadata = json_set(metadata, '$.proxy_for_memory_id', ?),
+           metadata = json_set(metadata, '$.proxy_for_memory_id', ?, '$.retyped_from', ?),
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE id = ? AND entity_type = ?
   `);
@@ -39,11 +56,54 @@ export function retypeProvenMemoryProxies(db: Database): number {
   for (const row of rows) {
     if (seen.has(row.entity_id)) continue;
     if (proxyEntityName(row.content) !== row.name) continue;
-    update.run(MEMORY_PROXY_TYPE, row.memory_id, row.entity_id, LEGACY_PROXY_TYPE);
+    update.run(MEMORY_PROXY_TYPE, row.memory_id, LEGACY_PROXY_TYPE, row.entity_id, LEGACY_PROXY_TYPE);
     seen.add(row.entity_id);
     retyped++;
   }
   return retyped;
+}
+
+/**
+ * v15 step 2: soft-delete automatic 'contradicts' edges that the current
+ * rule would not create. Since v0.29.5 an edge requires claim-level
+ * evidence (predicatesAllowSupersede); legacy edges were created on
+ * keyword heuristics alone and feed explain.contradictions in every
+ * search result. Only edges whose BOTH endpoints are proxies are judged —
+ * there the two memories are known exactly (metadata.proxy_for_memory_id);
+ * an edge touching a real entity is left as is. Soft delete (is_deleted =
+ * 1, metadata.removed_by) — nothing is destroyed. Exported for the test.
+ */
+export function pruneUnsupportedAutoContradictions(db: Database): number {
+  const rows = db.prepare(`
+    SELECT r.id AS relation_id, ms.content AS source_content, mt.content AS target_content
+      FROM relations r
+      JOIN entities es ON es.id = r.source_entity_id AND es.entity_type = ?
+      JOIN entities et ON et.id = r.target_entity_id AND et.entity_type = ?
+      JOIN memories ms ON ms.id = json_extract(es.metadata, '$.proxy_for_memory_id')
+      JOIN memories mt ON mt.id = json_extract(et.metadata, '$.proxy_for_memory_id')
+     WHERE r.relation_type = 'contradicts' AND r.is_deleted = 0
+       AND json_extract(r.metadata, '$.auto') = 1
+  `).all(MEMORY_PROXY_TYPE, MEMORY_PROXY_TYPE) as Array<{
+    relation_id: string; source_content: string; target_content: string;
+  }>;
+
+  const remove = db.prepare(`
+    UPDATE relations
+       SET is_deleted = 1,
+           metadata = json_set(metadata, '$.removed_by', 'v15-no-claim-evidence')
+     WHERE id = ?
+  `);
+
+  let pruned = 0;
+  for (const row of rows) {
+    const supported =
+      predicatesAllowSupersede(row.source_content, row.target_content) ||
+      predicatesAllowSupersede(row.target_content, row.source_content);
+    if (supported) continue;
+    remove.run(row.relation_id);
+    pruned++;
+  }
+  return pruned;
 }
 
 /**
@@ -361,9 +421,15 @@ export function runMigrations(db: Database, dbPath: string, logger: Logger): voi
   }
 
   if (currentVersion < 15) {
-    logger.info('migrations', 'Running v14 to v15 migration: retype proven contradiction-proxy entities to memory_proxy');
-    const retyped = retypeProvenMemoryProxies(db);
-    logger.info('migrations', 'v15: proxy entities retyped', { retyped });
+    logger.info('migrations', 'Running v14 to v15 migration: retype proven contradiction proxies, prune heuristic-only contradicts edges');
+    // One transaction: either both steps land or neither (the version is
+    // stamped only after this block returns).
+    const v15 = db.transaction((): { retyped: number; pruned: number } => {
+      const retyped = retypeProvenMemoryProxies(db);
+      const pruned = pruneUnsupportedAutoContradictions(db);
+      return { retyped, pruned };
+    });
+    logger.info('migrations', 'v15 applied', v15());
     applySchema(db);
   }
 

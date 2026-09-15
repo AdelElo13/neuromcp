@@ -203,14 +203,34 @@ function extractTriple(sentence: string): Triple | null {
   // Pattern: "X verb Y" (simple SVO)
   const svoMatch = sentence.match(/^(.+?)\s+(uses?|supports?|requires?|provides?|includes?|contains?|enables?|runs?|stores?|returns?|accepts?|produces?|generates?|implements?|handles?)\s+(.+?)\.?$/i);
   if (svoMatch !== null) {
-    return {
-      subject: svoMatch[1]!.trim(),
-      predicate: svoMatch[2]!.trim(),
-      object: svoMatch[3]!.trim(),
-    };
+    const subject = svoMatch[1]!.trim();
+    const predicate = svoMatch[2]!.trim();
+    // v0.29.5: the bare verb form ("run", "use", "store") is only a
+    // conjugated verb after a plural or pronoun subject; after a singular
+    // noun it is a noun ("Consolidation run on 2026-09-14 …", "the test
+    // run failed"). Reading it as a predicate made every daily
+    // consolidation report a claim {Consolidation, run, "on <date> …"} and
+    // therefore a (false) contradiction of the previous day's report.
+    if (!isBareFormAgreeing(subject, predicate)) return null;
+    return { subject, predicate, object: svoMatch[3]!.trim() };
   }
 
   return null;
+}
+
+const PLURAL_PRONOUNS = new Set(['i', 'we', 'you', 'they', 'these', 'those', 'both', 'all', 'most', 'some']);
+
+/**
+ * English SVO agreement for the SVO predicate list: the -s form ("uses")
+ * takes a singular subject, the bare form ("use") a plural or pronoun
+ * subject. A bare form after a singular noun is not a verb.
+ */
+function isBareFormAgreeing(subject: string, predicate: string): boolean {
+  if (/s$/i.test(predicate)) return true; // conjugated form — always a verb here
+  const head = subject.split(/\s+/).pop()!.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (PLURAL_PRONOUNS.has(head)) return true;
+  // Plural noun (servers, tools, APIs) — but not a singular ending in -ss/-us/-is.
+  return /s$/.test(head) && !/(ss|us|is)$/.test(head);
 }
 
 function scoreConfidence(sentence: string, triple: Triple | null): number {

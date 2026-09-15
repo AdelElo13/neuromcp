@@ -578,17 +578,25 @@ een eigen taak — niet hier tracken.)
   graph-edge/proxy meer maakt (`src/cognitive/contradiction.ts`,
   `src/tools/store.ts` stap 9).
 
-- **P3 — claims-extractor leest het zelfstandig naamwoord "run" als
-  predicaat.** `extractTriplesFromText('Consolidation run on 2026-09-14 merged
-  1260 …')` → `{subject: "Consolidation", predicate: "run", object: "on
-  2026-09-14 merged 1260 …"}`; "run" staat in `predicate-classes.json`
-  (mutually_exclusive), dus het dagelijkse consolidatie-rapport krijgt
-  (spurious) claim-bewijs en blijft een `coexist`-edge + twee `memory_proxy`-
-  entiteiten per run produceren. Sinds v0.29.5 zijn die proxies onzichtbaar
-  in de overview (gereserveerd type), dus het is opslag-ruis, geen
-  zichtbaar productgebrek. Fix-richting: in `src/cognitive/claims.ts` een
-  predicaat pas accepteren als het token als werkwoord staat (bv. niet direct
-  na een hoofdletter-subject zonder hulpwerkwoord, of via een kleine
-  noun-blacklist voor "run/build/test" wanneer gevolgd door "on <datum>").
-  Bewust NIET gefixt met een producent-gate (source/category zijn vrij
-  invoerbaar — Codex PR-18 [P2], twee rondes). Severity P3.
+- **[OPGELOST in v0.29.5] claims-extractor las het zelfstandig naamwoord "run"
+  als predicaat.** `extractTriplesFromText('Consolidation run on 2026-09-14 merged
+  1260 …')` gaf `{Consolidation, run, "on 2026-09-14 …"}`; "run" staat in
+  `predicate-classes.json`, dus het dagelijkse consolidatie-rapport kreeg
+  claim-bewijs en bleef een `coexist`-edge + proxy-paar per run maken — en
+  die edges bereikten wél gebruikers via `explain.contradictions` (Codex
+  PR-18 ronde 3). Fix: SVO-congruentie in `src/cognitive/claims.ts` — de
+  kale werkwoordsvorm ("run/use/store") telt alleen na een meervoudig of
+  voornaamwoordelijk subject; na een enkelvoudig zelfstandig naamwoord is
+  het een naamwoord. Migratie v15 verwijdert (soft-delete) bovendien de
+  legacy auto-`contradicts`-edges tussen twee proxies die onder de huidige
+  regel geen claim-bewijs hebben.
+
+- **P3 — legacy auto-`contradicts`-edges met een ECHTE entiteit als eindpunt
+  worden door migratie v15 niet beoordeeld.** De prune in
+  `pruneUnsupportedAutoContradictions` beperkt zich tot proxy↔proxy-edges,
+  omdat alleen daar de twee memories exact bekend zijn
+  (`metadata.proxy_for_memory_id`). Referentie-DB: 24 proxy↔real + 22
+  real↔real auto-edges blijven staan. Fix-richting: `createContradictionEdge`
+  de memory-ids in de relation-metadata laten schrijven (vanaf nu), zodat een
+  latere migratie ook die edges kan toetsen. Severity P3 (deze edges zijn
+  tussen echte, gerelateerde entiteiten; ruis, geen verkeerd antwoord).

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { Entity } from '../types.js';
+import { MEMORY_PROXY_TYPE } from './memory-proxy.js';
 
 function generateId(): string {
   return createHash('sha256')
@@ -31,13 +32,20 @@ export function upsertEntity(
     .get(normalizedName, namespace) as Entity | undefined;
 
   if (existing !== undefined) {
-    // Merge metadata if provided
-    if (metadata !== undefined) {
+    // v0.29.5: an internal contradiction proxy is a placeholder for one
+    // memory. When a caller upserts that name as a REAL type, the proxy is
+    // promoted — it becomes a visible entity of the requested type, keeps
+    // its memory link and its edges. Without this, a public create_entity
+    // returned the hidden proxy unchanged (Codex PR-18 round 3 [P2]).
+    const promote = existing.entity_type === MEMORY_PROXY_TYPE && entityType !== MEMORY_PROXY_TYPE;
+    if (metadata !== undefined || promote) {
       const existingMeta = JSON.parse(existing.metadata) as Record<string, unknown>;
-      const merged = { ...existingMeta, ...metadata };
+      const merged = { ...existingMeta, ...(metadata ?? {}) };
+      if (promote) merged['promoted_from'] = MEMORY_PROXY_TYPE;
       db.prepare(
-        "UPDATE entities SET metadata = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-      ).run(JSON.stringify(merged), existing.id);
+        "UPDATE entities SET entity_type = ?, metadata = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+      ).run(promote ? entityType : existing.entity_type, JSON.stringify(merged), existing.id);
+      return db.prepare('SELECT * FROM entities WHERE id = ?').get(existing.id) as Entity;
     }
     return existing;
   }

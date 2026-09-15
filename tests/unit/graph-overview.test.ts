@@ -97,6 +97,18 @@ describe('queryGraph — overview mode (Sprint 4 reviewer fix)', () => {
     expect(result.nodes.map((n) => n.entity.name).sort()).toEqual(['Working memory', 'memory:working']);
   });
 
+  it('create_entity on a proxy name PROMOTES the proxy to the requested type (Codex PR-18 round 3 P2)', () => {
+    // A hidden proxy must never be handed back to a public caller unchanged.
+    const proxy = upsertEntity(ctx.db, 'memory:the project uses React 18', MEMORY_PROXY_TYPE, 'default', { proxy_for_memory_id: 'm-1' });
+    const promoted = createEntity({ name: 'memory:the project uses React 18', entity_type: 'concept' }, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(promoted.id).toBe(proxy.id);
+    expect(promoted.entity_type).toBe('concept');
+    expect(JSON.parse(promoted.metadata)).toMatchObject({ proxy_for_memory_id: 'm-1', promoted_from: MEMORY_PROXY_TYPE });
+
+    const result = queryGraph({}, ctx.db, ctx.config, noopLogger, noopMetrics);
+    expect(result.nodes.map((n) => n.entity.id)).toEqual([proxy.id]);
+  });
+
   it('create_entity rejects the reserved memory_proxy type', () => {
     expect(() =>
       createEntity({ name: 'sneaky', entity_type: MEMORY_PROXY_TYPE }, ctx.db, ctx.config, noopLogger, noopMetrics),

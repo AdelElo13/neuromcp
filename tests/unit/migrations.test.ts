@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { existsSync, unlinkSync } from 'node:fs';
 import { openDatabase, closeDatabase } from '../../src/storage/database.js';
 import { SCHEMA_VERSION } from '../../src/storage/schema.js';
-import { runMigrations, retypeProvenMemoryProxies } from '../../src/storage/migrations.js';
+import { runMigrations, retypeProvenMemoryProxies, pruneUnsupportedAutoContradictions } from '../../src/storage/migrations.js';
 import { createLogger } from '../../src/observability/logger.js';
 import { MEMORY_PROXY_TYPE, proxyEntityName } from '../../src/graph/memory-proxy.js';
 
@@ -210,11 +210,38 @@ describe('runMigrations', () => {
     db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('p-b', ?, 'memory', 'default')").run(proxyEntityName(reportB));
     db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-a', 'p-a', 'subject')").run();
     db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-b', 'p-b', 'subject')").run();
-    // … plus two user entities that merely LOOK like proxies: one unlinked,
-    // one linked to a memory whose derived name differs.
+    // … joined by the AUTOMATIC contradicts edge the proxies were created
+    // for (metadata.auto = true, as createContradictionEdge writes it) …
+    db.prepare("INSERT INTO relations (id, source_entity_id, target_entity_id, relation_type, metadata) VALUES ('r-ab', 'p-b', 'p-a', 'contradicts', '{\"resolution\":\"coexist\",\"auto\":true}')").run();
+    // … a second, claim-backed legacy pair whose edge must SURVIVE the
+    // prune (same subject, exclusive predicate 'uses', different object) …
+    const claimD = 'the project uses React 18 on the customer portal';
+    const claimE = 'the project uses Svelte 5 on the customer portal';
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('m-d', 'h-d', ?)").run(claimD);
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('m-e', 'h-e', ?)").run(claimE);
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('p-d', ?, 'memory', 'default')").run(proxyEntityName(claimD));
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('p-e', ?, 'memory', 'default')").run(proxyEntityName(claimE));
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-d', 'p-d', 'subject')").run();
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-e', 'p-e', 'subject')").run();
+    db.prepare("INSERT INTO relations (id, source_entity_id, target_entity_id, relation_type, metadata) VALUES ('r-de', 'p-e', 'p-d', 'contradicts', '{\"resolution\":\"coexist\",\"auto\":true}')").run();
+    // … plus four user entities that merely LOOK like proxies: one
+    // unlinked; one linked to a memory whose derived name differs; one with
+    // an exact-name coincidence but linked as 'mention' and without any
+    // contradicts edge; and Codex's round-3 case — exact-name coincidence
+    // ('memory:working' for content 'working') linked as 'subject' but
+    // with no automatic contradicts edge.
     db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('u-1', 'memory:working', 'memory', 'default')").run();
     db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('u-2', 'memory:scratch notes', 'memory', 'default')").run();
     db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-a', 'u-2', 'mention')").run();
+    const reportC = 'Consolidation run on 2026-09-15 merged 1 decayed 2 pruned 3';
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('m-c', 'h-c', ?)").run(reportC);
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('u-3', ?, 'memory', 'default')").run(proxyEntityName(reportC));
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-c', 'u-3', 'mention')").run();
+    db.prepare("INSERT INTO memories (id, content_hash, content) VALUES ('m-w', 'h-w', 'working')").run();
+    db.prepare("INSERT INTO entities (id, name, entity_type, namespace) VALUES ('u-4', 'memory:working', 'memory', 'other')").run();
+    expect(proxyEntityName('working')).toBe('memory:working');
+    db.prepare("INSERT INTO memory_entities (memory_id, entity_id, role) VALUES ('m-w', 'u-4', 'subject')").run();
+    db.prepare("INSERT INTO relations (id, source_entity_id, target_entity_id, relation_type, metadata) VALUES ('r-w', 'u-4', 'u-1', 'contradicts', '{}')").run();
 
     db.prepare('DELETE FROM schema_version').run();
     db.prepare(
@@ -227,18 +254,34 @@ describe('runMigrations', () => {
       (db.prepare('SELECT entity_type FROM entities WHERE id = ?').get(id) as { entity_type: string }).entity_type;
     expect(typeOf('p-a')).toBe(MEMORY_PROXY_TYPE);
     expect(typeOf('p-b')).toBe(MEMORY_PROXY_TYPE);
+    expect(typeOf('p-d')).toBe(MEMORY_PROXY_TYPE);
+    expect(typeOf('p-e')).toBe(MEMORY_PROXY_TYPE);
     expect(typeOf('u-1')).toBe('memory');
     expect(typeOf('u-2')).toBe('memory');
+    expect(typeOf('u-3')).toBe('memory');
+    expect(typeOf('u-4')).toBe('memory');
 
     const meta = JSON.parse(
       (db.prepare('SELECT metadata FROM entities WHERE id = ?').get('p-a') as { metadata: string }).metadata,
-    ) as { proxy_for_memory_id?: string };
+    ) as { proxy_for_memory_id?: string; retyped_from?: string };
     expect(meta.proxy_for_memory_id).toBe('m-a');
+    expect(meta.retyped_from).toBe('memory');
+
+    // Edge prune: the report pair has no claim evidence → soft-deleted and
+    // labelled; the claim-backed pair keeps its edge; the user edge is
+    // untouched (not automatic, endpoints not proxies).
+    const edge = (id: string): { is_deleted: number; metadata: string } =>
+      db.prepare('SELECT is_deleted, metadata FROM relations WHERE id = ?').get(id) as { is_deleted: number; metadata: string };
+    expect(edge('r-ab').is_deleted).toBe(1);
+    expect(JSON.parse(edge('r-ab').metadata)).toMatchObject({ auto: true, removed_by: 'v15-no-claim-evidence' });
+    expect(edge('r-de').is_deleted).toBe(0);
+    expect(edge('r-w').is_deleted).toBe(0);
 
     const ver = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
     expect(ver.v).toBe(SCHEMA_VERSION);
 
-    // Idempotent: a second run retypes nothing.
+    // Idempotent: a second run retypes and prunes nothing.
     expect(retypeProvenMemoryProxies(db)).toBe(0);
+    expect(pruneUnsupportedAutoContradictions(db)).toBe(0);
   });
 });

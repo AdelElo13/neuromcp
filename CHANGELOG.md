@@ -34,15 +34,36 @@ instead of the system's own plumbing.
   materialised as a graph edge or proxy entity. No producer-based gate
   (`source`/`category` are free-form input and stay irrelevant to the
   outcome).
+- **FIX: the claim extractor read the noun "run" as a verb.**
+  "Consolidation run on 2026-09-14 merged 1260 …" became the claim
+  `{Consolidation, run, "on 2026-09-14 …"}` — and `run` is a
+  mutually-exclusive predicate, so every daily consolidation report
+  contradicted the previous one *with* claim-level evidence and the bogus
+  edge reached `explain.contradictions` in search results. The SVO pattern
+  now applies subject/verb agreement: the bare form (`run`, `use`, `store`)
+  is a verb only after a plural or pronoun subject; after a singular noun it
+  is a noun and yields no claim.
+- **FIX: `create_entity` on the name of a hidden proxy returned the proxy.**
+  The name-based upsert now *promotes* such a proxy to the requested type
+  (it keeps its memory link and edges, `metadata.promoted_from` records
+  it), so a public caller never receives an entity the overview hides.
 
 ### Changed
 
-- **Schema v15.** One-time migration retypes legacy proxy entities from the
-  free-form `memory` to `memory_proxy` — only on structural proof (the
-  entity name equals the deterministic proxy name of a linked memory), so
-  look-alike user entities are left alone. Backed up before the run like
-  every migration; on the reference database all 68 legacy proxies
-  qualified, 0 did not.
+- **Schema v15** (one transaction, after the usual pre-migration backup).
+  Step 1 retypes legacy proxy entities from the free-form `memory` to
+  `memory_proxy` — only on the complete fingerprint the old code left
+  behind: legacy type + `memory:` prefix, linked with role `subject` to a
+  memory whose deterministic proxy name equals the entity name, **and** an
+  endpoint of an *automatic* `contradicts` edge. Look-alike user entities
+  — "memory:working", an exact-name coincidence linked as `mention`, or one
+  without an automatic edge — are left alone; the retype is recorded as
+  `metadata.retyped_from` so it can be reverted by hand. Step 2 soft-deletes
+  legacy automatic `contradicts` edges between two proxies whose memories
+  carry no claim-level evidence under the current rule
+  (`metadata.removed_by = v15-no-claim-evidence`; nothing is destroyed) —
+  these were the edges still surfacing in `explain.contradictions`. On the
+  reference database: 68/68 proxies retyped, 0 partial matches.
 
 ### Docs
 

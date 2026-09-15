@@ -22,7 +22,7 @@ what an MCP client sees.
 
 ### `store_memory`
 
-Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found, surprise score, and extracted entities.
+Store a new memory with semantic deduplication, contradiction detection, surprise scoring, and entity extraction. Returns the memory ID, contradictions found (resolution supersede/coexist are claim-backed and recorded as graph edges; flag is heuristic-only and reported here but never stored in the graph), surprise score, and extracted entities.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
