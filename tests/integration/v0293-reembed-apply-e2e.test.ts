@@ -130,5 +130,19 @@ describe('reembed --apply E2E on a quiet WAL database', () => {
 
     const backups = readdirSync(dir).filter((f) => f.includes('.pre-reembed-'));
     expect(backups.length).toBe(1);
+
+    // The backup must be a COMPLETE, openable pre-swap database — content,
+    // not just existence (Codex round 4): original 384-dim index, all rows,
+    // original model stamps.
+    const backup = new Database(join(dir, backups[0]!), { readonly: true });
+    const backupDdl = (
+      backup.prepare("SELECT sql FROM sqlite_master WHERE name='memories_vec'").get() as { sql: string }
+    ).sql;
+    expect(backupDdl).toMatch(/float\[384\]/);
+    const rows = backup
+      .prepare('SELECT embedding_model, COUNT(*) AS n FROM memories GROUP BY embedding_model')
+      .all() as Array<{ embedding_model: string; n: number }>;
+    backup.close();
+    expect(rows).toEqual([{ embedding_model: 'bge-small-en-v1.5', n: 3 }]);
   }, 60_000);
 });

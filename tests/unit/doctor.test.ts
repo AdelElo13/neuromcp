@@ -148,6 +148,49 @@ describe('checkOllama — probes the CONFIGURED model and measures its dimension
     expect(fetchImpl).toHaveBeenCalledWith('http://10.0.0.5:11434/api/tags', expect.anything());
   });
 
+  it('accepts a fully-TAGGED configured model against the same listed tag', async () => {
+    // Codex round-4 [P2]: `listed.split(':')[0] === configured` can never
+    // match a configured value that itself carries a tag — the doctor
+    // failed a setup the runtime accepts.
+    const fetchImpl = tagsThenEmbed(['all-minilm:latest'], 384);
+    const { result, probe } = await checkOllama({
+      fetchImpl,
+      env: { NEUROMCP_EMBEDDING_MODEL: 'all-minilm:latest' },
+    });
+    expect(result.status).toBe('ok');
+    expect(probe).toEqual({ model: 'all-minilm:latest', dimensions: 384 });
+  });
+
+  it('does NOT match a different tag of the same base model', async () => {
+    const fetchImpl = tagsThenEmbed(['all-minilm:latest'], 384);
+    const { result, probe } = await checkOllama({
+      fetchImpl,
+      env: { NEUROMCP_EMBEDDING_MODEL: 'all-minilm:v2' },
+    });
+    expect(result.status).toBe('warn');
+    expect(probe).toBeNull();
+    expect(result.info).toContain('ollama pull all-minilm:v2');
+  });
+
+  it('reports the model as UNVERIFIED (dimensions null) when the embed probe fails — not as absent', async () => {
+    // Codex round-4 [P2]: a slow model (cold load) blew the 2s probe budget
+    // and the doctor concluded "no embedding route" (exit 2) while the
+    // runtime, with its 30s budget, matched fine. A listed model whose
+    // width cannot be measured is UNVERIFIED, not missing.
+    const fetchImpl = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/api/tags')) {
+        return jsonResponse({ models: [{ name: 'nomic-embed-text:latest' }] });
+      }
+      const err = new Error('timeout');
+      err.name = 'AbortError';
+      return Promise.reject(err);
+    });
+    const { result, probe } = await checkOllama({ fetchImpl, env: {} });
+    expect(result.status).toBe('warn');
+    expect(probe).toEqual({ model: 'nomic-embed-text', dimensions: null });
+    expect(result.info).toMatch(/verify|unverified/i);
+  });
+
   it('warns with a pull hint when Ollama runs but the model is missing', async () => {
     const fetchImpl = tagsThenEmbed(['llama3.2:3b'], 768);
     const { result, probe } = await checkOllama({ fetchImpl, env: {} });
@@ -335,6 +378,38 @@ describe('checkEmbeddingIndex — must apply the same rules as the runtime', () 
       env: { NEUROMCP_EMBEDDING_PROVIDER: 'ollama', NEUROMCP_EMBEDDING_MODEL: 'all-minilm' },
     });
     expect(result.status).toBe('fail');
+  });
+
+  it('warns (not fail) when the only candidate is listed but its dimension is UNVERIFIED', () => {
+    // Codex round-4 [P2]: an unmeasured width is not proof of a mismatch.
+    // The runtime may still match with its own (longer) embed budget, so
+    // concluding "broken, exit 2" here is a misdiagnosis.
+    const result = checkEmbeddingIndex({
+      ...baseDeps,
+      Database: fakeDbFor(768, [{ embedding_model: 'nomic-embed-text', n: 5 }]),
+      ollamaProbe: { model: 'nomic-embed-text', dimensions: null },
+      onnxResult: { status: 'warn' },
+      env: {},
+    });
+    expect(result.status).toBe('warn');
+    expect(result.info).toMatch(/unverified|verify/i);
+    expect(result.info).toMatch(/nomic-embed-text/);
+  });
+});
+
+describe('deriveEmbeddingRoute — reports the MEASURED route, not a hardcoded one', () => {
+  it('names the measured model and width when a probe is available', () => {
+    // Codex round-4 [P3]: with a measured all-minilm 384d the summary
+    // still claimed "ollama nomic-embed-text 768d".
+    const result = deriveEmbeddingRoute(
+      { status: 'ok' },
+      { status: 'warn' },
+      { model: 'all-minilm', dimensions: 384 },
+    );
+    expect(result.status).toBe('ok');
+    expect(result.info).toContain('all-minilm');
+    expect(result.info).toContain('384');
+    expect(result.info).not.toContain('768');
   });
 });
 
