@@ -3,6 +3,149 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.29.3] — unreleased
+
+Install-robustness release: switching embedding provider no longer bricks
+an existing database, the doctor always prints, GUI clients get a config
+that does not depend on PATH, and the ONNX fallback model no longer
+depends on an install script.
+
+### Fixed
+
+- **FATAL: switching embedding provider killed the server.** `memories_vec`
+  is a `vec0` table with a fixed width (384 ONNX / 768 Ollama). Installing
+  Ollama after the ONNX fallback had built a 384-dim index — or the `auto`
+  cascade dropping to ONNX while Ollama was briefly down on a 768-dim index
+  — made `validateEmbeddingCompatibility` throw at startup, so every client
+  sharing that database lost its memory layer entirely. Provider selection
+  is now **index-aware** (`src/embeddings/runtime.ts`): it prefers the
+  provider matching the existing index, retries an unavailable one with
+  exponential backoff (`NEUROMCP_EMBEDDING_RETRY_ATTEMPTS`,
+  `NEUROMCP_EMBEDDING_RETRY_BASE_MS`), and otherwise starts in **degraded
+  mode** — full-text search keeps working, vector search is disabled, and
+  new memories are stored without a vector and queued for
+  `backfill_embeddings`. Never throws at startup; the index is never
+  rebuilt or migrated implicitly. Set `NEUROMCP_STRICT_EMBEDDINGS=1` for
+  the old hard failure.
+- **`neuromcp-doctor` printed nothing and exited 0.** The direct-invocation
+  guard compared `import.meta.url` with `pathToFileURL(process.argv[1])`.
+  `npm install -g` exposes bins as symlinks; Node resolves `import.meta.url`
+  through realpath but leaves `argv[1]` as the symlink, so `main()` never
+  ran (reproduced against a real global install on npm 11.12.1). Fixed with
+  a realpath-aware guard in `bin/is-main.mjs`, applied to `doctor.mjs`,
+  `init.mjs` and `neuromcp-connect.mjs` (which had the same latent bug).
+  The doctor now also flushes stdout before exiting and always renders a
+  report, even when a check throws.
+- **GUI clients could not find `node`.** `neuromcp-init` wrote
+  `command: "npx"`, but Claude Desktop / Codex Desktop are launched without
+  a login PATH. It now writes an absolute `process.execPath` (routed
+  through `resolveStableNodeBin`, so a Homebrew Cellar path becomes the
+  stable `opt` symlink) plus the absolute path to `bin/neuromcp.mjs`.
+  Running from an npx cache falls back to the old `npx` entry with a
+  warning, since that path is garbage-collected. The shebang stays for
+  terminal use, and the README documents the manual form.
+- **The ONNX fallback model no longer depends on the postinstall.** It is
+  resolved from a per-user cache (`~/.neuromcp/models`, override with
+  `NEUROMCP_MODEL_DIR`) before the package directory, and downloaded
+  lazily on first use when missing — the case for installs with scripts
+  disabled and for root-owned global prefixes the server user cannot write
+  to. `NEUROMCP_DISABLE_MODEL_DOWNLOAD=1` forbids the fetch.
+
+### Added
+
+- **`neuromcp-reembed`** — documented recovery path after a provider
+  switch. Rebuilds the vector index at the new width on a **copy** made
+  with SQLite's backup API; default run is a dry run, `--apply` swaps it in
+  and keeps the original as `<db>.pre-reembed-<timestamp>`. `--limit` for a
+  smoke test, `--keep-copy` to inspect the result first.
+- **`neuromcp-reembed --apply` refuses to swap under a live client.** A
+  client still attached across the swap keeps writing to the renamed-away
+  inode — those writes would vanish silently. Two-layer guard before the
+  swap: `lsof` names other processes holding the file open, and
+  `wal_checkpoint(TRUNCATE)` refuses while a connection is actively
+  reading/writing (on success it has also folded the pending WAL into the
+  file, making the backup complete). Refusal is exit 3, keeps the rebuilt
+  copy, changes nothing; `--force` overrides.
+- Degraded mode is also visible on `backfill_embeddings` results — a
+  degraded run returns `{embedded: 0}` with the `neuromcp_notice`
+  explaining WHY, instead of looking identical to "nothing to backfill".
+  The whole degraded tool surface (store / search / stats / backfill) is
+  now pinned by an MCP-client-level test over the in-memory transport.
+- **Adversarial review round 2 (Codex) — all findings fixed:**
+  - `reembed --apply` PREVENTS writes during the rebuild instead of
+    detecting them: it holds SQLite's write lock (`BEGIN IMMEDIATE`) across
+    the whole snapshot→rebuild→swap window, so a straggler client gets
+    SQLITE_BUSY at its own end while readers keep working. (A
+    `data_version` sentinel was tried first and refused every safe apply
+    on a WAL database — the guard's own `wal_checkpoint(TRUNCATE)` bumps
+    data_version with zero commits; found independently by measurement and
+    by the round-3 Codex CLI repro, and pinned by an end-to-end CLI test
+    on a quiet WAL database.) The attachment guard runs BEFORE the
+    snapshot, re-checks `lsof` before the swap, and fails closed when
+    `lsof` is unavailable instead of treating "cannot detect" as "no
+    clients".
+  - `--apply` + `--limit` is now a parse error: a limited rebuild drops
+    all vectors but re-embeds only the first *n*, so applying it would
+    install a partial index with stale model stamps.
+  - Provider selection requires the stored **model**, not just the index
+    width, and keeps walking the cascade past a same-width wrong-model
+    candidate (`requireModel` in `selectEmbeddingProvider`); previously a
+    reachable correct provider one step further down was never tried.
+  - The ONNX fallback is ruled out **statically** (fixed 384d / model
+    name) before probing, so the lazy ~33 MB model download can never run
+    for a provider that cannot match — and the download itself now has a
+    hard deadline (`NEUROMCP_MODEL_DOWNLOAD_TIMEOUT_MS`, default 5 min).
+  - `neuromcp-doctor`'s better-sqlite3 check constructs a `:memory:`
+    database (the native binding loads lazily — importing alone passes on
+    a scripts-disabled install), and the embedding-index check applies the
+    runtime's own rules: explicit `NEUROMCP_EMBEDDING_PROVIDER` narrows
+    the eligible providers, `checkOllama` probes the CONFIGURED model and
+    MEASURES its dimension (no more hardcoded nomic/768 assumption), a
+    mixed-model database fails unless `NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1`
+    (every-model rule, not any-model), and a same-width model mismatch is
+    named as such instead of being reported healthy.
+  - `NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX=1` reaches SELECTION as well as
+    validation (from the same injected env): with the override active the
+    index-aware cascade no longer pins the stored model, so the documented
+    mix workflow works again.
+- **Adversarial review round 4 (Codex, 7/10) — all findings fixed:**
+  - the `.pre-reembed` rollback backup goes through SQLite's backup API
+    (a byte copy could miss WAL frames from the guard→lock window); the
+    apply e2e verifies the backup's CONTENT, not just its existence;
+  - the doctor matches Ollama tags correctly (`all-minilm:latest` in the
+    config was unmatchable; untagged means `:latest`, differing explicit
+    tags do not match);
+  - the `/api/embed` dimension probe runs on the runtime's budget
+    (`NEUROMCP_EMBED_TIMEOUT_MS`, default 30 s) and a listed model whose
+    width cannot be measured is reported UNVERIFIED (warn) instead of
+    "no embedding route" (fail) — an unmeasured width is no proof of a
+    mismatch;
+  - the `embedding route` summary reports the MEASURED model + width
+    instead of hardcoded `ollama nomic-embed-text 768d`.
+  - QUICKSTART no longer implies bare `npx neuromcp-init` fixes GUI
+    configs — from the npx cache it deliberately falls back to the `npx`
+    entry; a permanent `npm install -g` first is the documented route.
+- **`neuromcp-download-model`** — manual fetch of the ONNX fallback model
+  for machines where install scripts are disabled.
+- **`neuromcp-doctor check --json`** — machine-readable report
+  (`{version, exit_code, checks[]}`), plus a new `embedding index` check
+  that names a dimension mismatch explicitly with the exact recovery steps.
+- Degraded mode is tool-visible: a `neuromcp_notice` field on
+  `store_memory` / `search_memory` results and an `embeddings` block in
+  `memory_stats` (status, provider, index width, memories awaiting
+  embedding).
+
+### Internal
+
+- `createEmbeddingProvider` keeps its exact 0.29.2 behaviour and error
+  text; the cascade moved into a non-throwing `selectEmbeddingProvider`
+  that can require a specific dimension.
+- No schema change — `SCHEMA_VERSION` stays 14, and databases written by
+  0.29.2 are read as-is. Degraded stores use `embedding_model = 'none'`,
+  `embedding_dim = 0`, which `validateEmbeddingCompatibility` already
+  ignores and `backfill_embeddings` already picks up.
+- Version is bumped by the release script, not by this change.
+
 ## [0.29.2] — 2026-07-13
 
 ### Fixed

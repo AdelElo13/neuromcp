@@ -34,10 +34,30 @@ export function getExistingVecDimension(db: Database.Database): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/**
+ * Distinct models that produced the embeddings currently stored in this
+ * database ('none' rows — degraded-mode stores awaiting backfill — do not
+ * count). The index-aware selection uses this to require MODEL identity as
+ * well as width, so the cascade walks past a same-width wrong-model
+ * candidate instead of degrading on it.
+ */
+export function getStoredEmbeddingModels(db: Database.Database): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT embedding_model FROM memories
+        WHERE is_deleted = 0
+          AND embedding_model IS NOT NULL
+          AND embedding_model NOT IN ('none', '')`,
+    )
+    .all() as Array<{ embedding_model: string }>;
+  return rows.map((r) => r.embedding_model);
+}
+
 export function validateEmbeddingCompatibility(
   db: Database.Database,
   embedder: EmbeddingProvider,
   logger: Logger,
+  env: NodeJS.ProcessEnv = process.env,
 ): void {
   // 1. Vector-table dimension vs provider dimension
   const existingDim = getExistingVecDimension(db);
@@ -66,7 +86,7 @@ export function validateEmbeddingCompatibility(
   const foreign = models.filter((m) => m.embedding_model !== embedder.name);
   if (foreign.length > 0) {
     const detail = foreign.map((m) => `"${m.embedding_model}" (${m.n} memories)`).join(', ');
-    if (process.env['NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX'] === '1') {
+    if (env['NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX'] === '1') {
       logger.warn('embeddings', 'Embedding model mix allowed by override', {
         active: embedder.name,
         stored: detail,

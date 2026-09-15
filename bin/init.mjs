@@ -39,15 +39,65 @@ import {
 import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { isMainModule } from './is-main.mjs';
+import { resolveStableNodeBin } from './resolve-node-bin.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** The stdio server entry written into every client config. */
-export const NEUROMCP_SERVER_ENTRY = Object.freeze({
+/** Fallback entry, used only when this copy of neuromcp is ephemeral (npx cache). */
+export const NPX_SERVER_ENTRY = Object.freeze({
   command: 'npx',
   args: Object.freeze(['-y', 'neuromcp']),
 });
+
+/**
+ * A path inside npm's npx cache is garbage-collected — baking it into a
+ * long-lived client config produces a server that works today and is gone
+ * next month. Detect it and keep the npx form for that case.
+ *
+ * @param {string} p
+ * @returns {boolean}
+ */
+export function isEphemeralInstall(p) {
+  return /[\\/]_npx[\\/]/.test(p);
+}
+
+/**
+ * Build the stdio server entry for client configs.
+ *
+ * Why not `npx -y neuromcp` (the 0.29.2 behaviour): GUI clients — Claude
+ * Desktop, Codex Desktop — are launched by the window manager, NOT from a
+ * login shell. They inherit a minimal PATH that usually has no `node` and no
+ * `npx` (nvm/fnm/Homebrew all install outside /usr/bin), so the server never
+ * starts and the client only reports a generic connection failure. The
+ * shebang (`#!/usr/bin/env node`) has the same problem for the same reason,
+ * so it stays for terminal use while configs get absolute paths.
+ *
+ * `resolveStableNodeBin` additionally rewrites a Homebrew Cellar path
+ * (version-pinned, deleted on `brew upgrade`) to the stable `opt` symlink —
+ * the same treatment the launchd plist gets.
+ *
+ * @param {{ execPath?: string, binPath?: string, resolveNode?: (p: string) => string }} [deps]
+ * @returns {{ command: string, args: readonly string[] }}
+ */
+export function buildServerEntry(deps = {}) {
+  const {
+    execPath = process.execPath,
+    binPath = join(__dirname, 'neuromcp.mjs'),
+    resolveNode = resolveStableNodeBin,
+  } = deps;
+  if (isEphemeralInstall(binPath) || isEphemeralInstall(execPath)) {
+    return NPX_SERVER_ENTRY;
+  }
+  return Object.freeze({
+    command: resolveNode(execPath),
+    args: Object.freeze([binPath]),
+  });
+}
+
+/** The stdio server entry written into every client config. */
+export const NEUROMCP_SERVER_ENTRY = buildServerEntry();
 
 export const KNOWN_CLIENTS = Object.freeze(['claude-desktop', 'claude-code', 'cursor', 'windsurf']);
 
@@ -490,6 +540,14 @@ async function main() {
   }
 
   const entryJson = JSON.stringify(NEUROMCP_SERVER_ENTRY);
+  if (NEUROMCP_SERVER_ENTRY.command === 'npx') {
+    console.log('  ⚠ Running from an npx cache — writing the `npx -y neuromcp` entry, which needs');
+    console.log('    node/npx on PATH. GUI clients (Claude Desktop, Codex Desktop) often lack that.');
+    console.log('    For a stable config install first: npm install -g neuromcp && neuromcp-init\n');
+  } else {
+    console.log(`  · server entry: ${entryJson}`);
+    console.log('    (absolute node + script path — GUI clients are launched without a login PATH)\n');
+  }
   let failures = 0;
   const results = [];
   for (const target of targets) {
@@ -577,6 +635,6 @@ async function main() {
 
 // Direct-invocation guard: run main() only when this file is the
 // entrypoint, so tests can import the pure helpers without side effects.
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   void main();
 }

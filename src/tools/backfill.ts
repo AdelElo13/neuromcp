@@ -4,6 +4,7 @@ import type { EmbeddingProvider } from '../embeddings/types.js';
 import type { Logger } from '../observability/logger.js';
 import type { Metrics } from '../observability/metrics.js';
 import type { BackfillResult } from '../types.js';
+import { degradedNotice, isDegradedProvider } from '../embeddings/runtime.js';
 
 /**
  * Backfill embeddings for all memories that are missing from the vector store.
@@ -17,6 +18,19 @@ export async function backfillEmbeddings(
   metrics: Metrics,
 ): Promise<BackfillResult> {
   const start = Date.now();
+
+  // Degraded start (no provider matches the existing vector index): there
+  // is nothing to backfill WITH. Say so instead of logging one failed batch
+  // per 10 memories.
+  if (isDegradedProvider(embedder)) {
+    const total = (
+      db.prepare('SELECT COUNT(*) AS n FROM memories WHERE is_deleted = 0').get() as { n: number }
+    ).n;
+    logger.error('backfill', 'Embeddings unavailable — backfill skipped', {
+      reason: degradedNotice(embedder),
+    });
+    return { total, embedded: 0, skipped: 0, errors: 0 };
+  }
 
   // Find all active memories
   const allMemories = db

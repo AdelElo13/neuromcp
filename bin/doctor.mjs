@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isMainModule } from './is-main.mjs';
 import { homedir, platform } from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -31,11 +32,26 @@ const REPO_ROOT = resolve(HERE, '..');
 const DEFAULT_DAEMON_PORT = 3200;
 const PROBE_TIMEOUT_MS = 2_000;
 const LAUNCHD_LABEL = 'com.neuromcp.daemon';
+const MODEL_FILENAME = 'bge-small-en-v1.5.onnx';
 // Where scripts/download-model.mjs writes the offline fallback model.
-const ONNX_MODEL_PATH = resolve(REPO_ROOT, 'models', 'bge-small-en-v1.5.onnx');
+const ONNX_MODEL_PATH = resolve(REPO_ROOT, 'models', MODEL_FILENAME);
+// v0.29.3: the lazy first-run download writes here instead (user-writable
+// even when the package lives in a root-owned global prefix).
+const ONNX_USER_MODEL_PATH = resolve(homedir(), '.neuromcp', 'models', MODEL_FILENAME);
 
 /**
  * @typedef {{ name: string, status: 'ok'|'warn'|'fail'|'skip', info: string }} CheckResult
+ */
+
+/**
+ * Minimal better-sqlite3 surface the checks use. Declared once so the db
+ * checks and the embedding-index check agree on the handle shape.
+ *
+ * @typedef {new (path: string, opts?: object) => {
+ *   pragma: (s: string) => unknown,
+ *   prepare: (sql: string) => { get: (...a: unknown[]) => unknown, all: (...a: unknown[]) => unknown[] },
+ *   close: () => void,
+ * }} SqliteCtor
  */
 
 /**
@@ -126,38 +142,99 @@ function daemonDownResult(name, url, reason, osPlatform) {
  *   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>,
  *   env?: Record<string, string | undefined>,
  * }} [deps]
- * @returns {Promise<CheckResult>}
+ * @returns {Promise<{ result: CheckResult, probe: { model: string, dimensions: number | null } | null }>}
  */
 export async function checkOllama(deps = {}) {
   const { fetchImpl = defaultFetch, env = process.env } = deps;
   const name = 'ollama embeddings';
   const host = env.OLLAMA_HOST ?? 'http://localhost:11434';
-  const url = `${host.replace(/\/$/, '')}/api/tags`;
+  const base = host.replace(/\/$/, '');
+  // Probe the model the runtime will actually use — presenting a nomic
+  // probe as evidence for a custom NEUROMCP_EMBEDDING_MODEL diagnosed the
+  // wrong thing entirely (Codex round 3).
+  const model =
+    env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL !== 'auto'
+      ? env.NEUROMCP_EMBEDDING_MODEL
+      : 'nomic-embed-text';
+  // Ollama tag semantics: an untagged name means the ':latest' tag, and a
+  // configured value may itself carry a tag. Comparing bases only can never
+  // match a tagged configuration (Codex round 4).
+  /** @param {string} listed @param {string} wanted @returns {boolean} */
+  const modelMatches = (listed, wanted) => {
+    // Normalize BOTH sides to an explicit tag: `ollama run all-minilm`
+    // resolves to :latest specifically, so a listed :v2 must not satisfy
+    // an untagged configuration (the runtime's embed call would fail).
+    const [listedBase, listedTag = 'latest'] = listed.split(':');
+    const [wantedBase, wantedTag = 'latest'] = wanted.split(':');
+    return listedBase === wantedBase && listedTag === wantedTag;
+  };
+  // The embed probe uses the RUNTIME's budget (a cold model load easily
+  // exceeds the 2s reachability budget; concluding "broken" while the
+  // runtime would match is a misdiagnosis).
+  const embedBudgetRaw = Number(env.NEUROMCP_EMBED_TIMEOUT_MS);
+  const embedBudgetMs =
+    Number.isFinite(embedBudgetRaw) && embedBudgetRaw > 0 ? Math.floor(embedBudgetRaw) : 30_000;
   try {
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    const res = await fetchImpl(`${base}/api/tags`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     if (!res.ok) {
-      return ollamaDownResult(name, host, `HTTP ${res.status}`);
+      return { result: ollamaDownResult(name, host, `HTTP ${res.status}`), probe: null };
     }
     const body = /** @type {{ models?: Array<{ name?: unknown }> }} */ (await res.json());
     const models = Array.isArray(body?.models) ? body.models : [];
-    const hasNomic = models.some(
-      (m) => typeof m?.name === 'string' && m.name.split(':')[0] === 'nomic-embed-text',
+    const hasModel = models.some(
+      (m) => typeof m?.name === 'string' && modelMatches(m.name, model),
     );
-    if (hasNomic) {
-      return { name, status: 'ok', info: `nomic-embed-text (768d) available at ${host}` };
+    if (!hasModel) {
+      return {
+        result: {
+          name,
+          status: 'warn',
+          info: `Ollama runs at ${host} but ${model} is not pulled — ` +
+            `retrieval falls back to ONNX 384d (lower quality). ` +
+            `Fix: \`ollama pull ${model}\``,
+        },
+        probe: null,
+      };
+    }
+    // Measure the model's real width instead of assuming one — a custom
+    // model can be any dimension, and the embedding-index check needs the
+    // truth to apply the runtime's compatibility rule.
+    let dims = null;
+    try {
+      const probeRes = await fetchImpl(`${base}/api/embed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, input: 'dimension probe' }),
+        signal: AbortSignal.timeout(embedBudgetMs),
+      });
+      const probeBody = probeRes.ok
+        ? /** @type {{ embeddings?: number[][] }} */ (await probeRes.json())
+        : null;
+      const candidate = probeBody?.embeddings?.[0]?.length;
+      if (typeof candidate === 'number' && candidate > 0) dims = candidate;
+    } catch {
+      // listed-but-unmeasurable is UNVERIFIED, not absent — fall through
+    }
+    if (dims === null) {
+      return {
+        result: {
+          name,
+          status: 'warn',
+          info: `${model} is listed at ${host} but the embed probe failed or timed out — ` +
+            `its dimension is UNVERIFIED (the runtime, with NEUROMCP_EMBED_TIMEOUT_MS=${embedBudgetMs}, may still work)`,
+        },
+        probe: { model, dimensions: null },
+      };
     }
     return {
-      name,
-      status: 'warn',
-      info: `Ollama runs at ${host} but nomic-embed-text is not pulled — ` +
-        `retrieval falls back to ONNX 384d (lower quality). ` +
-        `Fix: \`ollama pull nomic-embed-text\``,
+      result: { name, status: 'ok', info: `${model} (${dims}d, measured) available at ${host}` },
+      probe: { model, dimensions: dims },
     };
   } catch (err) {
     const reason = err instanceof Error && err.name === 'AbortError'
       ? `timeout after ${PROBE_TIMEOUT_MS}ms`
       : err instanceof Error ? err.message : String(err);
-    return ollamaDownResult(name, host, reason);
+    return { result: ollamaDownResult(name, host, reason), probe: null };
   }
 }
 
@@ -180,20 +257,41 @@ function ollamaDownResult(name, host, reason) {
  * Check the offline ONNX fallback model that scripts/download-model.mjs
  * installs into <repo>/models/.
  *
- * @param {{ exists?: (p: string) => boolean, modelPath?: string }} [deps]
+ * @param {{ exists?: (p: string) => boolean, modelPath?: string, userModelPath?: string, env?: Record<string, string | undefined> }} [deps]
  * @returns {CheckResult}
  */
 export function checkOnnxModel(deps = {}) {
-  const { exists = existsSync, modelPath = ONNX_MODEL_PATH } = deps;
+  const {
+    exists = existsSync,
+    modelPath = ONNX_MODEL_PATH,
+    userModelPath = ONNX_USER_MODEL_PATH,
+    env = process.env,
+  } = deps;
   const name = 'onnx fallback model';
-  if (exists(modelPath)) {
-    return { name, status: 'ok', info: modelPath };
+  // NEUROMCP_MODEL_DIR is where the runtime resolves the model FIRST
+  // (embeddings/model-cache.ts) — a doctor that never looks there calls a
+  // working custom-dir install route-less.
+  // Runtime parity (embeddings/model-cache.ts userModelDir): the override
+  // REPLACES the default user cache — it does not come on top of it. A
+  // model that only lives in the default cache is invisible to a runtime
+  // configured with NEUROMCP_MODEL_DIR.
+  const customDir = env.NEUROMCP_MODEL_DIR;
+  const userPath =
+    customDir !== undefined && customDir !== ''
+      ? resolve(customDir, MODEL_FILENAME)
+      : userModelPath;
+  const candidates = [userPath, modelPath];
+  for (const candidate of candidates) {
+    if (exists(candidate)) {
+      return { name, status: 'ok', info: candidate };
+    }
   }
   return {
     name,
     status: 'warn',
-    info: `missing at ${modelPath} — no offline embedding fallback. ` +
-      `Fix: \`node scripts/download-model.mjs\``,
+    info: `missing at ${userPath} and ${modelPath} — no offline embedding fallback yet. ` +
+      `It is downloaded automatically on first use; to fetch it now run \`npx neuromcp-download-model\` ` +
+      `(or \`node scripts/download-model.mjs\` in a checkout).`,
   };
 }
 
@@ -203,17 +301,23 @@ export function checkOnnxModel(deps = {}) {
  * path check report false negatives.
  *
  * @param {{ loadModule?: () => Promise<{ default: unknown }> }} [deps]
- * @returns {Promise<{ result: CheckResult, Database: (new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }) | null }>}
+ * @returns {Promise<{ result: CheckResult, Database: SqliteCtor | null }>}
  */
 export async function checkBetterSqlite(deps = {}) {
   const { loadModule = () => import(defaultResolveSqlite()) } = deps;
   const name = 'better-sqlite3 native';
   try {
     const mod = await loadModule();
-    const Database = mod.default ?? mod;
+    const Database = /** @type {SqliteCtor} */ (mod.default ?? mod);
+    // Importing the module is NOT enough: an `--ignore-scripts` install
+    // imports fine and only fails when a Database is constructed (the
+    // native binding loads lazily). Construct one, or exactly the failure
+    // mode this check documents gets diagnosed as healthy.
+    const probe = new Database(':memory:');
+    probe.close();
     return {
-      result: { name, status: 'ok', info: 'module + native binding load' },
-      Database: /** @type {never} */ (Database),
+      result: { name, status: 'ok', info: 'module + native binding load (:memory: smoke test)' },
+      Database,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -241,7 +345,7 @@ function defaultResolveSqlite() {
  * Skips with a clear message when better-sqlite3 itself did not load.
  *
  * @param {{
- *   Database: (new (path: string, opts?: object) => { pragma: (s: string) => unknown, close: () => void }) | null,
+ *   Database: SqliteCtor | null,
  *   env?: Record<string, string | undefined>,
  *   exists?: (p: string) => boolean,
  *   home?: string,
@@ -289,21 +393,263 @@ export function checkDatabase(deps) {
 }
 
 /**
+ * Name the 0.29.2 killer explicitly: the vector index in the database has a
+ * fixed width, and the provider that is actually reachable may no longer
+ * produce that width (installed Ollama after the ONNX fallback built a
+ * 384-dim index, or Ollama is down on a 768-dim index). 0.29.3 no longer
+ * crashes on this — it starts DEGRADED — so the doctor has to say out loud
+ * which state the machine is in and how to leave it.
+ *
+ * @param {{
+ *   Database: SqliteCtor | null,
+ *   ollamaProbe: { model: string, dimensions: number | null } | null,
+ *   onnxResult: Pick<CheckResult, 'status'>,
+ *   env?: Record<string, string | undefined>,
+ *   exists?: (p: string) => boolean,
+ *   home?: string,
+ * }} deps
+ * @returns {CheckResult}
+ */
+export function checkEmbeddingIndex(deps) {
+  const {
+    Database,
+    ollamaProbe,
+    onnxResult,
+    env = process.env,
+    exists = existsSync,
+    home = homedir(),
+  } = deps;
+  const name = 'embedding index';
+  const dbPath = env.NEUROMCP_DB_PATH ?? resolve(home, '.neuromcp', 'memory.db');
+
+  if (Database === null) {
+    return { name, status: 'skip', info: 'skipped — better-sqlite3 did not load' };
+  }
+  if (!exists(dbPath)) {
+    return { name, status: 'ok', info: 'no database yet — the first provider to run defines the index width' };
+  }
+
+  let db = null;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const row = /** @type {{ sql?: string } | undefined} */ (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_vec'").get()
+    );
+    if (row === undefined || typeof row.sql !== 'string') {
+      return { name, status: 'ok', info: 'no vector index yet — nothing to mismatch' };
+    }
+    const match = row.sql.match(/float\[(\d+)\]/);
+    const indexDim = match ? Number(match[1]) : null;
+    if (indexDim === null) {
+      return { name, status: 'warn', info: 'memories_vec exists but its width could not be parsed' };
+    }
+
+    // Which providers can this machine actually use right now — under the
+    // SAME rules the runtime applies: the explicit provider setting narrows
+    // the cascade, and a same-width provider of another MODEL is not a
+    // match (its vectors are unrelated). Without this the doctor declared
+    // "matched by onnx" while the runtime was degrading (Codex round 2).
+    const requested = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
+    const available = [];
+    /** @type {Array<{ provider: string, model: string }>} */
+    const unverified = [];
+    // The doctor never probes OpenAI (no free probe exists). When the
+    // configuration makes OpenAI selectable, the honest verdict on a
+    // non-matching index is "unverifiable", never "proven mismatch".
+    if (requested === 'openai' || (requested === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '')) {
+      // Factory parity: with an EXPLICIT openai provider any configured
+      // model name is preserved; only the auto-cascade filters non-OpenAI
+      // looking names (they are almost certainly Ollama model names).
+      const explicitModel = env.NEUROMCP_EMBEDDING_MODEL;
+      const openaiModel =
+        explicitModel === undefined || explicitModel === '' || explicitModel === 'auto' ||
+        (requested === 'auto' && !explicitModel.startsWith('text-embedding'))
+          ? 'text-embedding-3-small'
+          : explicitModel;
+      unverified.push({ provider: `openai ${openaiModel} (doctor cannot probe OpenAI)`, model: openaiModel });
+    }
+    if ((requested === 'auto' || requested === 'ollama') && ollamaProbe !== null) {
+      // The probe carries the MEASURED width of the CONFIGURED model — a
+      // nomic assumption here misdiagnosed every custom-model setup. A
+      // listed model whose width could not be measured is UNVERIFIED: it
+      // must not count as a match, but it is no proof of a mismatch either.
+      if (ollamaProbe.dimensions === null) {
+        unverified.push({ provider: `ollama ${ollamaProbe.model}`, model: ollamaProbe.model });
+      } else {
+        available.push({
+          provider: `ollama ${ollamaProbe.model}`,
+          model: ollamaProbe.model,
+          dim: ollamaProbe.dimensions,
+        });
+      }
+    }
+    if ((requested === 'auto' || requested === 'onnx') && onnxResult.status === 'ok') {
+      available.push({ provider: 'onnx bge-small-en-v1.5', model: 'bge-small-en-v1.5', dim: 384 });
+    }
+
+    // What model produced the embeddings that are already stored?
+    /** @type {Array<{ embedding_model: string, n: number }>} */
+    let storedModels = [];
+    try {
+      storedModels = /** @type {Array<{ embedding_model: string, n: number }>} */ (
+        db
+          .prepare(
+            `SELECT embedding_model, COUNT(*) AS n FROM memories
+              WHERE is_deleted = 0
+                AND embedding_model IS NOT NULL
+                AND embedding_model NOT IN ('none', '')
+              GROUP BY embedding_model`,
+          )
+          .all()
+      );
+    } catch {
+      /* pre-schema database — width-only check below */
+    }
+
+    // Runtime parity: a candidate matches only when EVERY stored model is
+    // its own (one foreign model already degrades the runtime), unless the
+    // documented mix-override is active.
+    const mixAllowed = env.NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX === '1';
+    const widthMatches = available.filter((a) => a.dim === indexDim);
+    const matching = widthMatches.find(
+      (a) => mixAllowed || storedModels.every((m) => m.embedding_model === a.model),
+    );
+    if (matching !== undefined) {
+      return {
+        name,
+        status: 'ok',
+        info: `${indexDim}-dim index in ${dbPath}, matched by ${matching.provider}`,
+      };
+    }
+    // Uncertainty only counts for a candidate that could still match: its
+    // width is unknown, but its MODEL NAME is known — a stored-model
+    // conflict already rules it out regardless of width (Codex round 6).
+    const openUnverified = unverified.filter(
+      (u) => mixAllowed || storedModels.every((m) => m.embedding_model === u.model),
+    );
+    if (openUnverified.length > 0) {
+      // Uncertainty outranks the hard verdicts below: an unverified
+      // candidate may be exactly the matching provider, so neither a
+      // measured same-width model mismatch nor a width mismatch is PROOF
+      // of a broken install while it is in play.
+      const mismatchNote = widthMatches.length > 0
+        ? ` (${widthMatches.map((a) => a.provider).join(' / ')} matches the width but not the stored model)`
+        : '';
+      return {
+        name,
+        status: 'warn',
+        info:
+          `${indexDim}-dim index in ${dbPath}; ${openUnverified.map((u) => u.provider).join(' / ')} could not be ` +
+          `verified (dimension UNVERIFIED)${mismatchNote} — the runtime may still match. ` +
+          `Retry, raise NEUROMCP_EMBED_TIMEOUT_MS, or check the daemon log for the live verdict.`,
+      };
+    }
+    if (widthMatches.length > 0) {
+      const stored = storedModels.map((m) => `"${m.embedding_model}" (${m.n})`).join(', ');
+      return {
+        name,
+        status: 'fail',
+        info:
+          `MODEL MISMATCH: ${dbPath} holds a ${indexDim}-dim index with embeddings by ${stored}, ` +
+          `but the reachable ${indexDim}d provider is ${widthMatches.map((a) => a.provider).join(' / ')} — ` +
+          `same width, different model: the runtime starts DEGRADED rather than mixing vector spaces. ` +
+          `Recovery: restore the original model, or rebuild with \`npx neuromcp-reembed\` (dry run) then ` +
+          `\`npx neuromcp-reembed --apply\`.`,
+      };
+    }
+    const scope = requested === 'auto' ? '' : ` under NEUROMCP_EMBEDDING_PROVIDER=${requested}`;
+    const offer = available.length === 0
+      ? `no eligible provider is reachable${scope}` +
+        (requested === 'openai' ? ' (the doctor cannot verify OpenAI widths — check the daemon log)' : '')
+      : `only ${available.map((a) => `${a.provider} (${a.dim}d)`).join(' and ')} eligible${scope}`;
+    return {
+      name,
+      status: 'fail',
+      info:
+        `DIMENSION MISMATCH: ${dbPath} holds a ${indexDim}-dim vector index but ${offer}. ` +
+        `neuromcp 0.29.3+ starts in DEGRADED mode here (full-text search works, vector search off, ` +
+        `new memories queued for backfill) — it does not crash. Recovery, pick one: ` +
+        `(a) restore the ${indexDim}-dim provider — for 768 start Ollama and \`ollama pull nomic-embed-text\`, ` +
+        `for 384 keep the ONNX fallback (\`npx neuromcp-download-model\`) and set NEUROMCP_EMBEDDING_PROVIDER=onnx; ` +
+        `or (b) rebuild the index for the provider you want: \`npx neuromcp-reembed\` (dry run on a COPY) then ` +
+        `\`npx neuromcp-reembed --apply\` (swaps it in, keeps a timestamped backup).`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { name, status: 'warn', info: `could not inspect ${dbPath}: ${msg}` };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // read-only handle
+    }
+  }
+}
+
+/**
  * At least one embedding route (Ollama 768d or ONNX 384d fallback) must
  * exist, otherwise store/search are dead — that is broken, not a warning.
  *
  * @param {Pick<CheckResult, 'status'>} ollamaResult
  * @param {Pick<CheckResult, 'status'>} onnxResult
+ * @param {{ model: string, dimensions: number | null } | null} [ollamaProbe]
+ * @param {Record<string, string | undefined>} [env]
  * @returns {CheckResult}
  */
-export function deriveEmbeddingRoute(ollamaResult, onnxResult) {
+export function deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaProbe = null, env = process.env) {
   const name = 'embedding route';
-  if (ollamaResult.status === 'ok') {
-    const fallback = onnxResult.status === 'ok' ? ' (+ ONNX offline fallback)' : '';
-    return { name, status: 'ok', info: `ollama nomic-embed-text 768d${fallback}` };
+  // An explicit provider FILTERS the route: the runtime refuses to fall
+  // back past an explicitly requested provider, so a reachable-but-
+  // ineligible one must not count (Codex round 7).
+  const requestedProvider = env.NEUROMCP_EMBEDDING_PROVIDER ?? 'auto';
+  const ollamaEligible = requestedProvider === 'auto' || requestedProvider === 'ollama';
+  const onnxEligible = requestedProvider === 'auto' || requestedProvider === 'onnx';
+  if (ollamaEligible && ollamaResult.status === 'ok') {
+    // Only promise the fallback the runtime is actually allowed to take.
+    const fallback = onnxEligible && onnxResult.status === 'ok' ? ' (+ ONNX offline fallback)' : '';
+    // Report the MEASURED model and width when the probe has them — the
+    // route summary claimed nomic/768 even for a measured 384d custom model.
+    const route =
+      ollamaProbe !== null && ollamaProbe.dimensions !== null
+        ? `ollama ${ollamaProbe.model} ${ollamaProbe.dimensions}d`
+        : 'ollama nomic-embed-text 768d';
+    return { name, status: 'ok', info: `${route}${fallback}` };
   }
-  if (onnxResult.status === 'ok') {
+  if (onnxEligible && onnxResult.status === 'ok') {
     return { name, status: 'ok', info: 'ONNX 384d fallback only — see warnings above for the Ollama upgrade path' };
+  }
+  if (ollamaEligible && ollamaProbe !== null && ollamaProbe.dimensions === null) {
+    // A listed model whose width could not be measured is an UNVERIFIED
+    // route, not a missing one — "no embedding route, exit 2" here dragged
+    // the aggregate verdict to broken while the runtime may work fine.
+    return {
+      name,
+      status: 'warn',
+      info: `ollama ${ollamaProbe.model} is listed but its dimension is UNVERIFIED ` +
+        '(embed probe failed or timed out) — the runtime may still work; ' +
+        'retry or raise NEUROMCP_EMBED_TIMEOUT_MS',
+    };
+  }
+  // The doctor cannot probe OpenAI; when the configuration makes it
+  // selectable, the route is unverifiable — not proven absent.
+  const openaiEligible =
+    requestedProvider === 'openai' ||
+    (requestedProvider === 'auto' && typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY !== '');
+  if (openaiEligible) {
+    return {
+      name,
+      status: 'warn',
+      info: 'openai is configured and may serve embeddings, but the doctor cannot probe it — ' +
+        'check the daemon log for the live verdict',
+    };
+  }
+  if (requestedProvider !== 'auto') {
+    return {
+      name,
+      status: 'fail',
+      info: `NEUROMCP_EMBEDDING_PROVIDER=${requestedProvider} is set but that provider is not usable — ` +
+        'the runtime will NOT fall back past an explicit provider. Fix that provider or unset the override.',
+    };
   }
   return {
     name,
@@ -328,9 +674,12 @@ function printHelp() {
 neuromcp-doctor — install + privacy diagnostics
 
 Usage:
-  neuromcp-doctor check               env + dep + daemon + embeddings + db triage
+  neuromcp-doctor check [--json]      env + dep + daemon + embeddings + db triage
   neuromcp-doctor audit-network       proves zero-egress for 30s
   neuromcp-doctor --help              this message
+
+Options:
+  --json   machine-readable report on stdout: { version, exit_code, checks[] }
 
 Exit codes (check): 0 = healthy, 1 = warnings only, 2 = broken
 
@@ -339,7 +688,45 @@ Exit codes (check): 0 = healthy, 1 = warnings only, 2 = broken
 
 const STATUS_GLYPH = { ok: '✓', warn: '!', fail: '✗', skip: '-' };
 
-async function runCheck() {
+/**
+ * Render a finished check list. Pure + injectable so the "doctor must print
+ * something" guarantee is testable without spawning a process.
+ *
+ * @param {CheckResult[]} checks
+ * @param {{ json?: boolean, version?: string }} [opts]
+ * @returns {string} the exact text written to stdout
+ */
+export function renderChecks(checks, opts = {}) {
+  const { json = false, version = 'unknown' } = opts;
+  const code = aggregateExitCode(checks);
+  if (json) {
+    return JSON.stringify({ version, exit_code: code, checks }, null, 2) + '\n';
+  }
+  if (checks.length === 0) {
+    return 'no checks ran — this is a bug, please report it\n';
+  }
+  const w = Math.max(...checks.map((c) => c.name.length)) + 2;
+  let out = '';
+  for (const c of checks) {
+    out += `${STATUS_GLYPH[c.status]} ${c.name.padEnd(w)} ${c.info}\n`;
+  }
+  if (code === 1) {
+    out += '\nwarnings present — degraded but functional (exit 1)\n';
+  } else if (code === 2) {
+    out += '\nbroken — see ✗ lines above (exit 2)\n';
+  } else {
+    out += '\nall checks passed (exit 0)\n';
+  }
+  return out;
+}
+
+/**
+ * Collect every check. Separated from rendering so `--json` and the text
+ * report cannot drift apart.
+ *
+ * @returns {Promise<CheckResult[]>}
+ */
+export async function collectChecks() {
   /** @type {CheckResult[]} */
   const checks = [];
 
@@ -383,23 +770,41 @@ async function runCheck() {
   checks.push(checkDatabase({ Database }));
 
   // 8-10. Daemon + embedding routes (network probes run concurrently)
-  const [daemonResult, ollamaResult] = await Promise.all([checkDaemon(), checkOllama()]);
+  const [daemonResult, ollamaOutcome] = await Promise.all([checkDaemon(), checkOllama()]);
+  const ollamaResult = ollamaOutcome.result;
   const onnxResult = checkOnnxModel();
   checks.push(daemonResult, ollamaResult, onnxResult);
-  checks.push(deriveEmbeddingRoute(ollamaResult, onnxResult));
+  checks.push(deriveEmbeddingRoute(ollamaResult, onnxResult, ollamaOutcome.probe));
 
-  // Render
-  const w = Math.max(...checks.map((c) => c.name.length)) + 2;
-  for (const c of checks) {
-    process.stdout.write(`${STATUS_GLYPH[c.status]} ${c.name.padEnd(w)} ${c.info}\n`);
+  // 11. Vector-index width vs what this machine can actually embed.
+  checks.push(checkEmbeddingIndex({ Database, ollamaProbe: ollamaOutcome.probe, onnxResult }));
+
+  return checks;
+}
+
+/**
+ * @param {{ json?: boolean }} [opts]
+ * @returns {Promise<0|1|2>}
+ */
+async function runCheck(opts = {}) {
+  /** @type {CheckResult[]} */
+  let checks;
+  try {
+    checks = await collectChecks();
+  } catch (err) {
+    // A doctor that dies silently is the worst possible doctor (that was
+    // literally bug #2 in 0.29.2). Always emit something readable.
+    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    checks = [/** @type {CheckResult} */ ({ name: 'doctor', status: 'fail', info: `diagnostics crashed: ${msg}` })];
   }
-  const code = aggregateExitCode(checks);
-  if (code === 1) {
-    process.stdout.write('\nwarnings present — degraded but functional (exit 1)\n');
-  } else if (code === 2) {
-    process.stdout.write('\nbroken — see ✗ lines above (exit 2)\n');
+  let version = 'unknown';
+  try {
+    version = JSON.parse(readFileSync(resolve(REPO_ROOT, 'package.json'), 'utf8')).version;
+  } catch {
+    // reported as 'unknown'
   }
-  process.exit(code);
+  process.stdout.write(renderChecks(checks, { json: opts.json === true, version }));
+  return aggregateExitCode(checks);
 }
 
 /**
@@ -576,26 +981,51 @@ dgram.createSocket = function patchedCreate(...args) {
 }
 
 async function main() {
-  const cmd = process.argv[2] ?? 'check';
+  const argv = process.argv.slice(2);
+  const json = argv.includes('--json');
+  const cmd = argv.find((a) => !a.startsWith('-')) ?? 'check';
 
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  if (argv.includes('--help') || argv.includes('-h') || cmd === 'help') {
     printHelp();
     process.exit(0);
   }
 
   if (cmd === 'check') {
-    await runCheck();
+    // process.exit can truncate a pending write on a pipe; flush first.
+    const code = await runCheck({ json });
+    await flushStdout();
+    process.exit(code);
   } else if (cmd === 'audit-network') {
-    process.exit(await runAuditNetwork());
+    const code = await runAuditNetwork();
+    await flushStdout();
+    process.exit(code);
   } else {
-    console.error(`Unknown subcommand: ${cmd}\n`);
+    process.stderr.write(`Unknown subcommand: ${cmd}\n`);
     printHelp();
+    await flushStdout();
     process.exit(2);
   }
 }
 
+/**
+ * Wait until stdout has drained. When stdout is a pipe (CI, `| tee`, a GUI
+ * client capturing output) writes are asynchronous, and process.exit() right
+ * after a write can drop the report entirely.
+ *
+ * @returns {Promise<void>}
+ */
+function flushStdout() {
+  return new Promise((resolveDone) => {
+    if (process.stdout.writableLength === 0) {
+      resolveDone();
+      return;
+    }
+    process.stdout.write('', () => resolveDone());
+  });
+}
+
 // Direct-invocation guard: run main() only when this file is the
 // entrypoint, so tests can import the pure helpers without side effects.
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   void main();
 }

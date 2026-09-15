@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ServerDeps } from '../server.js';
-import { textResult } from './types.js';
+import { textResult, withDegradedNotice } from './types.js';
 import { storeMemory } from '../tools/store.js';
 import { ensureAmbientEpisode } from '../tools/episode.js';
 import { activeEpisodeForNamespace } from '../episode/active-state.js';
@@ -15,6 +15,7 @@ import { memoryStats } from '../tools/stats.js';
 import { exportMemories, importMemories } from '../tools/admin.js';
 import { backfillEmbeddings } from '../tools/backfill.js';
 import { logRetrieval } from '../tools/attribution.js';
+import { embeddingStatus } from '../embeddings/runtime.js';
 
 export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
   const { db, vecStore, embedder, config, logger, metrics, reranker } = deps;
@@ -56,7 +57,7 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       }
     }
     const result = await storeMemory(effectiveArgs, { db, vecStore, embedder, logger, metrics, config });
-    return textResult(result);
+    return textResult(withDegradedNotice(embedder, result));
   });
 
   server.registerTool('search_memory', {
@@ -96,10 +97,10 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
         },
         { db, logger }
       );
-      return textResult({ results: projected, retrieval_event_id: event_id });
+      return textResult(withDegradedNotice(embedder, { results: projected, retrieval_event_id: event_id }));
     } catch (err) {
       logger.warn('search', 'auto-log retrieval failed', { error: err instanceof Error ? err.message : String(err) });
-      return textResult(projected);
+      return textResult(withDegradedNotice(embedder, { results: projected }));
     }
   });
 
@@ -173,7 +174,10 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
     },
   }, (args) => {
     const stats = memoryStats(args, db, embedder, config);
-    return textResult(stats);
+    return textResult(withDegradedNotice(embedder, {
+      ...stats,
+      embeddings: embeddingStatus(db, embedder),
+    }));
   });
 
   server.registerTool('export_memories', {
@@ -205,7 +209,9 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
     inputSchema: {},
   }, async () => {
     const result = await backfillEmbeddings(db, vecStore, embedder, logger, metrics);
-    return textResult(result);
+    // Degraded runs return {embedded: 0} — the notice says WHY, otherwise
+    // this is indistinguishable from "nothing needed backfilling".
+    return textResult(withDegradedNotice(embedder, result));
   });
 
   server.registerTool('search_all', {

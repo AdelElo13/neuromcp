@@ -1,8 +1,8 @@
-import { resolve, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EmbeddingProvider } from './types.js';
 import type { InferenceSession } from 'onnxruntime-node';
+import { MODEL_FILENAME, ensureModel, findModel } from './model-cache.js';
 
 // onnxruntime-node is a peer/optional dependency — lazy import to allow graceful failure
 let ort: { InferenceSession: typeof import('onnxruntime-node').InferenceSession; Tensor: typeof import('onnxruntime-node').Tensor } | null = null;
@@ -14,26 +14,10 @@ async function loadOrt(): Promise<NonNullable<typeof ort>> {
   return ort;
 }
 
-const MODEL_FILENAME = 'bge-small-en-v1.5.onnx';
+const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 
 function resolveModelPath(): string | null {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    // From dist/ (bundled) → ../models/ (package root)
-    resolve(thisDir, '..', 'models', MODEL_FILENAME),
-    // From src/embeddings/ (dev) → ../../models/
-    resolve(thisDir, '..', '..', 'models', MODEL_FILENAME),
-    // Relative to cwd
-    resolve(process.cwd(), 'models', MODEL_FILENAME),
-    // Common install location: node_modules/neuromcp/models/
-    resolve(thisDir, 'models', MODEL_FILENAME),
-  ];
-
-  const unique = [...new Set(candidates)];
-  for (const candidate of unique) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+  return findModel(THIS_DIR);
 }
 
 /**
@@ -140,14 +124,25 @@ export class OnnxEmbeddingProvider implements EmbeddingProvider {
   readonly maxTokens = 512;
 
   private session: InferenceSession | null = null;
-  private readonly modelPath: string | null;
+  private modelPath: string | null;
+  /** An explicit constructor path is never replaced by the lazy download. */
+  private readonly pinnedPath: boolean;
 
   constructor(modelPath?: string) {
+    this.pinnedPath = modelPath !== undefined;
     this.modelPath = modelPath ?? resolveModelPath();
   }
 
   async isAvailable(): Promise<boolean> {
     try {
+      // v0.29.3: the model is fetched lazily on first use when the install
+      // script never ran (npm --ignore-scripts, hardened .npmrc, read-only
+      // global package dir). Without this, a perfectly fine install reports
+      // "no embedding route at all".
+      if (this.modelPath === null && !this.pinnedPath) {
+        this.modelPath = await ensureModel(THIS_DIR);
+      }
+      if (this.modelPath === null) return false;
       await this.ensureSession();
       return true;
     } catch {
@@ -192,8 +187,8 @@ export class OnnxEmbeddingProvider implements EmbeddingProvider {
 
     if (this.modelPath === null) {
       throw new Error(
-        `ONNX model not found. Run: npx tsx scripts/download-model.ts\n` +
-        `Expected location: models/${MODEL_FILENAME}`,
+        `ONNX model not found. Run: npx neuromcp-download-model\n` +
+        `Expected location: ~/.neuromcp/models/${MODEL_FILENAME} (or <package>/models/)`,
       );
     }
 

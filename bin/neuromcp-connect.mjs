@@ -30,7 +30,7 @@
 
 import { spawn, execFile } from 'node:child_process';
 import { platform } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from './is-main.mjs';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 3200;
@@ -204,6 +204,6 @@ async function main() {
 
 // Direct-invocation guard: run main() only when this file is the
 // entrypoint, so tests can import the pure helpers without side effects.
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   void main();
 }
