@@ -750,6 +750,19 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
 # A pure tool-call checkpoint line, e.g.
 #   "- 2026-06-14T00:10:54.232Z | 8110 tool calls | last: Read | cwd: /Users/a"
 _TOOLCALL_LINE = re.compile(r"^\s*-\s*\d{4}-\d{2}-\d{2}T[\dT:.Z+\-]+\s*\|\s*\d+\s*tool calls\s*\|")
+_WIKI_ACTIVITY_MARKER = "--- Recent Wiki Activity ---"
+# Header lines the persist hook writes for every session — metadata only.
+# "User messages:" is deliberately NOT listed: a user message is content.
+_METADATA_LINE = re.compile(r"^\s*(Session ended|Working directory|Tools used|Project|Branch|Worktree):")
+
+
+def _strip_frontmatter(lines: list[str]) -> list[str]:
+    """Drop a leading YAML frontmatter block (--- … ---)."""
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                return lines[i + 1:]
+    return lines
 
 
 def is_content_free(path: Path) -> bool:
@@ -763,15 +776,22 @@ def is_content_free(path: Path) -> bool:
     that contains real prose.
     """
     try:
-        lines = [ln for ln in path.read_text(errors="replace").splitlines() if ln.strip()]
+        text = path.read_text(errors="replace")
     except OSError:
         return False
+    # A raw log written by the persist hook ends with a recycled
+    # "--- Recent Wiki Activity ---" tail; it is not session content.
+    text = text.split(_WIKI_ACTIVITY_MARKER, 1)[0]
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    lines = _strip_frontmatter(lines)
     if not lines:
         return True
     for ln in lines:
         if _TOOLCALL_LINE.match(ln):
             continue
         if ln.lstrip().startswith("#"):
+            continue
+        if _METADATA_LINE.match(ln):
             continue
         return False
     return True

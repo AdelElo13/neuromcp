@@ -31,10 +31,73 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { homedir } = require('node:os');
-
 const HOME = homedir();
+
+// ─── claude -p auth probe: background mode + recursion guard ─────────
+// The probe used to run `claude -p` synchronously on every SessionStart:
+// a cold CLI needs more than the old 5 s timeout (false warning + delay on
+// most session starts), the empty `--tools ''` it passed is rejected by
+// current CLIs, and the nested CLI ran the user's hooks again — including
+// this one. Now it runs isolated, in the background, at most every 6 h, and
+// SessionStart only reports the cached result.
+const PROBE_CACHE = process.env.NEUROMCP_HEALTH_PROBE_CACHE || path.join(HOME, '.neuromcp', 'health-probe.json');
+const PROBE_MAX_AGE_MS = 6 * 3_600_000;
+const PROBE_PENDING_MS = 120_000;
+const PROBE_TIMEOUT_MS = 60_000;
+const CHILD_ENV = 'NEUROMCP_HEALTH_CHECK_CHILD';
+
+function writeProbeCache(record) {
+    try {
+        fs.mkdirSync(path.dirname(PROBE_CACHE), { recursive: true });
+        const tmp = `${PROBE_CACHE}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(record));
+        fs.renameSync(tmp, PROBE_CACHE);
+    } catch (_err) { /* best effort — the next session simply probes again */ }
+}
+
+function readProbeCache() {
+    try {
+        const record = JSON.parse(fs.readFileSync(PROBE_CACHE, 'utf-8'));
+        const age = Date.now() - Date.parse(record.checkedAt);
+        return Number.isFinite(age) ? { ...record, age } : null;
+    } catch (_err) {
+        return null;
+    }
+}
+
+if (process.argv.includes('--probe')) {
+    const probe = spawnSync('claude', [
+        '-p', '--no-session-persistence',
+        // User settings stay (auth/endpoint config); hooks, CLAUDE.md,
+        // skills and MCP servers are off — a bare text completion.
+        '--setting-sources', 'user',
+        '--settings', JSON.stringify({ disableAllHooks: true }),
+        '--strict-mcp-config',
+        '--disable-slash-commands',
+        '--model', 'haiku', 'Reply with: ok',
+    ], {
+        encoding: 'utf-8',
+        timeout: PROBE_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, [CHILD_ENV]: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
+    });
+    const combined = `${probe.stdout || ''}\n${probe.stderr || ''}`.trim();
+    let status = 'ok';
+    if (/401|Failed to auth|Not logged in|Invalid auth/i.test(combined)) status = 'auth-broken';
+    else if (probe.error && probe.error.code === 'ETIMEDOUT') status = 'timeout';
+    else if (probe.status !== 0) status = 'error';
+    writeProbeCache({
+        status,
+        checkedAt: new Date().toISOString(),
+        detail: status === 'ok' ? '' : combined.split('\n')[0].slice(0, 200),
+    });
+    process.exit(0);
+}
+
+// Never run inside our own probe (or any nested claude -p we started).
+if (process.env[CHILD_ENV]) process.exit(0);
 const DB           = process.env.NEUROMCP_DB           || path.join(HOME, '.neuromcp', 'memory.db');
 const WIKI_INDEX   = process.env.NEUROMCP_WIKI_INDEX   || path.join(HOME, '.neuromcp', 'wiki', 'index.md');
 const LOG          = process.env.NEUROMCP_LOG          || path.join(HOME, '.neuromcp', 'consolidation.log');
@@ -126,28 +189,34 @@ try {
     }
 } catch (_err) { /* no log yet on a fresh install */ }
 
-// ─── 5. claude -p subprocess auth probe ──────────────────────────────
+// ─── 5. claude -p subprocess auth probe (cached, refreshed in background) ──
 // Skip if `claude` is not on PATH (downstream user may not have Claude Code).
 const claudePath = (() => {
     const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['claude'], { encoding: 'utf-8' });
     return which.status === 0 ? which.stdout.trim().split('\n')[0] : null;
 })();
 if (claudePath) {
-    const probe = spawnSync('claude', ['-p', '--tools', '', '--no-session-persistence', '--model', 'haiku', 'ok'], {
-        encoding: 'utf-8',
-        timeout: 5_000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const combined = `${probe.stdout || ''}\n${probe.stderr || ''}`;
-    if (/401|Failed to auth|Not logged in|Invalid auth/i.test(combined)) {
-        const first = combined.trim().split('\n')[0].slice(0, 200);
+    const cached = readProbeCache();
+    if (cached && cached.status === 'auth-broken') {
         fail(`claude -p subprocess auth broken — consolidation cannot run`);
-        note(first);
-        note('Fix: run `claude login`, or check ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL in this shell');
-    } else if (probe.error && probe.error.code === 'ETIMEDOUT') {
-        warn(`claude -p subprocess: no response in 5s (network? rate limit? concurrency?)`);
+        if (cached.detail) note(cached.detail);
+        note('Fix: run `claude login`, or check ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / apiKeyHelper');
+    } else if (cached && cached.status === 'timeout') {
+        warn(`claude -p subprocess did not answer within ${PROBE_TIMEOUT_MS / 1000}s at the last check (network? rate limit?)`);
+    } else if (cached && cached.status === 'error') {
+        warn(`claude -p subprocess failed at the last check${cached.detail ? `: ${cached.detail}` : ''}`);
     }
-    // Silent on success — no need to log the happy path here.
+    const stale = !cached
+        || (cached.status === 'probing' ? cached.age > PROBE_PENDING_MS : cached.age > PROBE_MAX_AGE_MS);
+    if (stale) {
+        writeProbeCache({ status: 'probing', checkedAt: new Date().toISOString() });
+        try {
+            const env = { ...process.env };
+            delete env[CHILD_ENV];
+            const child = spawn(process.execPath, [__filename, '--probe'], { detached: true, stdio: 'ignore', env });
+            child.unref();
+        } catch (_err) { /* probing is best effort */ }
+    }
 }
 
 // ─── Output ───────────────────────────────────────────────────────────

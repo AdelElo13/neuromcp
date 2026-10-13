@@ -3,6 +3,29 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.30.1] — 2026-10-13
+
+### Fixed
+
+- **FIX: the health-check hook delayed every session start and reported a
+  false warning.** It ran `claude -p --tools ''` synchronously on each
+  SessionStart with a 5 s timeout: current CLIs reject the empty `--tools`
+  value, a cold `claude -p` rarely answers within 5 s, and the nested CLI ran
+  the user's hooks again — including this one. The probe now runs isolated
+  (user settings kept; hooks, CLAUDE.md, skills and MCP off), in the
+  background, at most every 6 hours; SessionStart only reports the cached
+  result (0.1 s instead of 5 s+). A nested run of the hook exits immediately.
+- **FIX: consolidation queued sessions that contain nothing.** Raw logs with
+  only metadata (`Session ended`, `Working directory`, `Tools used`) and the
+  recycled wiki-activity tail are now treated as content-free and skipped
+  (ledger advanced) instead of costing a `claude -p` batch that the auditor
+  could only reject. A user message or any other real line keeps a session
+  in the queue. On a real install this removed 215 empty sessions from a
+  1,066-session backlog with zero false positives.
+
+Upgrade: `npm install -g neuromcp@latest`, then `npx neuromcp-init-wiki`
+(updates the unmodified health-check hook automatically).
+
 ## [0.30.0] — 2026-10-13
 
 Retrieval-quality and reliability release, driven by a month of production

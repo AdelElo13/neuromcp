@@ -68,5 +68,39 @@ print(json.dumps({
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it('a persist-format log with only metadata and the recycled wiki-activity tail is content-free', () => {
+      // On a real install 215 such logs (no user message at all) sat in the
+      // queue: they cost a claude -p batch each window and the auditor could
+      // only reject them. Any real line — a user message, work-state notes —
+      // keeps the session in the queue.
+      const dir = mkdtempSync(join(tmpdir(), 'nmcp-cs-'));
+      try {
+        const tail =
+          '\n--- Recent Wiki Activity ---\nseen, 0/1 projects updated\n\n## [2026-06-07] consolidation | auto\n- 23 sessions seen, 0/1 projects updated\n';
+        const head = '---\ndate: 2026-06-08\ndirectory: /Users/x/proj\n---\n\nSession ended: 2026-06-08T01:52:10.084Z\nWorking directory: /Users/x/proj\n';
+        const metaOnly = join(dir, 'meta.md');
+        writeFileSync(metaOnly, head + 'Tools used: Read\n' + tail);
+        const withUser = join(dir, 'user.md');
+        writeFileSync(withUser, head + 'User messages: - fix the deploy bug please\n' + tail);
+        const withNotes = join(dir, 'notes.md');
+        writeFileSync(withNotes, head + '\n## Current Work\nMigrating the billing tables to v2.\n' + tail);
+
+        const py = `
+import importlib.util, pathlib, json
+spec = importlib.util.spec_from_file_location("cs", ${JSON.stringify(SCRIPT)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps({k: m.is_content_free(pathlib.Path(v)) for k, v in ${JSON.stringify({ metaOnly, withUser, withNotes })}.items()}))
+`;
+        const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' });
+        expect(r.status, r.stderr).toBe(0);
+        const out = JSON.parse(r.stdout.trim()) as Record<string, boolean>;
+        expect(out.metaOnly).toBe(true);
+        expect(out.withUser).toBe(false);
+        expect(out.withNotes).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });
