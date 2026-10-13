@@ -31,8 +31,9 @@ describe('run-consolidation.sh lock', () => {
       NEUROMCP_SESSIONS_DIR: join(dir, 'sessions'),
       NEUROMCP_LEDGER: join(dir, 'ledger.json'),
       NEUROMCP_LOG: join(dir, 'consolidation.log'),
-      NEUROMCP_LOCK_DIR: join(dir, 'consolidation.lock'),
+      NEUROMCP_LOCK_FILE: join(dir, 'consolidation.flock'),
       NEUROMCP_PYTHON: stub,
+      HOME: dir, // isolates the legacy-lock check from the real ~/.neuromcp
     };
   });
 
@@ -43,8 +44,8 @@ describe('run-consolidation.sh lock', () => {
   it('a second concurrent run skips instead of processing the same sessions', async () => {
     const first = spawn('/bin/bash', [RUNNER], { env, stdio: 'ignore' });
     const firstDone = new Promise<number>((resolve) => first.on('exit', (c) => resolve(c ?? -1)));
-    // Wait until the first run holds the lock.
-    for (let i = 0; i < 50 && !existsSync(join(dir, 'consolidation.lock', 'pid')); i++) {
+    // Wait until the first run is inside the consolidation step (lock held).
+    for (let i = 0; i < 100 && !(existsSync(join(dir, 'consolidation.log')) && /pending=/.test(readFileSync(join(dir, 'consolidation.log'), 'utf8'))); i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
     const second = spawnSync('/bin/bash', [RUNNER], { env, encoding: 'utf8' });
@@ -54,18 +55,20 @@ describe('run-consolidation.sh lock', () => {
     const log = readFileSync(join(dir, 'consolidation.log'), 'utf8');
     expect(log).toMatch(/another consolidation run is active/);
     expect((log.match(/STUB RUN/g) ?? []).length).toBe(1 + 1); // first run: consolidate + review-queue pruner
-    expect(existsSync(join(dir, 'consolidation.lock'))).toBe(false);
+
+    // The kernel released the lock when the first run exited: a new run proceeds.
+    const third = spawnSync('/bin/bash', [RUNNER], { env, encoding: 'utf8' });
+    expect(third.status).toBe(0);
+    expect((readFileSync(join(dir, 'consolidation.log'), 'utf8').match(/STUB RUN/g) ?? []).length).toBe(4);
   });
 
-  it('takes over a stale lock left by a dead process', () => {
-    mkdirSync(join(dir, 'consolidation.lock'));
-    writeFileSync(join(dir, 'consolidation.lock', 'pid'), '999999\n');
+  it('a lock file left behind by a crashed run does not block (no stale locks)', () => {
+    writeFileSync(join(dir, 'consolidation.flock'), '');
 
     const run = spawnSync('/bin/bash', [RUNNER], { env, encoding: 'utf8' });
     expect(run.status).toBe(0);
     const log = readFileSync(join(dir, 'consolidation.log'), 'utf8');
-    expect(log).toMatch(/stale consolidation lock/);
+    expect(log).not.toMatch(/another consolidation run is active/);
     expect(log).toMatch(/STUB RUN/);
-    expect(existsSync(join(dir, 'consolidation.lock'))).toBe(false);
   });
 });

@@ -122,7 +122,7 @@ export function loadConfig(): NeuromcpConfig {
     accessBoost: envNum('NEUROMCP_ACCESS_BOOST', 0.05),
     recencyBoost: envNum('NEUROMCP_RECENCY_BOOST', 0.1),
     centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
-    importanceWeight: envNum('NEUROMCP_IMPORTANCE_WEIGHT', 0.1),
+    importanceWeight: Math.min(1, Math.max(0, envNum('NEUROMCP_IMPORTANCE_WEIGHT', 0.1))),
     minSimilarity: envOptionalNum('NEUROMCP_MIN_SIMILARITY'),
     attentionWeight: envNum('NEUROMCP_ATTENTION_WEIGHT', 0.004),
     blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),

@@ -47,8 +47,9 @@ export interface SearchInput {
   readonly include_superseded?: boolean;
   /**
    * Relevance floor: drop candidates whose cosine similarity is below this
-   * and that have no FTS or graph hit. Defaults to config.minSimilarity, else the
-   * calibrated default for the active embedder (DEFAULT_MIN_SIMILARITY), else 0.
+   * and that have no strong FTS or graph hit. Defaults to config.minSimilarity,
+   * else 0 (off). The search_memory tool resolves the calibrated per-embedder
+   * default via resolveMinSimilarity.
    */
   readonly min_similarity?: number;
 }
@@ -130,6 +131,18 @@ export function defaultMinSimilarity(embedderName: string): number {
   return DEFAULT_MIN_SIMILARITY[embedderName.split(':')[0] ?? embedderName] ?? 0;
 }
 
+/**
+ * The relevance floor the search_memory tool applies: explicit argument, else
+ * NEUROMCP_MIN_SIMILARITY, else the calibrated default for the active embedder.
+ */
+export function resolveMinSimilarity(
+  explicit: number | undefined,
+  config: Pick<NeuromcpConfig, 'minSimilarity'>,
+  embedderName: string,
+): number {
+  return explicit ?? config.minSimilarity ?? defaultMinSimilarity(embedderName);
+}
+
 /** Only the top result of a search counts as a "use" for access_count. */
 const ACCESS_BUMP_TOP_N = 1;
 
@@ -183,38 +196,61 @@ export function buildFtsQuery(query: string): string | null {
 }
 
 /**
- * Tokenize like FTS5's default unicode61 tokenizer: diacritics folded
- * ("café" = "cafe", also for NFD-stored text) and "_" as a separator. A
- * mismatch would give a real FTS hit coverage 0 — no keyword bonus and no
- * exemption from the relevance floor.
+ * Word tokens as FTS5's default unicode61 tokenizer sees them: NFC text,
+ * letters + numbers + combining marks (so Hangul, kana with dakuten and
+ * Indic/Thai vowel signs stay intact), "_" and punctuation as separators.
+ * These tokens go into the MATCH expression unchanged; FTS5 itself folds
+ * Latin diacritics, so "cafe" already matches "café".
  */
 function wordTokens(text: string): string[] {
-  return text.normalize('NFD').replace(/\p{M}+/gu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return text.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [];
 }
 
 /**
+ * Coverage-only folding: strip diacritics after Latin, Greek and Cyrillic
+ * letters (as unicode61 does) so "café" and "cafe" count as the same word.
+ * Marks in other scripts are part of the letter and are kept.
+ */
+function foldedWordTokens(text: string): string[] {
+  const folded = text
+    .normalize('NFD')
+    .replace(/([\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}])\p{M}+/gu, '$1')
+    .normalize('NFC');
+  return wordTokens(folded);
+}
+
+/** Latin-script tokens of one or two letters ("de", "op") carry no signal. */
+const SHORT_LATIN = /^\p{Script=Latin}{1,2}$/u;
+
+/**
  * The words a query is matched on. With OR semantics a single stopword
- * ("de", "the") would match most rows, so only content words are kept;
- * stopword-only queries fall back to all tokens.
+ * ("de", "the") would match most rows, so stopwords and one/two-letter Latin
+ * words are dropped; numbers ("18") and non-Latin words are always kept.
+ * Stopword-only queries fall back to all tokens.
  */
 export function ftsQueryTokens(query: string): string[] {
   const all = [...new Set(wordTokens(query))];
-  const content = all.filter((t) => t.length >= 3 && !FTS_STOPWORDS.has(t));
+  const content = all.filter((t) => !SHORT_LATIN.test(t) && !FTS_STOPWORDS.has(t));
   return (content.length > 0 ? content : all).slice(0, MAX_FTS_TOKENS);
 }
 
 /**
- * Share of the query's match words that occur in `content` (0..1). OR
- * matching means one ordinary word ("beste", "trein") already makes a row a
- * keyword hit; coverage turns that into a graded signal.
+ * Share of the query's match words that occur in `text` (0..1). OR matching
+ * means one ordinary word ("beste", "trein") already makes a row a keyword
+ * hit; coverage turns that into a graded signal.
  */
-export function keywordCoverage(queryTokens: readonly string[], content: string): number {
+export function keywordCoverage(queryTokens: readonly string[], text: string): number {
   if (queryTokens.length === 0) return 0;
-  const words = new Set(wordTokens(content));
-  return queryTokens.filter((t) => words.has(t)).length / queryTokens.length;
+  const words = new Set(foldedWordTokens(text));
+  const matched = queryTokens.filter((t) => words.has(foldedWordTokens(t)[0] ?? t)).length;
+  return matched / queryTokens.length;
 }
 
-/** Minimum keyword coverage for an FTS hit to count as direct relevance. */
+/**
+ * A keyword hit counts as direct relevance (exempt from the relevance floor)
+ * only when it covers MORE than half of the query's match words: for
+ * "Node 18" a memory about "Node 20" (1 of 2) is not enough.
+ */
 const MIN_KEYWORD_COVERAGE = 0.5;
 
 /** FTS rows (by rank) for which keyword coverage is computed. */
@@ -437,8 +473,11 @@ export async function searchMemoryDetailed(
   // hit or cosine >= floor. Without a floor every query returns `limit` rows
   // (the vec leg covers the whole store), relevant or not. The floor is not
   // applied when the embedder is down — FTS is then the only signal.
-  const minSimilarity =
-    input.min_similarity ?? config.minSimilarity ?? defaultMinSimilarity(embedder.name);
+  // No per-embedder default here: library callers (recall_answer, prompts,
+  // HTTP) keep the 0.29 behaviour unless they pass a floor. The search_memory
+  // tool applies the calibrated default via resolveMinSimilarity, where the
+  // dropped count is reported back to the caller.
+  const minSimilarity = input.min_similarity ?? config.minSimilarity ?? 0;
   const floorActive = minSimilarity > 0 && embedding !== null;
   let belowThresholdDropped = 0;
   const allIds = new Set([...vecRanks.keys(), ...ftsRanks.keys(), ...graphScores.keys()]);
@@ -456,7 +495,7 @@ export async function searchMemoryDetailed(
     // content words, or a graph hit (an entity named in the query). A hit on
     // one ordinary word of a longer query is not enough — on real data that
     // let most off-topic results through the floor.
-    const strongKeywordHit = ftsRank !== undefined && coverage >= MIN_KEYWORD_COVERAGE;
+    const strongKeywordHit = ftsRank !== undefined && coverage > MIN_KEYWORD_COVERAGE;
     const hasDirectSignal = strongKeywordHit || graphScore > 0;
     if (floorActive && !hasDirectSignal && (cosine === undefined || cosine < minSimilarity)) {
       belowThresholdDropped++;

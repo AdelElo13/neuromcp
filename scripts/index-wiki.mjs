@@ -159,9 +159,20 @@ if (embedder) {
 // section edit or rename can diff current-on-disk against what is stored
 // and remove anything that no longer exists. Without this, stale rows
 // accumulate forever and retrieval serves outdated sections.
-function chunkKey(wikiPath, heading, occurrence = 1) {
-  const base = `wiki::${wikiPath}::${heading}`;
-  return occurrence > 1 ? `${base}::#${occurrence}` : base;
+function chunkKey(wikiPath, heading) {
+  return `wiki::${wikiPath}::${heading}`;
+}
+
+/**
+ * Key for the 2nd, 3rd, … section with the same heading on a page. It is
+ * derived from the section CONTENT, not its position, so inserting another
+ * repeated section does not re-key (and re-id) the others; the distinct
+ * prefix and JSON encoding make it impossible to collide with chunkKey() of
+ * a literal heading such as "Topic::#2". `nth` separates byte-identical
+ * repeats.
+ */
+function repeatKey(wikiPath, heading, hash, nth) {
+  return `wiki-repeat::${JSON.stringify([wikiPath, heading, hash, nth])}`;
 }
 
 if (REBUILD && !DRY_RUN) {
@@ -188,7 +199,13 @@ for (const row of db.prepare(
 ).all()) {
   try {
     const meta = JSON.parse(row.metadata || '{}');
-    const key = chunkKey(meta.wiki_path, meta.heading, meta.occurrence ?? 1);
+    // repeat_key: repeated-heading sections (0.30.0). `occurrence`: the
+    // position-based key of a 0.30.0 pre-release — given a key nothing on
+    // disk produces, so those rows are pruned and re-inserted once.
+    const key = meta.repeat_key
+      ?? (meta.occurrence > 1
+        ? `wiki-legacy-occurrence::${JSON.stringify([meta.wiki_path, meta.heading, meta.occurrence])}`
+        : chunkKey(meta.wiki_path, meta.heading));
     const vectorless = !row.embedding_model || row.embedding_model === 'none';
     existingByKey.set(key, { id: row.id, rowid: row.rowid, hash: row.content_hash, vectorless });
   } catch { /* ignore malformed rows */ }
@@ -213,6 +230,12 @@ function onlyVectorMissing(r) {
 }
 
 const EMBED_BREAKER_THRESHOLD = 3;
+
+/** True for errors that mean the embedder is unreachable, not that one chunk was bad. */
+function isEmbedderOutage(err) {
+  const text = `${err?.name ?? ''} ${err?.code ?? ''} ${err?.message ?? err ?? ''}`;
+  return /ECONNREFUSED|ECONNRESET|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|EPIPE|fetch failed|socket hang up|timed? ?out|timeout|AbortError|EMBEDDINGS_UNAVAILABLE|unavailable/i.test(text);
+}
 
 const insertMem = db.prepare(`
   INSERT INTO memories (
@@ -258,14 +281,18 @@ async function embedAll(rows) {
         vec = await embedder.embed(r.content);
       } catch (err) {
         lastErr = err;
-        if (attempt === 1) await new Promise((res) => setTimeout(res, 2000));
+        if (attempt === 1 && isEmbedderOutage(err)) await new Promise((res) => setTimeout(res, 2000));
+        else break; // a per-chunk failure will not succeed on retry
       }
     }
     if (vec !== null) {
       consecutiveFailures = 0;
       out.push({ ...r, vector: vec, dim: vec.length, model: embedder.name });
     } else {
-      consecutiveFailures++;
+      // Only an outage (connection refused, timeout, embedder unavailable)
+      // counts toward the breaker. A chunk the model rejects is a per-chunk
+      // failure: tripping on it would starve every later chunk, run after run.
+      consecutiveFailures = isEmbedderOutage(lastErr) ? consecutiveFailures + 1 : 0;
       warn(`embed failed for ${r.project || 'home'} (will retry next run): ${lastErr?.message || lastErr}`);
       out.push({ ...r, vector: null, dim: 0, model: '' });
       if (consecutiveFailures >= EMBED_BREAKER_THRESHOLD) {
@@ -343,19 +370,28 @@ for (const file of files) {
   // Consolidation appends dated sections, so one page can repeat a heading.
   // The n-th repeat gets its own key; the first keeps the plain key so
   // existing unique chunks keep their identity.
-  const seenHeadings = new Map();
+  const seenHeadings = new Set();
+  const seenRepeats = new Map();
   for (const { heading, body: chunkBody } of chunks) {
-    const occurrence = (seenHeadings.get(heading) ?? 0) + 1;
-    seenHeadings.set(heading, occurrence);
     const content = makeContent(pageTitle, heading, chunkBody);
-    const key = chunkKey(relPath, heading, occurrence);
-    currentKeys.add(key);
+    const hash = contentHash(content);
     const meta = { wiki_path: relPath, heading, page_title: pageTitle };
-    if (occurrence > 1) meta.occurrence = occurrence;
+    let key;
+    if (!seenHeadings.has(heading)) {
+      seenHeadings.add(heading);
+      key = chunkKey(relPath, heading);
+    } else {
+      const repeatId = JSON.stringify([heading, hash]);
+      const nth = (seenRepeats.get(repeatId) ?? 0) + 1;
+      seenRepeats.set(repeatId, nth);
+      key = repeatKey(relPath, heading, hash, nth);
+      meta.repeat_key = key;
+    }
+    currentKeys.add(key);
     toInsert.push({
       id: generateId(),
       key,
-      hash: contentHash(content),
+      hash,
       content,
       project: projectId,
       metadata: JSON.stringify(meta),

@@ -19,7 +19,8 @@
  * injectable) exported for tests — same pattern as bin/neuromcp-connect.mjs.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -724,6 +725,88 @@ export function renderChecks(checks, opts = {}) {
   return out;
 }
 
+const HOOK_NAMES = [
+  'neuromcp-context-inject',
+  'neuromcp-persist',
+  'neuromcp-auto-capture',
+  'neuromcp-auto-retrieve',
+  'neuromcp-critic',
+  'neuromcp-health-check',
+];
+
+/**
+ * Installed Claude Code hooks vs the ones this release ships. Hooks are
+ * copied once by neuromcp-init-wiki and were never updated afterwards, so hook
+ * fixes silently did not reach existing users. Unmodified older hooks and
+ * legacy `.js` hooks get a warning that names the fix; hooks the user edited
+ * are reported, never flagged for overwriting.
+ *
+ * @param {{ home?: string, templatesDir?: string }} [deps]
+ * @returns {CheckResult}
+ */
+export function checkHooks(deps = {}) {
+  const home = deps.home ?? homedir();
+  const templatesDir = deps.templatesDir ?? resolve(REPO_ROOT, 'templates', 'hooks');
+  const hooksDir = resolve(home, '.claude', 'scripts', 'hooks');
+  const name = 'claude code hooks';
+  /** @type {string[]} */
+  let installed;
+  try {
+    installed = readdirSync(hooksDir).filter((f) => /^neuromcp-[a-z-]+\.c?js$/.test(f));
+  } catch {
+    installed = [];
+  }
+  if (installed.length === 0) {
+    return { name, status: 'skip', info: 'not installed (optional — `npx neuromcp-init-wiki`)' };
+  }
+  /** @type {Record<string, string[]>} */
+  let shipped = {};
+  try {
+    shipped = JSON.parse(readFileSync(resolve(templatesDir, 'shipped-hashes.json'), 'utf8'));
+  } catch {
+    /* older package layout — only exact template matches count as current */
+  }
+  /** @param {Buffer} buf */
+  const sha = (buf) => createHash('sha256').update(buf).digest('hex');
+  /** @type {string[]} */
+  const outdated = [];
+  /** @type {string[]} */
+  const edited = [];
+  for (const file of installed) {
+    const hook = file.replace(/\.c?js$/, '');
+    if (!HOOK_NAMES.includes(hook)) continue;
+    const content = readFileSync(resolve(hooksDir, file));
+    const template = resolve(templatesDir, `${hook}.cjs`);
+    if (file.endsWith('.js')) {
+      // A forwarding shim left by the .cjs migration is fine.
+      if (content.toString('utf8').includes(`import('./${hook}.cjs')`)) continue;
+      outdated.push(file);
+    } else if (existsSync(template) && content.equals(readFileSync(template))) {
+      continue;
+    } else if ((shipped[hook] ?? []).includes(sha(content))) {
+      outdated.push(file);
+    } else {
+      edited.push(file);
+    }
+  }
+  if (outdated.length > 0) {
+    return {
+      name,
+      status: 'warn',
+      info: `${outdated.join(', ')} from an older neuromcp — run \`npx neuromcp-init-wiki\` to update ` +
+        '(unmodified hooks are updated automatically, with a backup)' +
+        (edited.length > 0 ? `; edited by you (kept): ${edited.join(', ')}` : ''),
+    };
+  }
+  return {
+    name,
+    status: 'ok',
+    info: edited.length > 0
+      ? `current; edited by you (kept): ${edited.join(', ')} — \`neuromcp-init-wiki --update-hooks\` replaces them`
+      : 'current',
+  };
+}
+
 /**
  * Collect every check. Separated from rendering so `--json` and the text
  * report cannot drift apart.
@@ -782,6 +865,9 @@ export async function collectChecks() {
 
   // 11. Vector-index width vs what this machine can actually embed.
   checks.push(checkEmbeddingIndex({ Database, ollamaProbe: ollamaOutcome.probe, onnxResult }));
+
+  // 12. Claude Code hooks: outdated hooks never received fixes on upgrade.
+  checks.push(checkHooks());
 
   return checks;
 }

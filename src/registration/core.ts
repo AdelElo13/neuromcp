@@ -5,7 +5,7 @@ import { textResult, withDegradedNotice } from './types.js';
 import { storeMemory } from '../tools/store.js';
 import { ensureAmbientEpisode } from '../tools/episode.js';
 import { activeEpisodeForNamespace } from '../episode/active-state.js';
-import { searchMemory, searchMemoryDetailed, toCompact, type SearchDiagnostics } from '../tools/search.js';
+import { searchMemory, searchMemoryDetailed, resolveMinSimilarity, toCompact, type SearchDiagnostics } from '../tools/search.js';
 import { recallAnswer } from '../tools/recall-answer.js';
 import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
@@ -82,7 +82,10 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       min_similarity: z.number().min(0).max(1).optional().describe('Relevance floor: drop results whose cosine similarity is below this and that have no keyword (FTS) or knowledge-graph hit, so an irrelevant query returns fewer than `limit` results. Embedder-specific; ~0.35–0.45 for nomic-embed-text. Default: NEUROMCP_MIN_SIMILARITY, else a calibrated per-embedder default (bge-m3: 0.45), else off. Pass 0 to disable.'),
     },
   }, async (args) => {
-    const { results, diagnostics } = await searchMemoryDetailed(args, { db, vecStore, embedder, logger, metrics, config, reranker });
+    const { results, diagnostics } = await searchMemoryDetailed(
+      { ...args, min_similarity: resolveMinSimilarity(args.min_similarity, config, embedder.name) },
+      { db, vecStore, embedder, logger, metrics, config, reranker },
+    );
     // Only surfaced when something happened, so the common payload is unchanged.
     const diagnosticFields = (d: SearchDiagnostics): Record<string, unknown> => ({
       ...(d.degraded.length > 0 ? { degraded: d.degraded } : {}),

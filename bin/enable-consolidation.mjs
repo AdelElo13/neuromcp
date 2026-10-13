@@ -27,7 +27,15 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
-const USER = userInfo().username;
+// userInfo() throws when the uid has no passwd entry (some containers).
+function currentUser() {
+  try {
+    return userInfo().username;
+  } catch {
+    return process.env.USER || process.env.LOGNAME || '';
+  }
+}
+const USER = currentUser();
 const NEUROMCP_DIR = join(HOME, '.neuromcp');
 const SCRIPTS_DIR = join(NEUROMCP_DIR, 'scripts');
 const REPO_SCRIPTS = join(__dirname, '..', 'scripts');

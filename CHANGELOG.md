@@ -10,17 +10,23 @@ use: search now ranks by relevance instead of popularity, non-English
 stores get a measured upgrade path, and four silent failures that lost
 memories without any error are fixed.
 
-**Upgrading existing installs:** run `npx neuromcp-init-wiki --update-hooks`
-once. Installed hooks were never overwritten before, so hook fixes in this
-release (transcript streaming, `.cjs` renames) only reach you after this
-step. Each replaced hook is backed up next to the original.
+**Upgrading existing installs:** after `npm install -g neuromcp@latest`, run
+`npx neuromcp-init-wiki` once. Installed hooks were never updated before, so
+hook fixes (transcript streaming, `.cjs` renames) only reach you after this
+step. It updates every hook that is an unmodified older neuromcp version
+(backup kept), migrates old `.js` hooks to `.cjs` while keeping your edits
+(a forwarding stub stays at the old path), and lists hooks you edited —
+`--update-hooks` replaces those as well. `npx neuromcp-doctor check` now
+reports outdated hooks.
 
 ### Fixed
 
 - **FIX: multi-word queries only matched as an exact adjacent phrase.** The
   FTS leg quoted the whole query, so "filamentrol plank" never matched
   "de filamentrol staat op de bovenste plank". Words are now matched
-  individually (stopwords dropped), and a keyword hit is weighted by how
+  individually (stopwords and one/two-letter Latin words dropped; numbers and
+  non-Latin words always kept, scripts such as Hangul, kana, Devanagari and
+  Thai tokenised exactly as FTS5 does), and a keyword hit is weighted by how
   much of the query it covers, so one ordinary word no longer earns a full
   keyword bonus.
 - **FIX: importance outweighed relevance ~10×.** The adaptive-importance
@@ -41,10 +47,12 @@ step. Each replaced hook is backed up next to the original.
   on page + heading; pages that repeat a heading (dated consolidation
   sections) kept only the last one and re-replaced the rest on every run.
   On a real wiki 301 of 1,249 sections were not searchable and ~270 chunks
-  were rewritten per run. Repeated headings now get their own key; a second
-  run replaces nothing. A chunk stored without a vector is re-embedded in
-  place (same id) on the next run, and a circuit breaker stops after three
-  consecutive embed failures instead of waiting out every timeout.
+  were rewritten per run. Repeated headings now get a content-based key, so
+  inserting another section does not re-key the rest; a second run replaces
+  nothing. The first run after upgrading re-indexes those pages once. A chunk
+  stored without a vector is re-embedded in place (same id) on the next run,
+  and a circuit breaker stops after three consecutive embedder outages
+  (connection refused, timeout) instead of waiting out every timeout.
 - **FIX: hooks lost the longest sessions.** `neuromcp-persist`,
   `neuromcp-auto-capture` and `neuromcp-critic` read the whole transcript
   into one string, which throws past V8's ~512 MB limit. `persist` then
@@ -58,12 +66,15 @@ step. Each replaced hook is backed up next to the original.
   failed with "no output". The plist template now sets both, and the
   consolidation script logs the actual CLI error instead of discarding it.
 - **FIX: consolidation summaries were rejected because of injected
-  context.** `claude -p` ran the user's hooks and loaded CLAUDE.md files, so
-  unrelated context leaked into summaries and the auditor rejected them.
-  Every call now runs isolated (`--setting-sources ""`, hooks disabled,
-  `--strict-mcp-config`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`).
+  context.** `claude -p` ran the user's hooks and loaded CLAUDE.md files,
+  skills and MCP servers, so unrelated context leaked into summaries and the
+  auditor rejected them. Every call now runs with hooks disabled, project and
+  local settings off, no CLAUDE.md, no skills and no MCP servers. User
+  settings stay loaded, so `apiKeyHelper`, `ANTHROPIC_BASE_URL`, Bedrock and
+  Vertex configuration keep working.
 - **FIX: overlapping consolidation runs** processed the same sessions twice;
-  `run-consolidation.sh` now holds a lock (stale locks are taken over).
+  `run-consolidation.sh` now holds a kernel `flock` for the whole run — no
+  stale lock after a crash or reboot.
 - **FIX: the daemon refused new clients at its session cap.** Abandoned
   sessions held all 64 slots until the 30-minute idle sweep. The cap is now
   128 and, when full, the least-recently-active idle session (≥ 2 min, no
@@ -78,9 +89,12 @@ step. Each replaced hook is backed up next to the original.
 ### Added
 
 - `min_similarity` on `search_memory` (and `NEUROMCP_MIN_SIMILARITY`): drop
-  candidates below a cosine floor unless they have a strong keyword or
-  knowledge-graph hit; `below_threshold_dropped` reports how many. bge-m3
-  gets a calibrated default of 0.45; other embedders default to off.
+  candidates below a cosine floor unless they have a strong keyword hit
+  (more than half of the query's words) or a knowledge-graph hit;
+  `below_threshold_dropped` reports how many. In the `search_memory` tool
+  bge-m3 gets a calibrated default of 0.45; other embedders, and library
+  callers such as `recall_answer`, prompts and the HTTP API, default to off.
+- `neuromcp-doctor check` reports outdated or edited Claude Code hooks.
 - `neuromcp-init-wiki --update-hooks`, plus a notice when an installed hook
   differs from the shipped version.
 - `createIndexAwareProvider` export (`neuromcp/embeddings/runtime`).
@@ -90,7 +104,10 @@ step. Each replaced hook is backed up next to the original.
 
 ### Verification
 
-- 812 tests pass; `tsc`, lint and build clean.
+- 827 tests pass (with and without Ollama); `tsc`, lint, coverage and build clean.
+- Three independent pre-release reviews (code, portability/upgrade, Codex);
+  every finding fixed or documented above. Upgrade from npm 0.29.5 verified
+  end to end: database, hooks (all seven run) and `neuromcp-doctor`.
 - Internal eval: verbatim-recall MRR 38.8% → 89.9%, Recall@5 46.7% → 95%;
   other fixtures unchanged at 100%.
 - LongMemEval, 200 distractors, 30 questions: R@5(true) 19.1% → 19.3%,

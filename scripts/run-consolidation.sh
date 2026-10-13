@@ -17,32 +17,48 @@ SESSIONS_DIR="${NEUROMCP_SESSIONS_DIR:-$HOME/.neuromcp/raw/sessions}"
 PENDING_THRESHOLD="${NEUROMCP_PENDING_THRESHOLD:-1}"
 WINDOW_DAYS="${NEUROMCP_WINDOW_DAYS:-7}"
 PYTHON_BIN="${NEUROMCP_PYTHON:-python3}"
-LOCK_DIR="${NEUROMCP_LOCK_DIR:-$HOME/.neuromcp/consolidation.lock}"
+LOCK_FILE="${NEUROMCP_LOCK_FILE:-$HOME/.neuromcp/consolidation.flock}"
 
-mkdir -p "$(dirname "$LOG")"
+mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK_FILE")"
 printf '[%s] start\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"
 
 # One run at a time. Two overlapping runs (e.g. a long manual backlog run and
 # the scheduled one) processed the same sessions twice — duplicate wiki
-# sections and facts — and raced on the ledger. mkdir is atomic; a lock whose
-# owner is gone (crash, reboot) is taken over.
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    OTHER_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
-    if [ -n "$OTHER_PID" ] && kill -0 "$OTHER_PID" 2>/dev/null; then
-        printf '[%s] another consolidation run is active (pid %s), skip\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$OTHER_PID" >>"$LOG"
-        exit 0
-    fi
-    printf '[%s] stale consolidation lock (pid %s), taking over\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "${OTHER_PID:-?}" >>"$LOG"
-    rm -rf "$LOCK_DIR"
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        printf '[%s] lost lock race, skip\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"
+# sections and facts — and raced on the ledger.
+#
+# Kernel lock: this shell keeps fd 9 open on LOCK_FILE and python takes an
+# flock() on that open file description, so the lock is held for the whole
+# run and released by the kernel when the shell exits — no pid file, no
+# stale lock after a crash or reboot, no recycled-pid false positives.
+# Where fcntl is unavailable the run proceeds unlocked (as before 0.30).
+exec 9>>"$LOCK_FILE"
+LOCK_STATUS=0
+"$PYTHON_BIN" -c '
+import sys
+try:
+    import fcntl
+except ImportError:
+    sys.exit(0)
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(3)
+' || LOCK_STATUS=$?
+if [ "$LOCK_STATUS" -eq 3 ]; then
+    printf '[%s] another consolidation run is active, skip\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"
+    exit 0
+fi
+
+# Runs started by the 0.30.0 pre-release used a mkdir lock; respect a live one.
+LEGACY_LOCK_DIR="$HOME/.neuromcp/consolidation.lock"
+if [ -d "$LEGACY_LOCK_DIR" ]; then
+    LEGACY_PID=$(cat "$LEGACY_LOCK_DIR/pid" 2>/dev/null || true)
+    if [ -n "$LEGACY_PID" ] && kill -0 "$LEGACY_PID" 2>/dev/null; then
+        printf '[%s] another consolidation run is active (legacy lock, pid %s), skip\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$LEGACY_PID" >>"$LOG"
         exit 0
     fi
 fi
-printf '%s\n' "$$" >"$LOCK_DIR/pid"
-trap 'rm -rf "$LOCK_DIR"' EXIT
 
 if [ ! -d "$SESSIONS_DIR" ]; then
     printf '[%s] no sessions dir (%s), skip\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$SESSIONS_DIR" >>"$LOG"

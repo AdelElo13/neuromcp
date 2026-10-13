@@ -8,6 +8,7 @@ import {
   keywordCoverage,
   ftsQueryTokens,
   defaultMinSimilarity,
+  resolveMinSimilarity,
   type SearchDeps,
 } from '../../src/tools/search.js';
 import { loadConfig } from '../../src/config.js';
@@ -23,6 +24,42 @@ describe('keyword coverage matches FTS5 unicode61 tokenization', () => {
   it('treats "_" as a separator like FTS5 unicode61', () => {
     expect(keywordCoverage(ftsQueryTokens('filament index'), 'filament_self_index moet 3 zijn')).toBe(1);
     expect(keywordCoverage(ftsQueryTokens('filament_self_index'), 'filament self index')).toBe(1);
+  });
+
+  it('keeps numbers and short non-Latin words as match terms', () => {
+    expect(ftsQueryTokens('Node 18')).toEqual(['node', '18']);
+    expect(ftsQueryTokens('데이터베이스 설정')).toEqual(['데이터베이스', '설정']);
+    // A memory about a different version is no longer a full keyword match.
+    expect(keywordCoverage(ftsQueryTokens('Node 18'), 'upgrade naar Node 20')).toBe(0.5);
+  });
+});
+
+describe('FTS matching in non-Latin scripts (real FTS5, unicode61)', () => {
+  // Regression: tokens were NFD-normalised with every combining mark
+  // stripped, which split Hangul into jamo, dropped Japanese dakuten and
+  // removed Indic/Thai vowel signs — keyword search matched nothing in those
+  // scripts while the old phrase query did.
+  let ctx: TestContext;
+  beforeEach(() => { ctx = setupTestDb(); });
+  afterEach(() => { teardownTestDb(ctx); });
+
+  it.each([
+    ['데이터베이스 설정', '데이터베이스 설정 변경 완료'],
+    ['データベース', 'データベース の 設定 を 変更 した'],
+    ['डेटाबेस सेटिंग', 'डेटाबेस सेटिंग बदल दी'],
+    ['ฐานข้อมูล', 'ฐานข้อมูล ใหม่'],
+    ['cafe plank', 'het café heeft een plank'],
+  ])('query %s finds its memory', async (query, content) => {
+    const id = insertTestMemory(ctx, { content });
+    ctx.db.prepare(
+      `INSERT INTO memories_fts (rowid, content, summary, tags, category)
+       SELECT rowid, content, NULL, tags, category FROM memories WHERE id = ?`,
+    ).run(id);
+    const detailed = await searchMemoryDetailed(
+      { query, limit: 3, explain: false, hybrid: true, min_similarity: 0.99 },
+      { db: ctx.db, vecStore: ctx.vecStore, embedder: ctx.embedder, logger: ctx.logger, metrics: ctx.metrics, config: ctx.config },
+    );
+    expect(detailed.results.map((r) => r.id)).toEqual([id]);
   });
 });
 
@@ -214,7 +251,7 @@ describe('searchMemory relevance', () => {
     expect(tie.map((r) => r.id)).toEqual([tieHigh, tieLow]);
   });
 
-  it('applies a calibrated default floor for known embedders; explicit settings win', async () => {
+  it('the search_memory tool applies a calibrated default floor for known embedders; explicit settings win', async () => {
     // Measured on 2402 real memories: with bge-m3 a 0.45 floor keeps 98% of
     // true targets and empties 73% of off-topic queries. Unknown embedders
     // (and nomic, whose off-topic scores exceed true matches) stay off.
@@ -229,18 +266,26 @@ describe('searchMemory relevance', () => {
     await seed(bge, [{ content: TARGET, importance: 0.5 }, ...UNRELATED.map(popular)]);
     const offTopic = { query: 'kwantumfysica zonnestelsel', limit: 3, explain: false };
 
-    const byDefault = await searchMemoryDetailed(offTopic, deps(bge, { minSimilarity: null }));
-    expect(byDefault.results).toEqual([]);
-    expect(byDefault.diagnostics.below_threshold_dropped).toBeGreaterThan(0);
+    // The search_memory tool resolves the floor with resolveMinSimilarity.
+    const toolFloor = (name: string, cfg: number | null, explicit?: number) =>
+      resolveMinSimilarity(explicit, { minSimilarity: cfg }, name);
+    expect(toolFloor('bge-m3', null)).toBe(0.45);
+    expect(toolFloor('bge-m3:latest', null)).toBe(0.45);
+    expect(toolFloor('some-other-model', null)).toBe(0);
+    expect(toolFloor('bge-m3', 0)).toBe(0);
+    expect(toolFloor('bge-m3', null, 0)).toBe(0);
 
-    const unknownModel = await searchMemoryDetailed(offTopic, deps(new NamedBow('some-other-model'), { minSimilarity: null }));
-    expect(unknownModel.results.length).toBe(3);
+    const viaTool = await searchMemoryDetailed(
+      { ...offTopic, min_similarity: toolFloor('bge-m3', null) },
+      deps(bge, { minSimilarity: null }),
+    );
+    expect(viaTool.results).toEqual([]);
+    expect(viaTool.diagnostics.below_threshold_dropped).toBeGreaterThan(0);
 
-    const explicitOff = await searchMemoryDetailed(offTopic, deps(bge, { minSimilarity: 0 }));
-    expect(explicitOff.results.length).toBe(3);
+    // Library callers (recall_answer, prompts, HTTP) keep the 0.29 behaviour.
+    const libraryCall = await searchMemoryDetailed(offTopic, deps(bge, { minSimilarity: null }));
+    expect(libraryCall.results.length).toBe(3);
 
-    const perCallOff = await searchMemoryDetailed({ ...offTopic, min_similarity: 0 }, deps(bge, { minSimilarity: null }));
-    expect(perCallOff.results.length).toBe(3);
   });
 
   it('min_similarity drops irrelevant candidates and reports how many', async () => {

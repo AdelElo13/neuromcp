@@ -39,7 +39,8 @@ describe('consolidate-sessions.py — isolated claude -p calls', () => {
       expect(head, `claude -p call #${i + 1} missing env=CLAUDE_ISOLATED_ENV`).toMatch(/env\s*=\s*CLAUDE_ISOLATED_ENV/);
     }
     expect(SCRIPT).toMatch(/"disableAllHooks":\s*True/);
-    expect(SCRIPT).toMatch(/"--setting-sources",\s*""/);
+    expect(SCRIPT).toMatch(/"--setting-sources",\s*"user"/);
+    expect(SCRIPT).toMatch(/"--disable-slash-commands"/);
     expect(SCRIPT).toMatch(/"--strict-mcp-config"/);
     expect(SCRIPT).toMatch(/CLAUDE_CODE_DISABLE_CLAUDE_MDS/);
   });

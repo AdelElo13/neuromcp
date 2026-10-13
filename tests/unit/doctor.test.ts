@@ -15,7 +15,14 @@ import {
   aggregateExitCode,
   terminateChild,
   runAuditNetwork,
+  checkHooks,
 } from '../../bin/doctor.mjs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /**
  * DX-review upgrade: bin/doctor.mjs used to be a surface-level check
@@ -922,5 +929,53 @@ describe('aggregateExitCode', () => {
     expect(aggregateExitCode([
       { status: 'ok' }, { status: 'warn' }, { status: 'fail' },
     ])).toBe(2);
+  });
+});
+
+describe('checkHooks', () => {
+  // Hooks were never overwritten on upgrade, so hook fixes silently never
+  // reached existing users. The doctor names outdated hooks and the fix.
+  const withHome = (setup: (hooksDir: string) => void) => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-doc-hooks-'));
+    const hooksDir = join(home, '.claude', 'scripts', 'hooks');
+    try {
+      setup(hooksDir);
+      return checkHooks({ home });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  it('skips when no neuromcp hooks are installed', () => {
+    expect(withHome(() => {}).status).toBe('skip');
+  });
+
+  it('is ok when every installed hook is the shipped version', () => {
+    const r = withHome((dir) => {
+      mkdirSync(dir, { recursive: true });
+      copyFileSync(join(REPO, 'templates', 'hooks', 'neuromcp-persist.cjs'), join(dir, 'neuromcp-persist.cjs'));
+    });
+    expect(r.status).toBe('ok');
+  });
+
+  it('warns about an older unmodified hook and a legacy .js hook, naming the fix', () => {
+    const r = withHome((dir) => {
+      mkdirSync(dir, { recursive: true });
+      copyFileSync(join(REPO, 'tests', 'fixtures', 'hooks', 'neuromcp-persist-0.29.5.cjs'), join(dir, 'neuromcp-persist.cjs'));
+      copyFileSync(join(REPO, 'tests', 'fixtures', 'hooks', 'neuromcp-auto-capture-0.29.5.js'), join(dir, 'neuromcp-auto-capture.js'));
+    });
+    expect(r.status).toBe('warn');
+    expect(r.info).toMatch(/neuromcp-persist\.cjs/);
+    expect(r.info).toMatch(/neuromcp-auto-capture\.js/);
+    expect(r.info).toMatch(/neuromcp-init-wiki/);
+  });
+
+  it('reports user-edited hooks without asking to overwrite them', () => {
+    const r = withHome((dir) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'neuromcp-persist.cjs'), '// my own version\n');
+    });
+    expect(r.status).toBe('ok');
+    expect(r.info).toMatch(/edited/);
   });
 });

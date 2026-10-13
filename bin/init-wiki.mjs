@@ -16,10 +16,11 @@
  *   npx neuromcp-init-wiki --editor all       # install all rules
  */
 
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { seedObsidianVault } from './obsidian-vault.mjs';
 
@@ -127,181 +128,263 @@ const RENAMED_HOOKS = {
   'neuromcp-context-inject.js': 'neuromcp-context-inject.cjs',
 };
 
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+
+/** sha256 of every hook version neuromcp ever shipped, per hook name. */
+function loadShippedHashes() {
+  try {
+    return JSON.parse(readFileSync(join(hooksDir, 'shipped-hashes.json'), 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+const SHIPPED_HASHES = loadShippedHashes();
+
+/** True when `content` is a hook version neuromcp shipped (not edited by the user). */
+function isShippedVersion(hookFile, content) {
+  const name = hookFile.replace(/\.c?js$/, '');
+  return (SHIPPED_HASHES[name] ?? []).includes(sha256(content));
+}
+
+/**
+ * Tiny .js stub left at the old path after a .js → .cjs rename, so anything
+ * else that still references the old file (~/.claude/hooks/hooks.json, plugin
+ * hook configs, scripts) keeps working. import() resolves relative to this
+ * file in both CommonJS and ES-module contexts.
+ */
+function shimSource(newName) {
+  return [
+    `// neuromcp: this hook moved to ./${newName} (CommonJS under any package.json "type").`,
+    '// Kept so existing references to the old path keep working. Safe to delete',
+    '// once nothing refers to it.',
+    `import('./${newName}').catch((err) => {`,
+    `  process.stderr.write('[neuromcp] failed to load ${newName}: ' + (err && err.message) + '\\n');`,
+    '  process.exitCode = 1;',
+    '});',
+    '',
+  ].join('\n');
+}
+
+function migrateRenamedHooks() {
+  // persist moved to .cjs in v0.22.0, auto-capture and context-inject in
+  // v0.30.0: as .js they crash under a parent package.json with
+  // "type": "module".
+  for (const [oldName, newName] of Object.entries(RENAMED_HOOKS)) {
+    const oldHook = join(claudeHooksDir, oldName);
+    if (!existsSync(oldHook)) continue;
+    const oldContent = readFileSync(oldHook);
+    if (oldContent.toString('utf-8') === shimSource(newName)) continue; // already migrated
+    const newHook = join(claudeHooksDir, newName);
+    const backup = `${oldHook}.bak-pre-cjs-${Date.now()}`;
+    copyFileSync(oldHook, backup);
+    if (!existsSync(newHook)) {
+      const template = join(hooksDir, newName);
+      if (isShippedVersion(oldName, oldContent) && existsSync(template)) {
+        copyFileSync(template, newHook);
+        log(`Migrated ${oldName} → ${newName} (unmodified older version, updated to this release)`);
+      } else {
+        // The user edited this hook: keep their code, just under the new name.
+        writeFileSync(newHook, oldContent);
+        log(`Migrated ${oldName} → ${newName} (your edits kept)`);
+      }
+    }
+    writeFileSync(oldHook, shimSource(newName));
+    log(`  ${oldName} now forwards to ${newName}; original kept at ${backup.replace(HOME, '~')}`);
+  }
+}
+
+function installOrUpdateHooks() {
+  const drifted = [];
+  for (const hook of HOOK_FILES) {
+    const src = join(hooksDir, hook);
+    const dest = join(claudeHooksDir, hook);
+    if (!existsSync(src)) continue;
+    if (!existsSync(dest)) {
+      copyFileSync(src, dest);
+      log(`Installed hook: ${hook}`);
+      continue;
+    }
+    const current = readFileSync(dest);
+    if (current.equals(readFileSync(src))) {
+      skip(`Hook: ${hook}`);
+    } else if (updateHooks || isShippedVersion(hook, current)) {
+      const backup = `${dest}.bak-${Date.now()}`;
+      copyFileSync(dest, backup);
+      copyFileSync(src, dest);
+      const why = updateHooks ? '' : ' (was an unmodified older version)';
+      log(`Updated hook: ${hook}${why} — previous version kept at ${backup.replace(HOME, '~')}`);
+    } else {
+      drifted.push(hook);
+      warn(`${hook} differs from the shipped version (you edited it) — run \`neuromcp-init-wiki --update-hooks\` to replace it (a backup is kept)`);
+    }
+  }
+  if (drifted.length > 0) {
+    warn(`${drifted.length} edited hook(s) were left as they are; fixes in this release to those hooks do not reach them until updated.`);
+  }
+}
+
 if (!requestedEditor || requestedEditor === 'claude' || requestedEditor === 'all') {
-  if (existsSync(hooksDir)) {
+  const settingsPath = join(HOME, '.claude', 'settings.json');
+
+  // Read settings.json FIRST. If it cannot be parsed, nothing is moved: a
+  // half-done migration (hook files renamed, commands still pointing at the
+  // old names) would silently break every hook.
+  let settings = {};
+  let settingsOk = true;
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    } catch (err) {
+      settingsOk = false;
+      warn(`~/.claude/settings.json could not be parsed (${err.message}) — hooks were NOT installed or migrated.`);
+      console.log('  Fix the file, then run `neuromcp-init-wiki` again.\n');
+    }
+  }
+
+  if (settingsOk && existsSync(hooksDir)) {
     if (!existsSync(claudeHooksDir)) {
       mkdirSync(claudeHooksDir, { recursive: true });
     }
-    // Migration: CommonJS hooks shipped as .js crash when a parent
-    // package.json says "type": "module". persist moved to .cjs in v0.22.0,
-    // auto-capture and context-inject in v0.30.0. Archive the old file so the
-    // new one installs cleanly; settings.json commands are rewritten below.
-    for (const oldName of Object.keys(RENAMED_HOOKS)) {
-      const oldHook = join(claudeHooksDir, oldName);
-      if (existsSync(oldHook)) {
-        const archived = `${oldHook}.bak-pre-cjs-${Date.now()}`;
-        renameSync(oldHook, archived);
-        log(`Migrated: archived old ${oldName} → ${archived}`);
-      }
-    }
-    const drifted = [];
-    for (const hook of HOOK_FILES) {
-      const src = join(hooksDir, hook);
-      const dest = join(claudeHooksDir, hook);
-      if (!existsSync(src)) continue;
-      if (!existsSync(dest)) {
-        copyFileSync(src, dest);
-        log(`Installed hook: ${hook}`);
-      } else if (readFileSync(dest, 'utf-8') === readFileSync(src, 'utf-8')) {
-        skip(`Hook: ${hook}`);
-      } else if (updateHooks) {
-        const backup = `${dest}.bak-${Date.now()}`;
-        copyFileSync(dest, backup);
-        copyFileSync(src, dest);
-        log(`Updated hook: ${hook} (previous version kept at ${backup.replace(HOME, '~')})`);
-      } else {
-        drifted.push(hook);
-        warn(`${hook} differs from the shipped version — run \`neuromcp-init-wiki --update-hooks\` to update it (a backup is kept)`);
-      }
-    }
-    if (drifted.length > 0) {
-      warn(`${drifted.length} hook(s) are not the shipped version; hook fixes in this release do not reach them until updated.`);
-    }
+    migrateRenamedHooks();
+    installOrUpdateHooks();
   }
 
-  // Auto-inject hooks into ~/.claude/settings.json
-  const settingsPath = join(HOME, '.claude', 'settings.json');
-  const neuromcpHooks = {
-    SessionStart: {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `node "${claudeHooksDir}/neuromcp-context-inject.cjs"`,
-        timeout: 5,
-      }],
-    },
-    'SessionStart:health-check': {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `node "${claudeHooksDir}/neuromcp-health-check.cjs"`,
-        timeout: 8,
-      }],
-    },
-    PostToolUse: {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `CLAUDE_HOOK_EVENT=PostToolUse node "${claudeHooksDir}/neuromcp-persist.cjs"`,
-        timeout: 5,
-        async: true,
-      }],
-    },
-    Stop: {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `CLAUDE_HOOK_EVENT=Stop node "${claudeHooksDir}/neuromcp-persist.cjs"`,
-        timeout: 10,
-      }],
-    },
-    'Stop:auto-capture': {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `node "${claudeHooksDir}/neuromcp-auto-capture.cjs"`,
-        timeout: 15,
-        async: true,
-      }],
-    },
-    'Stop:neuromcp-critic': {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `node "${claudeHooksDir}/neuromcp-critic.cjs"`,
-        timeout: 30,
-        async: true,
-      }],
-    },
-    UserPromptSubmit: {
-      matcher: '*',
-      hooks: [{
-        type: 'command',
-        command: `node "${claudeHooksDir}/neuromcp-auto-retrieve.cjs"`,
-        timeout: 2,
-      }],
-    },
-  };
+  if (settingsOk) {
+    const neuromcpHooks = {
+      SessionStart: {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `node "${claudeHooksDir}/neuromcp-context-inject.cjs"`,
+          timeout: 5,
+        }],
+      },
+      'SessionStart:health-check': {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `node "${claudeHooksDir}/neuromcp-health-check.cjs"`,
+          timeout: 8,
+        }],
+      },
+      PostToolUse: {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `CLAUDE_HOOK_EVENT=PostToolUse node "${claudeHooksDir}/neuromcp-persist.cjs"`,
+          timeout: 5,
+          async: true,
+        }],
+      },
+      Stop: {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `CLAUDE_HOOK_EVENT=Stop node "${claudeHooksDir}/neuromcp-persist.cjs"`,
+          timeout: 10,
+        }],
+      },
+      'Stop:auto-capture': {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `node "${claudeHooksDir}/neuromcp-auto-capture.cjs"`,
+          timeout: 15,
+          async: true,
+        }],
+      },
+      'Stop:neuromcp-critic': {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `node "${claudeHooksDir}/neuromcp-critic.cjs"`,
+          timeout: 30,
+          async: true,
+        }],
+      },
+      UserPromptSubmit: {
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `node "${claudeHooksDir}/neuromcp-auto-retrieve.cjs"`,
+          timeout: 2,
+        }],
+      },
+    };
 
-  function hasNeuromcpHook(entries, command) {
-    if (!Array.isArray(entries)) return false;
-    return entries.some(entry =>
-      Array.isArray(entry.hooks) && entry.hooks.some(h => h.command && h.command.includes(command))
-    );
-  }
-
-  try {
-    let settings = {};
-    if (existsSync(settingsPath)) {
-      settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-    } else {
-      mkdirSync(dirname(settingsPath), { recursive: true });
+    function hasNeuromcpHook(entries, command) {
+      if (!Array.isArray(entries)) return false;
+      return entries.some(entry =>
+        Array.isArray(entry.hooks) && entry.hooks.some(h => h.command && h.command.includes(command))
+      );
     }
 
-    if (!settings.hooks) settings.hooks = {};
+    try {
+      if (!existsSync(settingsPath)) mkdirSync(dirname(settingsPath), { recursive: true });
+      if (!settings.hooks) settings.hooks = {};
 
-    // Migration: rewrite stale .js commands to .cjs after the renames.
-    let migratedCommands = 0;
-    for (const evt of Object.values(settings.hooks)) {
-      if (!Array.isArray(evt)) continue;
-      for (const entry of evt) {
-        if (!Array.isArray(entry.hooks)) continue;
-        for (const h of entry.hooks) {
-          if (!h.command) continue;
-          for (const [oldName, newName] of Object.entries(RENAMED_HOOKS)) {
-            if (h.command.includes(oldName)) {
-              h.command = h.command.split(oldName).join(newName);
-              migratedCommands++;
+      // Migration: point commands at the renamed .cjs files. Only an exact
+      // file-name match is rewritten (a custom "my-neuromcp-persist.js" is
+      // left alone).
+      let migratedCommands = 0;
+      for (const evt of Object.values(settings.hooks)) {
+        if (!Array.isArray(evt)) continue;
+        for (const entry of evt) {
+          if (!Array.isArray(entry.hooks)) continue;
+          for (const h of entry.hooks) {
+            if (typeof h.command !== 'string') continue;
+            for (const [oldName, newName] of Object.entries(RENAMED_HOOKS)) {
+              const exact = new RegExp(`(^|[\\\\/"'\\s])${oldName.replace('.', '\\.')}(?=$|["'\\s])`, 'g');
+              const rewritten = h.command.replace(exact, `$1${newName}`);
+              if (rewritten !== h.command) {
+                h.command = rewritten;
+                migratedCommands++;
+              }
             }
           }
         }
       }
-    }
-    if (migratedCommands > 0) {
-      log(`Migrated ${migratedCommands} settings.json command(s) from .js → .cjs hook files`);
-    }
-
-    let added = 0;
-
-    for (const [eventType, entry] of Object.entries(neuromcpHooks)) {
-      // Stop:auto-capture is registered under the Stop event type;
-      // SessionStart:health-check under the SessionStart event type.
-      const actualEventType = eventType.startsWith('Stop:') ? 'Stop'
-        : eventType.startsWith('SessionStart:') ? 'SessionStart'
-        : eventType;
-      if (!settings.hooks[actualEventType]) settings.hooks[actualEventType] = [];
-      const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject'
-        : eventType.includes('health-check') ? 'neuromcp-health-check'
-        : eventType.includes('auto-capture') ? 'neuromcp-auto-capture'
-        : eventType.includes('neuromcp-critic') ? 'neuromcp-critic'
-        : eventType === 'UserPromptSubmit' ? 'neuromcp-auto-retrieve'
-        : 'neuromcp-persist';
-      if (!hasNeuromcpHook(settings.hooks[actualEventType], marker)) {
-        settings.hooks[actualEventType].push(entry);
-        log(`Added ${eventType} hook to settings.json`);
-        added++;
-      } else {
-        skip(`${eventType} hook in settings.json`);
+      if (migratedCommands > 0) {
+        log(`Migrated ${migratedCommands} settings.json command(s) from .js → .cjs hook files`);
       }
-    }
 
-    if (added > 0 || migratedCommands > 0) {
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-      log(`Saved ${settingsPath.replace(HOME, '~')}`);
+      let added = 0;
+
+      for (const [eventType, entry] of Object.entries(neuromcpHooks)) {
+        // Stop:auto-capture is registered under the Stop event type;
+        // SessionStart:health-check under the SessionStart event type.
+        const actualEventType = eventType.startsWith('Stop:') ? 'Stop'
+          : eventType.startsWith('SessionStart:') ? 'SessionStart'
+          : eventType;
+        if (!settings.hooks[actualEventType]) settings.hooks[actualEventType] = [];
+        const marker = eventType === 'SessionStart' ? 'neuromcp-context-inject'
+          : eventType.includes('health-check') ? 'neuromcp-health-check'
+          : eventType.includes('auto-capture') ? 'neuromcp-auto-capture'
+          : eventType.includes('neuromcp-critic') ? 'neuromcp-critic'
+          : eventType === 'UserPromptSubmit' ? 'neuromcp-auto-retrieve'
+          : 'neuromcp-persist';
+        if (!hasNeuromcpHook(settings.hooks[actualEventType], marker)) {
+          settings.hooks[actualEventType].push(entry);
+          log(`Added ${eventType} hook to settings.json`);
+          added++;
+        } else {
+          skip(`${eventType} hook in settings.json`);
+        }
+      }
+
+      if (added > 0 || migratedCommands > 0) {
+        if (existsSync(settingsPath)) {
+          const backup = `${settingsPath}.bak-neuromcp-${Date.now()}`;
+          copyFileSync(settingsPath, backup);
+          log(`Backed up settings.json → ${backup.replace(HOME, '~')}`);
+        }
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+        log(`Saved ${settingsPath.replace(HOME, '~')}`);
+      }
+    } catch (err) {
+      warn(`Could not auto-configure hooks in settings.json: ${err.message}`);
+      console.log('  Add them manually — see https://github.com/AdelElo13/neuromcp#hooks\n');
     }
-  } catch (err) {
-    warn(`Could not auto-configure hooks in settings.json: ${err.message}`);
-    console.log('  Add them manually — see https://github.com/AdelElo13/neuromcp#hooks\n');
   }
 
   // ─── Auto-install zombie-cleanup (macOS only, opt-OUT via --no-zombie-cleanup) ──

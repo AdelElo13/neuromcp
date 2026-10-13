@@ -188,7 +188,10 @@ const TRANSCRIPT_CHUNK_BYTES = Number(process.env.NEUROMCP_TRANSCRIPT_CHUNK_BYTE
   : 4 * 1024 * 1024;
 const TRANSCRIPT_MAX_LINE_BYTES = 256 * 1024 * 1024;
 
-/** Calls onLine(string) for every non-empty line; returns the number of oversized lines skipped. */
+/**
+ * Calls onLine(string) for every non-empty line; onLine may return false to
+ * stop early. Returns the number of oversized lines skipped.
+ */
 function forEachJsonlLine(filePath, onLine) {
   const fd = fs.openSync(filePath, 'r');
   let skipped = 0;
@@ -197,11 +200,12 @@ function forEachJsonlLine(filePath, onLine) {
     let pieces = [];
     let pending = 0;
     let oversized = false;
+    let stopped = false;
     const flush = () => {
       if (oversized) skipped++;
       else if (pending > 0) {
         const line = Buffer.concat(pieces, pending).toString('utf8');
-        if (line.trim()) onLine(line);
+        if (line.trim() && onLine(line) === false) stopped = true;
       }
       pieces = [];
       pending = 0;
@@ -219,18 +223,18 @@ function forEachJsonlLine(filePath, onLine) {
       pending += piece.length;
     };
     let n;
-    while ((n = fs.readSync(fd, buf, 0, TRANSCRIPT_CHUNK_BYTES, null)) > 0) {
+    while (!stopped && (n = fs.readSync(fd, buf, 0, TRANSCRIPT_CHUNK_BYTES, null)) > 0) {
       const chunk = buf.subarray(0, n);
       let start = 0;
       let nl;
-      while ((nl = chunk.indexOf(0x0a, start)) !== -1) {
+      while (!stopped && (nl = chunk.indexOf(0x0a, start)) !== -1) {
         add(chunk.subarray(start, nl));
         flush();
         start = nl + 1;
       }
-      add(chunk.subarray(start));
+      if (!stopped) add(chunk.subarray(start));
     }
-    flush();
+    if (!stopped) flush();
   } finally {
     fs.closeSync(fd);
   }

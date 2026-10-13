@@ -44,13 +44,18 @@ FACT_TIMEOUT_SEC = 120
 # Every `claude -p` call is a pure text completion over the prompt we build.
 # Without isolation the CLI ran the user's hooks (UserPromptSubmit injected
 # <working-context>/<neuromcp-recall>, e.g. an unrelated "active goal"), loaded
-# CLAUDE.md files and started every MCP server. The summarizer repeated that
+# CLAUDE.md files, skills and every MCP server. The summarizer repeated that
 # context and the auditor rejected the batch as unsupported by the sessions.
-# (--bare would also isolate, but it never reads OAuth/keychain credentials.)
+# USER settings stay loaded on purpose: they can carry auth and endpoint
+# configuration (apiKeyHelper, env such as ANTHROPIC_BASE_URL / Bedrock /
+# Vertex). Project and local settings are dropped; hooks are disabled by the
+# flag-level setting, which takes precedence. (--bare would also isolate, but
+# it never reads OAuth/keychain credentials.)
 CLAUDE_ISOLATION_ARGS = [
-    "--setting-sources", "",
+    "--setting-sources", "user",
     "--settings", json.dumps({"disableAllHooks": True}),
     "--strict-mcp-config",
+    "--disable-slash-commands",
 ]
 CLAUDE_ISOLATED_ENV = {**os.environ, "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}
 CONTRADICTION_CHECK = os.environ.get("NEUROMCP_CONTRADICTION_CHECK", "1") != "0"

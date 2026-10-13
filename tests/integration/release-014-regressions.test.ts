@@ -266,6 +266,48 @@ describe('0.14.1 regressions', () => {
     expect(String(second.stdout) + String(second.stderr)).toMatch(/inserted 0 new chunks/);
   });
 
+  it('index-wiki keeps the identity of repeated-heading sections when another one is inserted', () => {
+    // Keys of repeated headings must not depend on position: inserting a new
+    // "## [date]" section above existing ones must not re-key (and re-id) all
+    // later sections. A literal heading such as "Topic::#2" must not collide
+    // with the key of a second "Topic" section either.
+    const wikiFile = join(sb.wikiDir, 'projects', 'shift.md');
+    const section = (h: string, body: string) => `## ${h}\n\n${body}\n\n`;
+    writeFileSync(
+      wikiFile,
+      '---\ntitle: shift\n---\n\n' +
+        section('Topic', 'Alpha section body with enough text to be indexed.') +
+        section('Topic', 'Beta section body with enough text to be indexed.') +
+        section('Topic::#2', 'Gamma section whose literal heading mimics a key suffix.'),
+    );
+    expect(runNode(INDEX_BIN, [], env()).status).toBe(0);
+    const idOf = (needle: string) => {
+      const db = new Database(sb.dbPath, { readonly: true });
+      const row = db.prepare(
+        `SELECT id FROM memories WHERE source='wiki' AND is_deleted = 0 AND content LIKE ?`,
+      ).get(`%${needle}%`) as { id: string } | undefined;
+      db.close();
+      return row?.id;
+    };
+    const betaBefore = idOf('Beta section');
+    expect(betaBefore).toBeDefined();
+    expect(idOf('Gamma section')).toBeDefined();
+
+    writeFileSync(
+      wikiFile,
+      '---\ntitle: shift\n---\n\n' +
+        section('Topic', 'New first section inserted above the others, long enough.') +
+        section('Topic', 'Alpha section body with enough text to be indexed.') +
+        section('Topic', 'Beta section body with enough text to be indexed.') +
+        section('Topic::#2', 'Gamma section whose literal heading mimics a key suffix.'),
+    );
+    expect(runNode(INDEX_BIN, [], env()).status).toBe(0);
+    expect(idOf('Beta section')).toBe(betaBefore);
+    expect(idOf('Gamma section')).toBeDefined();
+    expect(idOf('New first section')).toBeDefined();
+    expect(idOf('Alpha section')).toBeDefined();
+  });
+
   it('index-wiki re-embeds unchanged chunks that were stored without a vector', () => {
     // A chunk stored without a vector (transient Ollama failure) used to be
     // skipped as "unchanged" forever, invisible to vector search. The indexer

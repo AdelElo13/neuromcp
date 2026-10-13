@@ -281,6 +281,22 @@ Keep `NEUROMCP_RERANKER=none` for non-English memories: the bundled
 cross-encoder (`ms-marco-MiniLM-L-6-v2`) is English-only and dropped MRR on
 the Dutch benchmark above from 0.46 to 0.18.
 
+## Upgrading
+
+```bash
+npm install -g neuromcp@latest
+npx neuromcp-init-wiki        # updates installed hooks; safe to re-run
+npx neuromcp-doctor check     # confirms hooks, daemon and embeddings
+```
+
+`neuromcp-init-wiki` copies the Claude Code hooks once; until 0.30.0 it never
+touched them again, so hook fixes did not reach existing installs. Re-running
+it now updates every hook that is an unmodified older neuromcp version (a
+backup is kept next to each one), migrates old `.js` hooks to `.cjs` (leaving a
+forwarding stub at the old path) and leaves hooks you edited alone — it lists
+them, and `--update-hooks` replaces those too. `neuromcp-doctor check` reports
+outdated hooks.
+
 ## Installation
 
 The reliable way is `npm install -g neuromcp && neuromcp-init` — it
