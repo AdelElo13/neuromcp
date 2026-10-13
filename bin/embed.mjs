@@ -64,6 +64,11 @@ try {
   const logger = createLogger(config);
   const probeDb = new Database(DB_PATH, { readonly: true, fileMustExist: true });
   try {
+    // Cheap contract checks first: an unknown or tombstoned id must get its
+    // own clear error, not an embedder error (and must not cost an embed).
+    const row = probeDb.prepare(`SELECT is_deleted FROM memories WHERE id = ?`).get(id);
+    if (!row) emit({ ok: false, reason: 'unknown memory id' });
+    if (row.is_deleted) emit({ ok: false, reason: 'memory is tombstoned' });
     provider = await createIndexAwareProvider(probeDb, config, logger);
   } finally {
     probeDb.close();
