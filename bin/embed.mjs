@@ -51,16 +51,23 @@ if (!existsSync(DB_PATH)) emit({ ok: false, reason: 'db missing' });
 const distRoot = join(__dirname, '..', 'dist');
 if (!existsSync(distRoot)) emit({ ok: false, reason: 'neuromcp dist missing' });
 
+// Index-aware: use the provider the existing vector index was built with
+// (e.g. bge-m3 after a reembed), not the 'auto' default.
 let provider;
 try {
-  const [{ createEmbeddingProvider }, { loadConfig }, { createLogger }] = await Promise.all([
-    import(join(distRoot, 'embeddings', 'factory.js')),
+  const [{ createIndexAwareProvider }, { loadConfig }, { createLogger }] = await Promise.all([
+    import(join(distRoot, 'embeddings', 'runtime.js')),
     import(join(distRoot, 'config.js')),
     import(join(distRoot, 'observability', 'logger.js')),
   ]);
   const config = loadConfig();
   const logger = createLogger(config);
-  provider = await createEmbeddingProvider(config, logger);
+  const probeDb = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+  try {
+    provider = await createIndexAwareProvider(probeDb, config, logger);
+  } finally {
+    probeDb.close();
+  }
 } catch (err) {
   emit({ ok: false, reason: `embedder init: ${err?.message || err}` });
 }

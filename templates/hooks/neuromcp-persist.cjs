@@ -59,6 +59,67 @@ function getSessionContent() {
   }
 }
 
+// ─── Transcript streaming ──────────────────────────────────────────
+// Reads a JSONL file line by line in fixed-size chunks. fs.readFileSync on
+// the whole transcript throws once it passes V8's ~512 MB string limit
+// (long sessions with screenshots reach 700 MB+), which silently disabled
+// this hook for exactly the longest sessions. Lines are decoded only after
+// they are complete, so multi-byte UTF-8 characters split across chunks
+// stay intact. NEUROMCP_TRANSCRIPT_CHUNK_BYTES exists for tests.
+const TRANSCRIPT_CHUNK_BYTES = Number(process.env.NEUROMCP_TRANSCRIPT_CHUNK_BYTES) > 0
+  ? Number(process.env.NEUROMCP_TRANSCRIPT_CHUNK_BYTES)
+  : 4 * 1024 * 1024;
+const TRANSCRIPT_MAX_LINE_BYTES = 256 * 1024 * 1024;
+
+/** Calls onLine(string) for every non-empty line; returns the number of oversized lines skipped. */
+function forEachJsonlLine(filePath, onLine) {
+  const fd = fs.openSync(filePath, 'r');
+  let skipped = 0;
+  try {
+    const buf = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
+    let pieces = [];
+    let pending = 0;
+    let oversized = false;
+    const flush = () => {
+      if (oversized) skipped++;
+      else if (pending > 0) {
+        const line = Buffer.concat(pieces, pending).toString('utf8');
+        if (line.trim()) onLine(line);
+      }
+      pieces = [];
+      pending = 0;
+      oversized = false;
+    };
+    const add = (piece) => {
+      if (oversized || piece.length === 0) return;
+      if (pending + piece.length > TRANSCRIPT_MAX_LINE_BYTES) {
+        oversized = true;
+        pieces = [];
+        pending = 0;
+        return;
+      }
+      pieces.push(Buffer.from(piece));
+      pending += piece.length;
+    };
+    let n;
+    while ((n = fs.readSync(fd, buf, 0, TRANSCRIPT_CHUNK_BYTES, null)) > 0) {
+      const chunk = buf.subarray(0, n);
+      let start = 0;
+      let nl;
+      while ((nl = chunk.indexOf(0x0a, start)) !== -1) {
+        add(chunk.subarray(start, nl));
+        flush();
+        start = nl + 1;
+      }
+      add(chunk.subarray(start));
+    }
+    flush();
+  } finally {
+    fs.closeSync(fd);
+  }
+  return skipped;
+}
+
 /**
  * Count real user messages in a session transcript.
  * Returns 0 if transcript missing/unreadable, or if the session had no
@@ -72,15 +133,13 @@ function countUserMessages(transcriptPath) {
   if (!transcriptPath) return 0;
   try {
     if (!fs.existsSync(transcriptPath)) return 0;
-    const text = fs.readFileSync(transcriptPath, "utf8");
     let count = 0;
-    for (const line of text.split("\n")) {
-      if (!line) continue;
+    forEachJsonlLine(transcriptPath, (line) => {
       try {
         const e = JSON.parse(line);
         const isUser =
           e.type === "user" || e.role === "user" || e.message?.role === "user";
-        if (!isUser) continue;
+        if (!isUser) return;
         const c = e.message?.content ?? e.content;
         const body = typeof c === "string"
           ? c
@@ -89,7 +148,7 @@ function countUserMessages(transcriptPath) {
             : "";
         if (body.trim()) count++;
       } catch {}
-    }
+    });
     return count;
   } catch {
     return 0;

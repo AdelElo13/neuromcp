@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   providerAcceptable,
+  resolveOllamaModel,
   staticOnnxSkipReason,
 } from '../../src/embeddings/factory.js';
 import { downloadModel } from '../../src/embeddings/model-cache.js';
@@ -54,6 +55,31 @@ describe('providerAcceptable', () => {
         requireModel: 'bge-small-en-v1.5',
       }),
     ).toEqual({ ok: true });
+  });
+});
+
+describe('resolveOllamaModel', () => {
+  // After `neuromcp-reembed` to another Ollama model (e.g. bge-m3), every
+  // client on the default 'auto' setting must follow the index. Before this,
+  // 'auto' always meant nomic-embed-text, so any client without an explicit
+  // NEUROMCP_EMBEDDING_MODEL (daemon, consolidation fact-embedder, hooks)
+  // fell into DEGRADED mode.
+  it('follows the model the existing index was built with when set to auto', () => {
+    expect(resolveOllamaModel('auto', { requireDimension: 1024, requireModel: 'bge-m3' })).toBe('bge-m3');
+  });
+
+  it('defaults to nomic-embed-text for a fresh index or an ambiguous history', () => {
+    expect(resolveOllamaModel('auto', {})).toBe('nomic-embed-text');
+    expect(resolveOllamaModel('auto', { requireDimension: 768 })).toBe('nomic-embed-text');
+  });
+
+  it('never turns a non-Ollama stored model into an Ollama model name', () => {
+    expect(resolveOllamaModel('auto', { requireDimension: 384, requireModel: 'bge-small-en-v1.5' })).toBe('nomic-embed-text');
+    expect(resolveOllamaModel('auto', { requireDimension: 1536, requireModel: 'text-embedding-3-small' })).toBe('nomic-embed-text');
+  });
+
+  it('an explicit NEUROMCP_EMBEDDING_MODEL always wins', () => {
+    expect(resolveOllamaModel('mxbai-embed-large', { requireDimension: 1024, requireModel: 'bge-m3' })).toBe('mxbai-embed-large');
   });
 });
 

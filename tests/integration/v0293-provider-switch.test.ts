@@ -33,6 +33,7 @@ import type { EmbeddingProvider } from '../../src/embeddings/types.js';
 import type { ProviderSelection } from '../../src/embeddings/factory.js';
 import {
   resolveEmbeddingRuntime,
+  createIndexAwareProvider,
   isDegradedProvider,
   degradedNotice,
   embeddingStatus,
@@ -137,6 +138,32 @@ describe('v0.29.3 embedding provider switch', () => {
     await storeMemory({ content: 'the deployment key rotates every ninety days' }, deps);
     await storeMemory({ content: 'postgres runs on port 5433 in staging' }, deps);
   }
+
+  // Standalone writers (bin/embed.mjs for consolidation facts, the wiki
+  // indexer, backfill, bin/query.mjs) used createEmbeddingProvider directly:
+  // after a reembed to bge-m3 they picked nomic-embed-text and failed with
+  // "dim mismatch" on every fact. They now go through this helper.
+  it('createIndexAwareProvider returns the provider that matches the existing index', async () => {
+    await seed(1024, 'bge-m3');
+    const provider = await createIndexAwareProvider(db, config, logger, {
+      select: cascade(new FakeEmbedder('nomic-embed-text', 768), new FakeEmbedder('bge-m3', 1024)),
+      sleep: NEVER_SLEEP,
+      stderr: SILENT,
+    });
+    expect(provider.name).toBe('bge-m3');
+    expect(provider.dimensions).toBe(1024);
+  });
+
+  it('createIndexAwareProvider throws instead of handing out a degraded or mismatched provider', async () => {
+    await seed(1024, 'bge-m3');
+    await expect(
+      createIndexAwareProvider(db, config, logger, {
+        select: cascade(new FakeEmbedder('nomic-embed-text', 768)),
+        sleep: NEVER_SLEEP,
+        stderr: SILENT,
+      }),
+    ).rejects.toThrow(/1024/);
+  });
 
   it('384 index + only a 768 provider reachable → degraded start, never throws', async () => {
     await seed(384, 'bge-small-en-v1.5');

@@ -251,6 +251,36 @@ ollama pull nomic-embed-text
 
 neuromcp auto-detects it. No config needed.
 
+### Non-English memories: use a multilingual embedder
+
+`nomic-embed-text` is English-centric. On a real Dutch memory store (2,402
+memories, 40 paraphrased Dutch queries, 15 off-topic queries) it found the
+right memory in the top 5 only 2.5% of the time, and off-topic queries scored
+*higher* than true matches. `bge-m3` (multilingual, 1024-dim) on the same data:
+
+| embedder | Recall@5 | MRR@10 | relevant vs off-topic separable (AUROC) |
+|---|---|---|---|
+| nomic-embed-text | 2.5% | 0.03 | 0.08 |
+| bge-m3 | 65% | 0.47 | 0.99 |
+
+To switch an existing install:
+
+```bash
+ollama pull bge-m3
+npx neuromcp-reembed                 # dry run on a copy
+npx neuromcp-reembed --apply         # rebuild the index (keeps a backup)
+```
+
+Run the reembed with `NEUROMCP_EMBEDDING_MODEL=bge-m3` set. After that every
+client on the default `auto` setting follows the model the index was built
+with, so nothing else needs configuring. With bge-m3, `search_memory` also
+applies a calibrated relevance floor (0.45) so off-topic queries return
+nothing instead of noise; keyword (FTS) and knowledge-graph hits always pass.
+
+Keep `NEUROMCP_RERANKER=none` for non-English memories: the bundled
+cross-encoder (`ms-marco-MiniLM-L-6-v2`) is English-only and dropped MRR on
+the Dutch benchmark above from 0.46 to 0.18.
+
 ## Installation
 
 The reliable way is `npm install -g neuromcp && neuromcp-init` — it

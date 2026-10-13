@@ -17,9 +17,32 @@ SESSIONS_DIR="${NEUROMCP_SESSIONS_DIR:-$HOME/.neuromcp/raw/sessions}"
 PENDING_THRESHOLD="${NEUROMCP_PENDING_THRESHOLD:-1}"
 WINDOW_DAYS="${NEUROMCP_WINDOW_DAYS:-7}"
 PYTHON_BIN="${NEUROMCP_PYTHON:-python3}"
+LOCK_DIR="${NEUROMCP_LOCK_DIR:-$HOME/.neuromcp/consolidation.lock}"
 
 mkdir -p "$(dirname "$LOG")"
 printf '[%s] start\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"
+
+# One run at a time. Two overlapping runs (e.g. a long manual backlog run and
+# the scheduled one) processed the same sessions twice — duplicate wiki
+# sections and facts — and raced on the ledger. mkdir is atomic; a lock whose
+# owner is gone (crash, reboot) is taken over.
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    OTHER_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if [ -n "$OTHER_PID" ] && kill -0 "$OTHER_PID" 2>/dev/null; then
+        printf '[%s] another consolidation run is active (pid %s), skip\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$OTHER_PID" >>"$LOG"
+        exit 0
+    fi
+    printf '[%s] stale consolidation lock (pid %s), taking over\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "${OTHER_PID:-?}" >>"$LOG"
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        printf '[%s] lost lock race, skip\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG"
+        exit 0
+    fi
+fi
+printf '%s\n' "$$" >"$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT
 
 if [ ! -d "$SESSIONS_DIR" ]; then
     printf '[%s] no sessions dir (%s), skip\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$SESSIONS_DIR" >>"$LOG"

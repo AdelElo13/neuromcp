@@ -239,6 +239,46 @@ describe('0.14.1 regressions', () => {
     expect(headings).not.toContain('WillRemove');
   });
 
+  it('index-wiki keeps every section when a page repeats a heading, and is idempotent', () => {
+    // Consolidation appends dated sections; the same "## [date]" heading can
+    // occur several times on one page. Chunks were keyed on path+heading, so
+    // only the LAST section survived and every run replaced the others again
+    // (~270 churned chunks per run on the real wiki, each a new id).
+    const wikiFile = join(sb.wikiDir, 'projects', 'dupes.md');
+    writeFileSync(
+      wikiFile,
+      '---\ntitle: dupes\n---\n\n## [2026-04-28]\n\nFirst section with enough text to be indexed as a chunk.\n\n' +
+        '## [2026-04-28]\n\nSecond section, same heading, different content entirely here.\n',
+    );
+    expect(runNode(INDEX_BIN, [], env()).status).toBe(0);
+
+    const db = new Database(sb.dbPath, { readonly: true });
+    const rows = db.prepare(
+      `SELECT content FROM memories WHERE source='wiki' AND json_extract(metadata, '$.wiki_path') = 'projects/dupes.md'`,
+    ).all() as Array<{ content: string }>;
+    db.close();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.content).join('\n')).toMatch(/First section/);
+    expect(rows.map((r) => r.content).join('\n')).toMatch(/Second section/);
+
+    const second = runNode(INDEX_BIN, [], env());
+    expect(second.status).toBe(0);
+    expect(String(second.stdout) + String(second.stderr)).toMatch(/inserted 0 new chunks/);
+  });
+
+  it('index-wiki re-embeds unchanged chunks that were stored without a vector', () => {
+    // A chunk stored without a vector (transient Ollama failure) used to be
+    // skipped as "unchanged" forever, invisible to vector search. The indexer
+    // must treat it as work while an embedder is available, and must use the
+    // index-aware provider (the model the existing index was built with).
+    const src = readFileSync(INDEX_BIN, 'utf8');
+    expect(src).toMatch(/function needsWork\(r\)/);
+    expect(src).toMatch(/prev\.vectorless/);
+    expect(src).toMatch(/toInsert\.filter\(needsWork\)/);
+    expect(src).toMatch(/createIndexAwareProvider\(db, config, logger\)/);
+    expect(src).not.toMatch(/prev && prev\.hash === r\.hash\) \{ skipped\+\+/);
+  });
+
   it('auto-retrieve hook XML-escapes memory content (no <memory> smuggle)', () => {
     const db = new Database(sb.dbPath);
     sqliteVec.load(db);

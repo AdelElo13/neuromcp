@@ -1,6 +1,6 @@
 {
   "name": "neuromcp",
-  "version": "0.29.5",
+  "version": "0.30.0",
   "mcpName": "io.github.AdelElo13/neuromcp",
   "description": "Semantic memory for AI agents — local-first MCP server with hybrid search, governance, and consolidation",
   "repository": {
@@ -52,6 +52,7 @@
     "./storage/migrations": "./dist/storage/migrations.js",
     "./storage/schema": "./dist/storage/schema.js",
     "./embeddings/factory": "./dist/embeddings/factory.js",
+    "./embeddings/runtime": "./dist/embeddings/runtime.js",
     "./embeddings/types": "./dist/embeddings/types.js",
     "./governance/namespace": "./dist/governance/namespace.js",
     "./vectors/sqlite-vec": "./dist/vectors/sqlite-vec.js",

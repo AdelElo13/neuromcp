@@ -72,6 +72,25 @@ export function providerAcceptable(
 /** ONNX facts that are known WITHOUT touching disk or network. */
 const ONNX_STATIC = { name: 'bge-small-en-v1.5', dimensions: 384 } as const;
 
+const DEFAULT_OLLAMA_MODEL = 'nomic-embed-text';
+
+/**
+ * Which Ollama model to try. An explicit NEUROMCP_EMBEDDING_MODEL wins. On
+ * 'auto', follow the model the existing index was built with (requireModel)
+ * when that is an Ollama model — so after `neuromcp-reembed` to e.g. bge-m3
+ * every client on default settings uses bge-m3 instead of degrading because
+ * 'auto' was hard-wired to nomic-embed-text. ONNX and OpenAI model names are
+ * never passed to Ollama.
+ */
+export function resolveOllamaModel(configuredModel: string, options: SelectProviderOptions): string {
+  if (configuredModel !== 'auto') return configuredModel;
+  const stored = options.requireModel;
+  if (stored === undefined || stored === ONNX_STATIC.name || stored.startsWith('text-embedding')) {
+    return DEFAULT_OLLAMA_MODEL;
+  }
+  return stored;
+}
+
 /**
  * Rule the ONNX fallback out BEFORE probing it, when the requirements make
  * a match impossible. The probe is not free: with the model file absent it
@@ -114,7 +133,7 @@ export async function selectEmbeddingProvider(
 
   // 1. Try Ollama first (if auto or explicitly requested) — real semantic quality
   if (requested === 'auto' || requested === 'ollama') {
-    const model = config.embeddingModel === 'auto' ? 'nomic-embed-text' : config.embeddingModel;
+    const model = resolveOllamaModel(config.embeddingModel, options);
     const ollama = new OllamaEmbeddingProvider(config.ollamaHost, model, {
       timeoutMs: config.embedTimeoutMs,
     });
