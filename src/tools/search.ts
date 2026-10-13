@@ -45,6 +45,13 @@ export interface SearchInput {
    * is exactly what valid_at asks for).
    */
   readonly include_superseded?: boolean;
+  /**
+   * Relevance floor: drop candidates whose cosine similarity is below this
+   * and that have no strong FTS or graph hit. Defaults to config.minSimilarity,
+   * else 0 (off). The search_memory tool resolves the calibrated per-embedder
+   * default via resolveMinSimilarity.
+   */
+  readonly min_similarity?: number;
 }
 
 /** The 7 fields a consuming agent typically needs. Reduces payload ~10×. */
@@ -99,8 +106,167 @@ export interface SearchDeps {
 
 const RRF_K = 60;
 
-function sanitizeFtsQuery(query: string): string {
-  return '"' + query.replace(/"/g, '""') + '"';
+/**
+ * Weight of the raw cosine similarity added on top of the RRF terms. RRF
+ * alone keeps only the rank, so a 0.58 vs 0.43 similarity gap counted the
+ * same as 0.58 vs 0.57. 0.02 is the same order as one RRF term (1/61 ≈ 0.016),
+ * so a large similarity gap survives fusion while an FTS hit still matters.
+ */
+const COSINE_WEIGHT = 0.02;
+
+/**
+ * Calibrated relevance floor per embedder, used when neither the call nor
+ * NEUROMCP_MIN_SIMILARITY sets one. bge-m3, measured on 2402 real memories
+ * with 40 Dutch paraphrase queries + 15 off-topic queries: 0.45 keeps 98% of
+ * true targets and returns nothing for 73% of off-topic queries. Embedders
+ * without a measured value (incl. nomic-embed-text, whose off-topic matches
+ * score HIGHER than true ones on Dutch) get no default floor.
+ */
+const DEFAULT_MIN_SIMILARITY: Readonly<Record<string, number>> = {
+  'bge-m3': 0.45,
+};
+
+/** Calibrated floor for an embedder; an Ollama tag (":latest") is ignored. */
+export function defaultMinSimilarity(embedderName: string): number {
+  return DEFAULT_MIN_SIMILARITY[embedderName.split(':')[0] ?? embedderName] ?? 0;
+}
+
+/**
+ * The relevance floor the search_memory tool applies: explicit argument, else
+ * NEUROMCP_MIN_SIMILARITY, else the calibrated default for the active embedder.
+ */
+export function resolveMinSimilarity(
+  explicit: number | undefined,
+  config: Pick<NeuromcpConfig, 'minSimilarity'>,
+  embedderName: string,
+): number {
+  return explicit ?? config.minSimilarity ?? defaultMinSimilarity(embedderName);
+}
+
+/** Only the top result of a search counts as a "use" for access_count. */
+const ACCESS_BUMP_TOP_N = 1;
+
+const MAX_FTS_TOKENS = 32;
+
+/** Dutch + English function words of 3+ chars (shorter tokens are dropped anyway). */
+const FTS_STOPWORDS: ReadonlySet<string> = new Set([
+  // nl
+  'het', 'een', 'van', 'dat', 'die', 'voor', 'met', 'aan', 'niet', 'zijn', 'ook', 'als', 'dan', 'maar',
+  'bij', 'naar', 'uit', 'wat', 'wel', 'nog', 'hoe', 'waar', 'wie', 'deze', 'dit', 'heb', 'heeft', 'was',
+  'wordt', 'worden', 'kan', 'moet', 'zou', 'over', 'tot', 'onder', 'door', 'mijn', 'jij', 'hij', 'zij',
+  'wij', 'ons', 'hun', 'welke',
+  // en
+  'the', 'and', 'for', 'are', 'was', 'with', 'this', 'that', 'from', 'but', 'not', 'you', 'all', 'can',
+  'has', 'have', 'had', 'its', 'our', 'what', 'which', 'who', 'how', 'when', 'where', 'into', 'about',
+]);
+
+export type SearchStage =
+  | 'embedder'
+  | 'fts'
+  | 'graph'
+  | 'priming'
+  | 'attention'
+  | 'usefulness'
+  | 'importance'
+  | 'rerank';
+
+export interface SearchDiagnostics {
+  /** Scoring stages that failed and were skipped for this query. */
+  readonly degraded: readonly SearchStage[];
+  /** Candidates removed by the min_similarity relevance floor. */
+  readonly below_threshold_dropped: number;
+}
+
+export interface SearchDetailedResult {
+  readonly results: readonly (MemoryWithScore | MemoryWithExplanation)[];
+  readonly diagnostics: SearchDiagnostics;
+}
+
+/**
+ * Build an FTS5 MATCH expression: each word quoted (so FTS5 operators in user
+ * text are inert) and OR-ed. The previous version quoted the WHOLE query,
+ * which made every multi-word query an exact adjacent-phrase match — "groene
+ * plank" never matched "groene filamentrol op de plank". BM25 still ranks rows
+ * matching more terms higher. Returns null when the query has no word tokens.
+ */
+export function buildFtsQuery(query: string): string | null {
+  const tokens = ftsQueryTokens(query);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"`).join(' OR ');
+}
+
+/**
+ * Word tokens as FTS5's default unicode61 tokenizer sees them: NFC text,
+ * letters + numbers + combining marks (so Hangul, kana with dakuten and
+ * Indic/Thai vowel signs stay intact), "_" and punctuation as separators.
+ * These tokens go into the MATCH expression unchanged; FTS5 itself folds
+ * Latin diacritics, so "cafe" already matches "café".
+ */
+function wordTokens(text: string): string[] {
+  return text.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [];
+}
+
+/**
+ * Coverage-only folding: strip diacritics after Latin, Greek and Cyrillic
+ * letters (as unicode61 does) so "café" and "cafe" count as the same word.
+ * Marks in other scripts are part of the letter and are kept.
+ */
+function foldedWordTokens(text: string): string[] {
+  const folded = text
+    .normalize('NFD')
+    .replace(/([\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}])\p{M}+/gu, '$1')
+    .normalize('NFC');
+  return wordTokens(folded);
+}
+
+/** Latin-script tokens of one or two letters ("de", "op") carry no signal. */
+const SHORT_LATIN = /^\p{Script=Latin}{1,2}$/u;
+
+/**
+ * The words a query is matched on. With OR semantics a single stopword
+ * ("de", "the") would match most rows, so stopwords and one/two-letter Latin
+ * words are dropped; numbers ("18") and non-Latin words are always kept.
+ * Stopword-only queries fall back to all tokens.
+ */
+export function ftsQueryTokens(query: string): string[] {
+  const all = [...new Set(wordTokens(query))];
+  const content = all.filter((t) => !SHORT_LATIN.test(t) && !FTS_STOPWORDS.has(t));
+  return (content.length > 0 ? content : all).slice(0, MAX_FTS_TOKENS);
+}
+
+/**
+ * Share of the query's match words that occur in `text` (0..1). OR matching
+ * means one ordinary word ("beste", "trein") already makes a row a keyword
+ * hit; coverage turns that into a graded signal.
+ */
+export function keywordCoverage(queryTokens: readonly string[], text: string): number {
+  if (queryTokens.length === 0) return 0;
+  const words = new Set(foldedWordTokens(text));
+  const matched = queryTokens.filter((t) => words.has(foldedWordTokens(t)[0] ?? t)).length;
+  return matched / queryTokens.length;
+}
+
+/**
+ * A keyword hit counts as direct relevance (exempt from the relevance floor)
+ * only when it covers MORE than half of the query's match words: for
+ * "Node 18" a memory about "Node 20" (1 of 2) is not enough.
+ */
+const MIN_KEYWORD_COVERAGE = 0.5;
+
+/** FTS rows (by rank) for which keyword coverage is computed. */
+const MAX_COVERAGE_ROWS = 300;
+
+/**
+ * VectorStore.search returns cosine DISTANCE (sqlite-vec.ts converts L2 on
+ * unit vectors to L2²/2), so similarity = 1 - distance — the same convention
+ * as store.ts, contradiction.ts and surprise.ts.
+ */
+function cosineFromDistance(distance: number): number {
+  return Math.max(-1, Math.min(1, 1 - distance));
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -150,8 +316,26 @@ export async function searchMemory(
   input: SearchInput,
   deps: SearchDeps,
 ): Promise<readonly (MemoryWithScore | MemoryWithExplanation)[]> {
+  return (await searchMemoryDetailed(input, deps)).results;
+}
+
+/**
+ * searchMemory plus diagnostics: which scoring stages degraded and how many
+ * candidates the relevance floor dropped. Callers that surface results to an
+ * agent should use this so silent quality loss becomes visible.
+ */
+export async function searchMemoryDetailed(
+  input: SearchInput,
+  deps: SearchDeps,
+): Promise<SearchDetailedResult> {
   const { db, vecStore, embedder, logger, metrics, config } = deps;
   const start = Date.now();
+  const degraded = new Set<SearchStage>();
+  const markDegraded = (stage: SearchStage, message: string, err: unknown, extra: Record<string, unknown> = {}): void => {
+    degraded.add(stage);
+    metrics.increment(`search.degraded_${stage}`);
+    logger.warn('search', message, { ...extra, error: errorMessage(err) });
+  };
 
   const limit = input.limit ?? 10;
   const hybrid = input.hybrid !== false;
@@ -204,6 +388,7 @@ export async function searchMemory(
       query: input.query,
     });
     metrics.increment('search.degraded_fts_only');
+    degraded.add('embedder');
   }
 
   // Step 2: Vector search — push namespace into the vec query so we don't
@@ -212,15 +397,19 @@ export async function searchMemory(
   const vecResults = embedding !== null ? vecStore.search(embedding, vecCandidateK, scopedNamespace) : [];
 
   const vecRanks = new Map<string, number>();
+  const cosines = new Map<string, number>();
   vecResults.forEach((r, i) => {
     vecRanks.set(r.id, i + 1);
+    cosines.set(r.id, cosineFromDistance(r.distance));
   });
 
   // Step 3: FTS search (best-effort), namespace pushed down like the vec leg
   const ftsRanks = new Map<string, number>();
-  if (hybrid) {
+  const ftsCoverage = new Map<string, number>();
+  const queryTokens = ftsQueryTokens(input.query);
+  const ftsQuery = hybrid ? buildFtsQuery(input.query) : null;
+  if (ftsQuery !== null) {
     try {
-      const ftsQuery = sanitizeFtsQuery(input.query);
       const ftsRows = ftsCandidates(
         db,
         ftsQuery,
@@ -232,10 +421,24 @@ export async function searchMemory(
       ftsRows.forEach((row, i) => {
         ftsRanks.set(row.id, i + 1);
       });
-    } catch {
-      logger.warn('search', 'FTS5 query failed, falling back to vector-only', {
-        query: input.query,
-      });
+      // Coverage needs the indexed text (FTS indexes content, summary and
+      // tags). Fetched for the top rows only: with OR matching the candidate
+      // list can run into the thousands, and a hit ranked beyond this adds at
+      // most 1/(60+300) — rows past it get coverage 0.
+      const covered = ftsRows.slice(0, MAX_COVERAGE_ROWS).map((r) => r.id);
+      if (covered.length > 0) {
+        const texts = db
+          .prepare(
+            `SELECT id, content, COALESCE(summary, '') AS summary, COALESCE(tags, '') AS tags
+               FROM memories WHERE id IN (${covered.map(() => '?').join(',')})`,
+          )
+          .all(...covered) as Array<{ id: string; content: string; summary: string; tags: string }>;
+        for (const t of texts) {
+          ftsCoverage.set(t.id, keywordCoverage(queryTokens, `${t.content} ${t.summary} ${t.tags}`));
+        }
+      }
+    } catch (err: unknown) {
+      markDegraded('fts', 'FTS5 query failed, falling back to vector-only', err, { query: input.query });
     }
   }
 
@@ -249,8 +452,8 @@ export async function searchMemory(
         graphScores = findConnectedMemories(db, entityIds, 1);
         metrics.record('search.graph_boost_entities', queryEntities.length);
       }
-    } catch {
-      logger.warn('search', 'Graph boost failed, proceeding without');
+    } catch (err: unknown) {
+      markDegraded('graph', 'Graph boost failed, proceeding without', err);
     }
   }
 
@@ -261,26 +464,58 @@ export async function searchMemory(
     if (recentIds.length > 0) {
       primingScores = computePrimingBoosts(db, recentIds, config.primingBoost);
     }
-  } catch {
-    logger.warn('search', 'Priming boost failed, proceeding without');
+  } catch (err: unknown) {
+    markDegraded('priming', 'Priming boost failed, proceeding without', err);
   }
 
-  // Step 6: Merge with RRF scoring + graph boost + priming
+  // Step 6: Merge with RRF scoring + cosine magnitude + graph boost + priming.
+  // Relevance floor: with min_similarity > 0 a candidate needs either an FTS
+  // hit or cosine >= floor. Without a floor every query returns `limit` rows
+  // (the vec leg covers the whole store), relevant or not. The floor is not
+  // applied when the embedder is down — FTS is then the only signal.
+  // No per-embedder default here: library callers (recall_answer, prompts,
+  // HTTP) keep the 0.29 behaviour unless they pass a floor. The search_memory
+  // tool applies the calibrated default via resolveMinSimilarity, where the
+  // dropped count is reported back to the caller.
+  const minSimilarity = input.min_similarity ?? config.minSimilarity ?? 0;
+  const floorActive = minSimilarity > 0 && embedding !== null;
+  let belowThresholdDropped = 0;
   const allIds = new Set([...vecRanks.keys(), ...ftsRanks.keys(), ...graphScores.keys()]);
   const scored: Array<{ id: string; score: number }> = [];
 
   for (const id of allIds) {
     const vecRank = vecRanks.get(id);
     const ftsRank = ftsRanks.get(id);
+    const coverage = ftsCoverage.get(id) ?? 0;
+    const cosine = cosines.get(id);
     const graphScore = graphScores.get(id) ?? 0;
     const primingScore = primingScores.get(id) ?? 0;
+
+    // Direct relevance: a keyword hit covering at least half of the query's
+    // content words, or a graph hit (an entity named in the query). A hit on
+    // one ordinary word of a longer query is not enough — on real data that
+    // let most off-topic results through the floor.
+    const strongKeywordHit = ftsRank !== undefined && coverage > MIN_KEYWORD_COVERAGE;
+    const hasDirectSignal = strongKeywordHit || graphScore > 0;
+    if (floorActive && !hasDirectSignal && (cosine === undefined || cosine < minSimilarity)) {
+      belowThresholdDropped++;
+      continue;
+    }
 
     let score = 0;
     if (vecRank !== undefined) {
       score += 1 / (RRF_K + vecRank);
     }
+    if (cosine !== undefined) {
+      score += COSINE_WEIGHT * Math.max(0, cosine);
+    }
     if (ftsRank !== undefined) {
-      score += 1 / (RRF_K + ftsRank);
+      // Keyword bonus scaled by how much of the query the row covers. sqrt
+      // keeps a strong partial match (3 of 4 words ≈ 0.87) close to a full
+      // one while a 1-of-5 word hit drops to ≈ 0.45. Linear scaling scored
+      // marginally better on real Dutch data but cost 14 pts Recall@5 on the
+      // keyword-driven verbatim-recall eval; sqrt regresses neither.
+      score += Math.sqrt(coverage) / (RRF_K + ftsRank);
     }
     // Graph boost: add scaled graph connectivity score
     score += graphScore * 0.005;
@@ -305,8 +540,8 @@ export async function searchMemory(
     if (attentionScores.size > 0) {
       metrics.record('search.attention_boost_candidates', attentionScores.size);
     }
-  } catch {
-    logger.warn('search', 'Attention scoring failed, proceeding without');
+  } catch (err: unknown) {
+    markDegraded('attention', 'Attention scoring failed, proceeding without', err);
   }
 
   // Step 6.6: Usefulness prior (v0.16.0) with gated Thompson-sampling
@@ -337,8 +572,8 @@ export async function searchMemory(
       const factor = 1 - factorRange / 2 + u * factorRange;
       s.score *= factor;
     }
-  } catch {
-    logger.warn('search', 'Usefulness prior failed, proceeding without');
+  } catch (err: unknown) {
+    markDegraded('usefulness', 'Usefulness prior failed, proceeding without', err);
   }
 
   scored.sort((a, b) => b.score - a.score);
@@ -420,13 +655,27 @@ export async function searchMemory(
       continue;
     }
 
-    // Adaptive importance: boost score by access patterns + recency + centrality
-    const factors = computeAdaptiveImportance(db, memory.id, {
-      accessBoost: config.accessBoost,
-      recencyBoost: config.recencyBoost,
-      centralityBoost: config.centralityBoost,
-    });
-    const adaptiveMultiplier = 0.7 + 0.3 * factors.adjusted; // range [0.7, 1.0]
+    // Adaptive importance (access + recency + centrality) as a TIE-BREAKER:
+    // multiplier ∈ [1 - w, 1] with w = config.importanceWeight (0.1). The old
+    // fixed [0.7, 1.0] range outweighed relevance ~10×, so popular unrelated
+    // memories beat the actual best match. A failing lookup (e.g. centrality
+    // over a broken entities table) falls back to the stored importance
+    // instead of failing the whole search.
+    let adjustedImportance: number;
+    try {
+      adjustedImportance = computeAdaptiveImportance(db, memory.id, {
+        accessBoost: config.accessBoost,
+        recencyBoost: config.recencyBoost,
+        centralityBoost: config.centralityBoost,
+      }).adjusted;
+    } catch (err: unknown) {
+      if (!degraded.has('importance')) {
+        markDegraded('importance', 'Adaptive importance failed, using stored importance', err);
+      }
+      adjustedImportance = memEffective;
+    }
+    const importanceWeight = config.importanceWeight;
+    const adaptiveMultiplier = 1 - importanceWeight + importanceWeight * adjustedImportance;
     const finalScore = candidate.score * adaptiveMultiplier;
 
     results.push({ ...memory, similarity_score: finalScore });
@@ -459,9 +708,7 @@ export async function searchMemory(
       metrics.increment('search.reranked');
       metrics.record('search.rerank_ms', Date.now() - rerankStart);
     } catch (err: unknown) {
-      logger.warn('search', 'Reranker failed, falling back to RRF order', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      markDegraded('rerank', 'Reranker failed, falling back to RRF order', err);
       ranked = results;
     }
   }
@@ -474,18 +721,23 @@ export async function searchMemory(
   if (finalResults.length >= 2) {
     try {
       recordCoRetrieval(db, finalResults.map((r) => r.id));
-    } catch {
-      logger.warn('search', 'Co-retrieval recording failed');
+    } catch (err: unknown) {
+      logger.warn('search', 'Co-retrieval recording failed', { error: errorMessage(err) });
     }
   }
 
-  // Step 11: Bump access counts in a transaction
-  if (finalResults.length > 0) {
+  // Step 11: Bump access counts — only the top result counts as a use.
+  // Bumping every returned row fed a rich-get-richer loop: rows returned for
+  // every query (because importance dominated) gained access_count, which
+  // raised their adaptive importance, which kept them on top. recall_memory
+  // (fetch by id) still counts as a use.
+  const used = finalResults.slice(0, ACCESS_BUMP_TOP_N);
+  if (used.length > 0) {
     const bumpStmt = db.prepare(
       "UPDATE memories SET access_count = access_count + 1, last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
     );
     const bumpAll = db.transaction(() => {
-      for (const r of finalResults) {
+      for (const r of used) {
         bumpStmt.run(r.id);
       }
     });
@@ -510,10 +762,15 @@ export async function searchMemory(
     primingBoost: primingScores.size > 0,
     explain,
     namespace,
+    degraded: [...degraded],
+    belowThresholdDropped,
   });
   metrics.increment('search.queries');
   metrics.record('search.results', finalResults.length);
   metrics.record('search.duration_ms', Date.now() - start);
 
-  return enrichedResults;
+  return {
+    results: enrichedResults,
+    diagnostics: { degraded: [...degraded], below_threshold_dropped: belowThresholdDropped },
+  };
 }

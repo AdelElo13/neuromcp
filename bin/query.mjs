@@ -81,17 +81,18 @@ if (!existsSync(DB_PATH)) fail({ reason: 'db not found', _exit: 2 });
 // ─── embedding: reuse neuromcp's provider factory ──────────────────────
 // Imported lazily so the bin still prints a sensible error if dist/ is missing.
 async function embed(query) {
-  const distPath = join(__dirname, '..', 'dist', 'embeddings', 'factory.js');
+  const distPath = join(__dirname, '..', 'dist', 'embeddings', 'runtime.js');
   if (!existsSync(distPath)) return null;
   try {
-    const [{ createEmbeddingProvider }, { loadConfig }, { createLogger }] = await Promise.all([
+    const [{ createIndexAwareProvider }, { loadConfig }, { createLogger }] = await Promise.all([
       import(distPath),
       import(join(__dirname, '..', 'dist', 'config.js')),
       import(join(__dirname, '..', 'dist', 'observability', 'logger.js')),
     ]);
     const config = loadConfig();
     const logger = createLogger(config);
-    const provider = await createEmbeddingProvider(config, logger);
+    // Index-aware: the query must be embedded with the model the index uses.
+    const provider = await createIndexAwareProvider(db, config, logger);
     const vec = await provider.embed(query);
     return { vector: vec, dims: provider.dimensions };
   } catch (err) {

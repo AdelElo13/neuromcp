@@ -41,6 +41,23 @@ MEMORY_DB = NEUROMCP_DIR / "memory.db"
 AUDIT_MODEL = "haiku"           # fast + cheap for audit + fact passes
 AUDIT_TIMEOUT_SEC = 120
 FACT_TIMEOUT_SEC = 120
+# Every `claude -p` call is a pure text completion over the prompt we build.
+# Without isolation the CLI ran the user's hooks (UserPromptSubmit injected
+# <working-context>/<neuromcp-recall>, e.g. an unrelated "active goal"), loaded
+# CLAUDE.md files, skills and every MCP server. The summarizer repeated that
+# context and the auditor rejected the batch as unsupported by the sessions.
+# USER settings stay loaded on purpose: they can carry auth and endpoint
+# configuration (apiKeyHelper, env such as ANTHROPIC_BASE_URL / Bedrock /
+# Vertex). Project and local settings are dropped; hooks are disabled by the
+# flag-level setting, which takes precedence. (--bare would also isolate, but
+# it never reads OAuth/keychain credentials.)
+CLAUDE_ISOLATION_ARGS = [
+    "--setting-sources", "user",
+    "--settings", json.dumps({"disableAllHooks": True}),
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+]
+CLAUDE_ISOLATED_ENV = {**os.environ, "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}
 CONTRADICTION_CHECK = os.environ.get("NEUROMCP_CONTRADICTION_CHECK", "1") != "0"
 # Default fail-CLOSED: if the auditor cannot run (CLI missing, timeout,
 # non-JSON output), we reject the summary rather than ship un-audited content.
@@ -206,9 +223,10 @@ Rules:
 """
     try:
         r = subprocess.run(
-            ["claude", "-p", "--no-session-persistence",
+            ["claude", "-p", "--no-session-persistence", *CLAUDE_ISOLATION_ARGS,
              "--model", AUDIT_MODEL, prompt],
             stdin=subprocess.DEVNULL,
+            env=CLAUDE_ISOLATED_ENV,
             capture_output=True,
             text=True,
             timeout=AUDIT_TIMEOUT_SEC,
@@ -219,7 +237,7 @@ Rules:
         return _infra_fail(f"timeout after {AUDIT_TIMEOUT_SEC}s")
 
     if r.returncode != 0 or not r.stdout.strip():
-        return _infra_fail("empty response from auditor")
+        return _infra_fail(f"empty response from auditor (exit={r.returncode}: {_cli_diag(r)})")
 
     match = re.search(r"\{.*\}", r.stdout, re.S)
     if not match:
@@ -268,6 +286,14 @@ def queue_for_review(
 
 # ─── Tier 2 C+D+F: atomic fact extraction + temporal supersession ───────
 
+def _cli_diag(r: subprocess.CompletedProcess) -> str:
+    """One-line reason for a failed `claude -p` call. stderr first, else the
+    stdout tail (the CLI prints "Not logged in" to stdout). Without this the
+    log only said "no output" for 10 weeks while auth was broken."""
+    text = (r.stderr or "").strip() or (r.stdout or "").strip() or "(no stderr/stdout)"
+    return " ".join(text.split())[-200:]
+
+
 def _run_claude(prompt: str, timeout: int) -> str | None:
     # NOTE: --tools "" removed — Claude CLI >= 2.x rejects any --tools value
     # because a registered MCP tool has a top-level oneOf/allOf/anyOf schema
@@ -278,14 +304,19 @@ def _run_claude(prompt: str, timeout: int) -> str | None:
     # launchd or other non-TTY contexts.
     try:
         r = subprocess.run(
-            ["claude", "-p", "--no-session-persistence",
+            ["claude", "-p", "--no-session-persistence", *CLAUDE_ISOLATION_ARGS,
              "--model", AUDIT_MODEL, prompt],
             stdin=subprocess.DEVNULL,
+            env=CLAUDE_ISOLATED_ENV,
             capture_output=True, text=True, timeout=timeout,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"    WARN: claude call failed: {type(exc).__name__}")
         return None
-    return r.stdout if r.returncode == 0 else None
+    if r.returncode != 0:
+        print(f"    WARN: claude call exit={r.returncode}: {_cli_diag(r)}")
+        return None
+    return r.stdout
 
 
 def extract_facts(summary: str, batch: list[Path], project: str) -> list[dict]:
@@ -641,9 +672,10 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
         attempt_tag = f"attempt {attempt + 1}/{MAX_AUDIT_ATTEMPTS + 1}"
         try:
             r = subprocess.run(
-                ["claude", "-p", "--no-session-persistence",
+                ["claude", "-p", "--no-session-persistence", *CLAUDE_ISOLATION_ARGS,
                  "--model", gen_model, prompt],
                 stdin=subprocess.DEVNULL,
+                env=CLAUDE_ISOLATED_ENV,
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -657,8 +689,9 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
             sys.exit(1)
 
         if r.returncode != 0 or not r.stdout.strip():
-            print(f"  WARN: no output for {project} batch {batch_idx}/{batch_total} ({attempt_tag})")
-            last_reason = f"summary call empty/exit={r.returncode} ({attempt_tag})"
+            diag = _cli_diag(r)
+            print(f"  WARN: no output for {project} batch {batch_idx}/{batch_total} ({attempt_tag}): {diag}")
+            last_reason = f"summary call empty/exit={r.returncode}: {diag} ({attempt_tag})"
             continue
 
         extracted = extract_markdown(r.stdout)

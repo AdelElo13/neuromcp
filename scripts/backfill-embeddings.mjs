@@ -66,19 +66,29 @@ if (!existsSync(DB_PATH)) fail(`db not found: ${DB_PATH}`);
 const distRoot = join(__dirname, '..', 'dist');
 if (!existsSync(distRoot)) fail('neuromcp dist/ not found — are you running from the package?');
 
-const [{ createEmbeddingProvider }, { loadConfig }, { createLogger }] = await Promise.all([
+const [{ createEmbeddingProvider }, { createIndexAwareProvider }, { loadConfig }, { createLogger }] = await Promise.all([
   import(join(distRoot, 'embeddings', 'factory.js')),
+  import(join(distRoot, 'embeddings', 'runtime.js')),
   import(join(distRoot, 'config.js')),
   import(join(distRoot, 'observability', 'logger.js')),
 ]);
 
 const config = loadConfig();
 const logger = createLogger(config);
-const embedder = await createEmbeddingProvider(config, logger);
-ok(`embedder: ${embedder.name} (dim=${embedder.dimensions})`);
-
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+// --rebuild-vec deliberately switches providers (it recreates the index), so
+// it takes the configured provider. A normal backfill fills gaps in the
+// EXISTING index and must use the model that index was built with.
+let embedder;
+try {
+  embedder = REBUILD_VEC
+    ? await createEmbeddingProvider(config, logger)
+    : await createIndexAwareProvider(db, config, logger);
+} catch (err) {
+  fail(`embedder: ${err?.message || err}`);
+}
+ok(`embedder: ${embedder.name} (dim=${embedder.dimensions})`);
 try { sqliteVec.load(db); } catch (err) { fail(`sqlite-vec load failed: ${err.message}`); }
 
 // Typed WHERE — no user SQL interpolated. Category is already whitelist-

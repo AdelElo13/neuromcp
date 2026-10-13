@@ -128,14 +128,16 @@ async function loadEmbedder() {
     return null;
   }
   try {
-    const [{ createEmbeddingProvider }, { loadConfig }, { createLogger }] = await Promise.all([
-      import(join(distRoot, 'embeddings', 'factory.js')),
+    const [{ createIndexAwareProvider }, { loadConfig }, { createLogger }] = await Promise.all([
+      import(join(distRoot, 'embeddings', 'runtime.js')),
       import(join(distRoot, 'config.js')),
       import(join(distRoot, 'observability', 'logger.js')),
     ]);
     const config = loadConfig();
     const logger = createLogger(config);
-    return await createEmbeddingProvider(config, logger);
+    // Index-aware: wiki chunks live in the same memories_vec index, so they
+    // must use the model that index was built with (e.g. bge-m3).
+    return await createIndexAwareProvider(db, config, logger);
   } catch (err) {
     warn(`embedder init failed: ${err?.message || err}`);
     return null;
@@ -161,6 +163,18 @@ function chunkKey(wikiPath, heading) {
   return `wiki::${wikiPath}::${heading}`;
 }
 
+/**
+ * Key for the 2nd, 3rd, … section with the same heading on a page. It is
+ * derived from the section CONTENT, not its position, so inserting another
+ * repeated section does not re-key (and re-id) the others; the distinct
+ * prefix and JSON encoding make it impossible to collide with chunkKey() of
+ * a literal heading such as "Topic::#2". `nth` separates byte-identical
+ * repeats.
+ */
+function repeatKey(wikiPath, heading, hash, nth) {
+  return `wiki-repeat::${JSON.stringify([wikiPath, heading, hash, nth])}`;
+}
+
 if (REBUILD && !DRY_RUN) {
   const before = db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE source = 'wiki'`).get().n;
   // Vec rows live in an independent vec0 virtual table — must clean them
@@ -178,16 +192,49 @@ info(`found ${files.length} wiki files`);
 
 // We key on chunk identity (wiki_path + heading). Content_hash is a
 // separate dedup — same identity + same content = no-op re-insert.
-const existingByKey = new Map();  // chunkKey → { id, rowid, content_hash }
+const existingByKey = new Map();  // chunkKey → { id, rowid, hash, vectorless }
 for (const row of db.prepare(
-  `SELECT id, rowid, content_hash, metadata FROM memories
+  `SELECT id, rowid, content_hash, metadata, embedding_model FROM memories
    WHERE source = 'wiki' AND is_deleted = 0`,
 ).all()) {
   try {
     const meta = JSON.parse(row.metadata || '{}');
-    const key = chunkKey(meta.wiki_path, meta.heading);
-    existingByKey.set(key, { id: row.id, rowid: row.rowid, hash: row.content_hash });
+    // repeat_key: repeated-heading sections (0.30.0). `occurrence`: the
+    // position-based key of a 0.30.0 pre-release — given a key nothing on
+    // disk produces, so those rows are pruned and re-inserted once.
+    const key = meta.repeat_key
+      ?? (meta.occurrence > 1
+        ? `wiki-legacy-occurrence::${JSON.stringify([meta.wiki_path, meta.heading, meta.occurrence])}`
+        : chunkKey(meta.wiki_path, meta.heading));
+    const vectorless = !row.embedding_model || row.embedding_model === 'none';
+    existingByKey.set(key, { id: row.id, rowid: row.rowid, hash: row.content_hash, vectorless });
   } catch { /* ignore malformed rows */ }
+}
+
+/**
+ * A chunk needs work when it is new, its content changed, or it was stored
+ * WITHOUT a vector earlier (e.g. a transient Ollama failure) and an embedder
+ * is available now. Without the last clause such a chunk was skipped as
+ * "unchanged" forever and stayed invisible to vector search.
+ */
+function needsWork(r) {
+  const prev = existingByKey.get(r.key);
+  if (!prev || prev.hash !== r.hash) return true;
+  return Boolean(embedder && vecEnabled && prev.vectorless);
+}
+
+/** Unchanged content, only the vector is missing → repair in place. */
+function onlyVectorMissing(r) {
+  const prev = existingByKey.get(r.key);
+  return Boolean(prev && prev.hash === r.hash && prev.vectorless);
+}
+
+const EMBED_BREAKER_THRESHOLD = 3;
+
+/** True for errors that mean the embedder is unreachable, not that one chunk was bad. */
+function isEmbedderOutage(err) {
+  const text = `${err?.name ?? ''} ${err?.code ?? ''} ${err?.message ?? err ?? ''}`;
+  return /ECONNREFUSED|ECONNRESET|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|EPIPE|fetch failed|socket hang up|timed? ?out|timeout|AbortError|EMBEDDINGS_UNAVAILABLE|unavailable/i.test(text);
 }
 
 const insertMem = db.prepare(`
@@ -215,13 +262,43 @@ const getRowid = db.prepare(`SELECT rowid FROM memories WHERE id = ?`);
 async function embedAll(rows) {
   if (!embedder) return rows.map(r => ({ ...r, vector: null, dim: 0, model: '' }));
   const out = [];
+  let consecutiveFailures = 0;
+  let breakerTripped = false;
   for (const r of rows) {
-    try {
-      const vec = await embedder.embed(r.content);
-      out.push({ ...r, vector: vec, dim: vec.length, model: embedder.name });
-    } catch (err) {
-      warn(`embed failed for ${r.project || 'home'}: ${err?.message || err}`);
+    // Circuit breaker: after a few chunks in a row fail, the embedder is
+    // down — stop paying two timeouts per remaining chunk. They are stored
+    // without a vector and picked up again by the next run (needsWork).
+    if (breakerTripped) {
       out.push({ ...r, vector: null, dim: 0, model: '' });
+      continue;
+    }
+    // One retry: the first calls after a model switch or Ollama restart can
+    // time out while the model loads.
+    let vec = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2 && vec === null; attempt++) {
+      try {
+        vec = await embedder.embed(r.content);
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 1 && isEmbedderOutage(err)) await new Promise((res) => setTimeout(res, 2000));
+        else break; // a per-chunk failure will not succeed on retry
+      }
+    }
+    if (vec !== null) {
+      consecutiveFailures = 0;
+      out.push({ ...r, vector: vec, dim: vec.length, model: embedder.name });
+    } else {
+      // Only an outage (connection refused, timeout, embedder unavailable)
+      // counts toward the breaker. A chunk the model rejects is a per-chunk
+      // failure: tripping on it would starve every later chunk, run after run.
+      consecutiveFailures = isEmbedderOutage(lastErr) ? consecutiveFailures + 1 : 0;
+      warn(`embed failed for ${r.project || 'home'} (will retry next run): ${lastErr?.message || lastErr}`);
+      out.push({ ...r, vector: null, dim: 0, model: '' });
+      if (consecutiveFailures >= EMBED_BREAKER_THRESHOLD) {
+        breakerTripped = true;
+        warn(`${consecutiveFailures} embeds failed in a row — embedder looks down; remaining chunks this run are stored without vectors`);
+      }
     }
   }
   return out;
@@ -233,15 +310,34 @@ function pruneRowInTxn(id, rowid) {
   deleteMemById.run(id);
 }
 
+const setEmbeddingMeta = db.prepare(
+  `UPDATE memories SET embedding_model = ?, embedding_dim = ? WHERE id = ?`,
+);
+
 const txn = db.transaction(({ rows, stale }) => {
-  let added = 0, skipped = 0, removed = 0, replaced = 0;
+  let added = 0, skipped = 0, removed = 0, replaced = 0, revectorised = 0;
   for (const prev of stale) {
     pruneRowInTxn(prev.id, prev.rowid);
     removed++;
   }
   for (const r of rows) {
     const prev = existingByKey.get(r.key);
-    if (prev && prev.hash === r.hash) { skipped++; continue; }
+    if (r.unchanged) { skipped++; continue; }
+    // Content unchanged, only the vector was missing: attach it to the
+    // EXISTING row so its id, access history and graph edges survive.
+    if (onlyVectorMissing(r)) {
+      if (vecEnabled && r.vector) {
+        const buf = Buffer.from(Float32Array.from(r.vector).buffer);
+        deleteVec.run(prev.id);
+        insertVec.run(prev.id, buf);
+        setEmbeddingMeta.run(r.model, r.dim, prev.id);
+        existingByKey.set(r.key, { ...prev, vectorless: false });
+        revectorised++;
+      } else {
+        skipped++;
+      }
+      continue;
+    }
     if (prev) {
       pruneRowInTxn(prev.id, prev.rowid);
       replaced++;
@@ -257,7 +353,7 @@ const txn = db.transaction(({ rows, stale }) => {
     existingByKey.set(r.key, { id: r.id, rowid, hash: r.hash });
     added++;
   }
-  return { added, skipped, removed, replaced };
+  return { added, skipped, removed, replaced, revectorised };
 });
 
 let totalChunks = 0;
@@ -271,17 +367,34 @@ for (const file of files) {
   const projectId = relPath.startsWith('projects/') ? relPath.replace(/^projects\//, '').replace(/\.md$/, '') : null;
   const chunks = chunkBySections(body, pageTitle);
   totalChunks += chunks.length;
+  // Consolidation appends dated sections, so one page can repeat a heading.
+  // The n-th repeat gets its own key; the first keeps the plain key so
+  // existing unique chunks keep their identity.
+  const seenHeadings = new Set();
+  const seenRepeats = new Map();
   for (const { heading, body: chunkBody } of chunks) {
     const content = makeContent(pageTitle, heading, chunkBody);
-    const key = chunkKey(relPath, heading);
+    const hash = contentHash(content);
+    const meta = { wiki_path: relPath, heading, page_title: pageTitle };
+    let key;
+    if (!seenHeadings.has(heading)) {
+      seenHeadings.add(heading);
+      key = chunkKey(relPath, heading);
+    } else {
+      const repeatId = JSON.stringify([heading, hash]);
+      const nth = (seenRepeats.get(repeatId) ?? 0) + 1;
+      seenRepeats.set(repeatId, nth);
+      key = repeatKey(relPath, heading, hash, nth);
+      meta.repeat_key = key;
+    }
     currentKeys.add(key);
     toInsert.push({
       id: generateId(),
       key,
-      hash: contentHash(content),
+      hash,
       content,
       project: projectId,
-      metadata: JSON.stringify({ wiki_path: relPath, heading, page_title: pageTitle }),
+      metadata: JSON.stringify(meta),
     });
   }
 }
@@ -295,31 +408,22 @@ for (const [key, prev] of existingByKey) {
 info(`${totalChunks} chunks across ${files.length} files`);
 
 if (DRY_RUN) {
-  const fresh = toInsert.filter(r => {
-    const prev = existingByKey.get(r.key);
-    return !prev || prev.hash !== r.hash;
-  });
+  const fresh = toInsert.filter(needsWork);
   info(`[DRY RUN] ${fresh.length} to insert/replace, ${stale.length} to prune, ${toInsert.length - fresh.length} unchanged`);
   process.exit(0);
 }
 
-// Only embed rows that will actually be inserted or changed — dedup by key+hash.
-const fresh = toInsert.filter(r => {
-  const prev = existingByKey.get(r.key);
-  return !prev || prev.hash !== r.hash;
-});
+// Only embed rows that will actually be inserted, changed or are missing a vector.
+const fresh = toInsert.filter(needsWork);
 const withVectors = await embedAll(fresh);
-const unchanged = toInsert.filter(r => {
-  const prev = existingByKey.get(r.key);
-  return prev && prev.hash === r.hash;
-});
-const { added, skipped, removed, replaced } = txn({
+const unchanged = toInsert.filter(r => !needsWork(r)).map(r => ({ ...r, unchanged: true }));
+const { added, skipped, removed, replaced, revectorised } = txn({
   rows: [...withVectors, ...unchanged],
   stale,
 });
 const vectorised = withVectors.filter(r => r.vector).length;
 ok(
   `inserted ${added} new chunks (${replaced} replaced, ${vectorised} with embeddings), ` +
-  `pruned ${removed} stale, skipped ${skipped} unchanged`,
+  `pruned ${removed} stale, repaired ${revectorised} missing vectors in place, skipped ${skipped} unchanged`,
 );
 db.close();

@@ -176,15 +176,79 @@ function memoryCitedInText(memoryContent, responseText) {
   return false;
 }
 
+// ─── Transcript streaming ──────────────────────────────────────────
+// Reads a JSONL file line by line in fixed-size chunks. fs.readFileSync on
+// the whole transcript throws once it passes V8's ~512 MB string limit
+// (long sessions with screenshots reach 700 MB+), which silently disabled
+// this hook for exactly the longest sessions. Lines are decoded only after
+// they are complete, so multi-byte UTF-8 characters split across chunks
+// stay intact. NEUROMCP_TRANSCRIPT_CHUNK_BYTES exists for tests.
+const TRANSCRIPT_CHUNK_BYTES = Number(process.env.NEUROMCP_TRANSCRIPT_CHUNK_BYTES) > 0
+  ? Number(process.env.NEUROMCP_TRANSCRIPT_CHUNK_BYTES)
+  : 4 * 1024 * 1024;
+const TRANSCRIPT_MAX_LINE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Calls onLine(string) for every non-empty line; onLine may return false to
+ * stop early. Returns the number of oversized lines skipped.
+ */
+function forEachJsonlLine(filePath, onLine) {
+  const fd = fs.openSync(filePath, 'r');
+  let skipped = 0;
+  try {
+    const buf = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
+    let pieces = [];
+    let pending = 0;
+    let oversized = false;
+    let stopped = false;
+    const flush = () => {
+      if (oversized) skipped++;
+      else if (pending > 0) {
+        const line = Buffer.concat(pieces, pending).toString('utf8');
+        if (line.trim() && onLine(line) === false) stopped = true;
+      }
+      pieces = [];
+      pending = 0;
+      oversized = false;
+    };
+    const add = (piece) => {
+      if (oversized || piece.length === 0) return;
+      if (pending + piece.length > TRANSCRIPT_MAX_LINE_BYTES) {
+        oversized = true;
+        pieces = [];
+        pending = 0;
+        return;
+      }
+      pieces.push(Buffer.from(piece));
+      pending += piece.length;
+    };
+    let n;
+    while (!stopped && (n = fs.readSync(fd, buf, 0, TRANSCRIPT_CHUNK_BYTES, null)) > 0) {
+      const chunk = buf.subarray(0, n);
+      let start = 0;
+      let nl;
+      while (!stopped && (nl = chunk.indexOf(0x0a, start)) !== -1) {
+        add(chunk.subarray(start, nl));
+        flush();
+        start = nl + 1;
+      }
+      if (!stopped) add(chunk.subarray(start));
+    }
+    if (!stopped) flush();
+  } finally {
+    fs.closeSync(fd);
+  }
+  return skipped;
+}
+
 // ─── Transcript helpers ────────────────────────────────────────────
 
-function extractAssistantTurns(transcriptRaw) {
+function extractAssistantTurns(transcriptPath) {
   const turns = [];
-  for (const line of transcriptRaw.split('\n')) {
-    if (!line.trim()) continue;
+  forEachJsonlLine(transcriptPath, (line) => {
     try {
       const entry = JSON.parse(line);
-      if (entry.type !== 'assistant' && entry.message?.role !== 'assistant') continue;
+      if (entry.type !== 'assistant' && entry.message?.role !== 'assistant') return;
       const msg = entry.message || entry;
       const content = msg.content;
       let text = '';
@@ -197,7 +261,7 @@ function extractAssistantTurns(transcriptRaw) {
       const ts = entry.timestamp || entry.created_at || msg.created_at || '';
       if (text) turns.push({ timestamp: ts, text });
     } catch {}
-  }
+  });
   return turns;
 }
 
@@ -206,9 +270,6 @@ function turnsAfter(turns, sinceIso) {
   return turns.filter((t) => !t.timestamp || t.timestamp >= sinceIso);
 }
 
-function readTranscript(path) {
-  try { return fs.readFileSync(path, 'utf8'); } catch { return null; }
-}
 
 // ─── Main ──────────────────────────────────────────────────────────
 
@@ -230,9 +291,8 @@ async function main() {
   const isStop = hookEvent === 'Stop' || hookEvent === 'SessionEnd' || (!hookEvent && transcriptPath);
   if (!isStop || !transcriptPath || !fs.existsSync(transcriptPath)) return;
 
-  const transcriptRaw = readTranscript(transcriptPath);
-  if (!transcriptRaw) return;
-  const turns = extractAssistantTurns(transcriptRaw);
+  let turns;
+  try { turns = extractAssistantTurns(transcriptPath); } catch { return; }
   if (turns.length === 0) return;
 
   const sessionId = crypto.createHash('sha256').update(transcriptPath).digest('hex').slice(0, 16);

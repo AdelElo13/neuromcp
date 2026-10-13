@@ -63,6 +63,7 @@ Search memories using hybrid vector + full-text search with RRF ranking, graph b
 | `episode_id` | string | no | Filter by episode ID — only return memories from this episode |
 | `explain` | boolean | no | Include explanation metadata: trust reason, contradictions, temporal validity, claims, confidence breakdown (default: true) |
 | `compact` | boolean | no | Return a reduced 7-field projection per result (id, content, similarity_score, category, tags, importance, created_at) instead of all 37 DB fields. Default FALSE in 0.19 for semver-safe upgrade; will default TRUE in 1.0. Pass `compact: true` to opt in now. |
+| `min_similarity` | number | no | Relevance floor: drop results whose cosine similarity is below this and that have no keyword (FTS) or knowledge-graph hit, so an irrelevant query returns fewer than `limit` results. Embedder-specific; ~0.35–0.45 for nomic-embed-text. Default: NEUROMCP_MIN_SIMILARITY, else a calibrated per-embedder default (bge-m3: 0.45), else off. Pass 0 to disable. |
 
 ### `recall_answer`
 

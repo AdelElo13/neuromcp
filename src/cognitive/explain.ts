@@ -174,8 +174,13 @@ function findClaims(
   memoryId: string,
 ): MemoryExplanation['claims'] {
   try {
+    // Rows with no subject, predicate AND object carry no information but
+    // inflated the payload and claim_count (which feeds confidence.overall).
     const rows = db.prepare(
-      'SELECT subject, predicate, object, confidence FROM claims WHERE memory_id = ? LIMIT 10',
+      `SELECT subject, predicate, object, confidence FROM claims
+       WHERE memory_id = ?
+         AND NOT (subject IS NULL AND predicate IS NULL AND object IS NULL)
+       LIMIT 10`,
     ).all(memoryId) as Array<{ subject: string; predicate: string; object: string; confidence: number }>;
 
     return rows;

@@ -5,7 +5,7 @@ import { textResult, withDegradedNotice } from './types.js';
 import { storeMemory } from '../tools/store.js';
 import { ensureAmbientEpisode } from '../tools/episode.js';
 import { activeEpisodeForNamespace } from '../episode/active-state.js';
-import { searchMemory, toCompact } from '../tools/search.js';
+import { searchMemory, searchMemoryDetailed, resolveMinSimilarity, toCompact, type SearchDiagnostics } from '../tools/search.js';
 import { recallAnswer } from '../tools/recall-answer.js';
 import { searchVerbatim } from '../tools/verbatim.js';
 import { recallMemory } from '../tools/recall.js';
@@ -79,9 +79,18 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
       episode_id: z.string().optional().describe('Filter by episode ID — only return memories from this episode'),
       explain: z.boolean().optional().describe('Include explanation metadata: trust reason, contradictions, temporal validity, claims, confidence breakdown (default: true)'),
       compact: z.boolean().optional().describe('Return a reduced 7-field projection per result (id, content, similarity_score, category, tags, importance, created_at) instead of all 37 DB fields. Default FALSE in 0.19 for semver-safe upgrade; will default TRUE in 1.0. Pass `compact: true` to opt in now.'),
+      min_similarity: z.number().min(0).max(1).optional().describe('Relevance floor: drop results whose cosine similarity is below this and that have no keyword (FTS) or knowledge-graph hit, so an irrelevant query returns fewer than `limit` results. Embedder-specific; ~0.35–0.45 for nomic-embed-text. Default: NEUROMCP_MIN_SIMILARITY, else a calibrated per-embedder default (bge-m3: 0.45), else off. Pass 0 to disable.'),
     },
   }, async (args) => {
-    const results = await searchMemory(args, { db, vecStore, embedder, logger, metrics, config, reranker });
+    const { results, diagnostics } = await searchMemoryDetailed(
+      { ...args, min_similarity: resolveMinSimilarity(args.min_similarity, config, embedder.name) },
+      { db, vecStore, embedder, logger, metrics, config, reranker },
+    );
+    // Only surfaced when something happened, so the common payload is unchanged.
+    const diagnosticFields = (d: SearchDiagnostics): Record<string, unknown> => ({
+      ...(d.degraded.length > 0 ? { degraded: d.degraded } : {}),
+      ...(d.below_threshold_dropped > 0 ? { below_threshold_dropped: d.below_threshold_dropped } : {}),
+    });
     // sprint4 Codex Q2 fix: compact defaults to FALSE in 0.19 to honour
     // semver for existing users on ^0.18 ranges. Opt-in via compact:true.
     // 1.0 will flip the default to true (documented in CHANGELOG).
@@ -97,10 +106,10 @@ export function registerCoreTools(server: McpServer, deps: ServerDeps): void {
         },
         { db, logger }
       );
-      return textResult(withDegradedNotice(embedder, { results: projected, retrieval_event_id: event_id }));
+      return textResult(withDegradedNotice(embedder, { results: projected, retrieval_event_id: event_id, ...diagnosticFields(diagnostics) }));
     } catch (err) {
       logger.warn('search', 'auto-log retrieval failed', { error: err instanceof Error ? err.message : String(err) });
-      return textResult(withDegradedNotice(embedder, { results: projected }));
+      return textResult(withDegradedNotice(embedder, { results: projected, ...diagnosticFields(diagnostics) }));
     }
   });
 

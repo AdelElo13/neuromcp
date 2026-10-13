@@ -34,6 +34,14 @@ export interface NeuromcpConfig {
   readonly accessBoost: number;
   readonly recencyBoost: number;
   readonly centralityBoost: number;
+  // Search ranking: share of the final score that adaptive importance may
+  // move (multiplier = 1 - w + w * adjusted). 0.1 keeps importance a
+  // tie-breaker; the old fixed 0.3 let it outweigh relevance ~10×.
+  readonly importanceWeight: number;
+  // Search relevance floor: candidates with cosine below this AND no FTS/graph hit
+  // are dropped. 0 = off. null (NEUROMCP_MIN_SIMILARITY unset) = the calibrated
+  // default for the active embedder, see DEFAULT_MIN_SIMILARITY in search.ts.
+  readonly minSimilarity: number | null;
   // Attention-based retrieval (AttnRes-inspired)
   readonly attentionWeight: number;
   readonly blockAttentionWeight: number;
@@ -60,6 +68,14 @@ export interface NeuromcpConfig {
 
 function env(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
+}
+
+/** A number, or null when the variable is unset, empty or not numeric. */
+function envOptionalNum(key: string): number | null {
+  const raw = process.env[key]?.trim();
+  if (raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
 }
 
 function envNum(key: string, fallback: number): number {
@@ -106,6 +122,8 @@ export function loadConfig(): NeuromcpConfig {
     accessBoost: envNum('NEUROMCP_ACCESS_BOOST', 0.05),
     recencyBoost: envNum('NEUROMCP_RECENCY_BOOST', 0.1),
     centralityBoost: envNum('NEUROMCP_CENTRALITY_BOOST', 0.15),
+    importanceWeight: Math.min(1, Math.max(0, envNum('NEUROMCP_IMPORTANCE_WEIGHT', 0.1))),
+    minSimilarity: envOptionalNum('NEUROMCP_MIN_SIMILARITY'),
     attentionWeight: envNum('NEUROMCP_ATTENTION_WEIGHT', 0.004),
     blockAttentionWeight: envNum('NEUROMCP_BLOCK_ATTENTION_WEIGHT', 0.003),
     usefulnessExplorationThreshold: envNum('NEUROMCP_USEFULNESS_EXPLORATION_THRESHOLD', 3),

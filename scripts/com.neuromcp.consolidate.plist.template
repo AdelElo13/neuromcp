@@ -30,6 +30,12 @@
         <string>{{PATH}}</string>
         <key>HOME</key>
         <string>{{HOME}}</string>
+        <!-- launchd does not set USER/LOGNAME for agents; without them
+             `claude -p` cannot find its keychain login ("Not logged in"). -->
+        <key>USER</key>
+        <string>{{USER}}</string>
+        <key>LOGNAME</key>
+        <string>{{USER}}</string>
     </dict>
 
     <key>WorkingDirectory</key>

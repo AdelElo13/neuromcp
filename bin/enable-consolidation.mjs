@@ -21,12 +21,21 @@
 
 import { existsSync, mkdirSync, copyFileSync, chmodSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir, platform } from 'node:os';
+import { homedir, platform, userInfo } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
+// userInfo() throws when the uid has no passwd entry (some containers).
+function currentUser() {
+  try {
+    return userInfo().username;
+  } catch {
+    return process.env.USER || process.env.LOGNAME || '';
+  }
+}
+const USER = currentUser();
 const NEUROMCP_DIR = join(HOME, '.neuromcp');
 const SCRIPTS_DIR = join(NEUROMCP_DIR, 'scripts');
 const REPO_SCRIPTS = join(__dirname, '..', 'scripts');
@@ -129,7 +138,8 @@ if (platform() === 'darwin') {
     .replaceAll('{{SCRIPT_PATH}}', join(SCRIPTS_DIR, 'run-consolidation.sh'))
     .replaceAll('{{INTERVAL_SECONDS}}', String(intervalSeconds))
     .replaceAll('{{PATH}}', pathEnv)
-    .replaceAll('{{HOME}}', HOME);
+    .replaceAll('{{HOME}}', HOME)
+    .replaceAll('{{USER}}', USER);
   mkdirSync(dirname(PLIST_TARGET), { recursive: true });
   writeFileSync(PLIST_TARGET, rendered);
   ok(`wrote ${PLIST_TARGET}`);
@@ -153,6 +163,8 @@ if (platform() === 'darwin') {
   info('Linux detected — no launchd. Add this to your crontab (env vars + script):');
   console.log(`    PATH=${pathEnv}`);
   console.log(`    HOME=${HOME}`);
+  console.log(`    USER=${USER}`);
+  console.log(`    LOGNAME=${USER}`);
   console.log(`    0 */${hours} * * * ${script}`);
 } else {
   warn(`platform ${platform()} not supported for auto-scheduling; run the script manually.`);

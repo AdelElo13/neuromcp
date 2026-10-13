@@ -56,6 +56,10 @@ export interface McpHttpDaemonOptions {
    * during the slow module-load window are answered instead of refused.
    */
   readonly handoff?: DaemonBootstrapHandoff;
+  /** Override MAX_MCP_SESSIONS (tests). */
+  readonly maxSessions?: number;
+  /** Override EVICT_MIN_IDLE_MS (tests). */
+  readonly evictMinIdleMs?: number;
 }
 
 export interface McpHttpDaemonDeps {
@@ -93,8 +97,21 @@ const MAX_MCP_BODY_BYTES = 8 * 1024 * 1024;
  * a handful of MCP clients (Claude Code, Claude Desktop, ChatGPT desktop,
  * Cursor, …) — but bounded so a runaway client that never sends DELETE
  * and never closes cannot exhaust memory by spinning up sessions.
+ *
+ * Raised from 64: on busy days (300-490 initialises/day across Claude Code
+ * sessions, subagents and forks) abandoned-but-not-yet-swept sessions
+ * saturated 64 and new clients were refused (1337 rejections Sep-Oct 2026).
  */
-const MAX_MCP_SESSIONS = 64;
+const MAX_MCP_SESSIONS = 128;
+
+/**
+ * At the cap, a new initialise evicts the least-recently-active session
+ * (no open SSE stream) if it has been idle at least this long. The evicted
+ * client gets 404 on its next request and reinitialises. Sessions active
+ * more recently than this are never evicted, so a runaway burst of fresh
+ * initialises still hits the cap.
+ */
+const EVICT_MIN_IDLE_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
  * After this many milliseconds with no activity, a session is closed and
@@ -208,6 +225,43 @@ export async function startMcpHttpDaemon(
   // fires after `handleRequest`. Without this, concurrent initializes
   // can bypass MAX_MCP_SESSIONS.
   let pendingInits = 0;
+  const maxSessions = options.maxSessions ?? MAX_MCP_SESSIONS;
+  const evictMinIdleMs = options.evictMinIdleMs ?? EVICT_MIN_IDLE_MS;
+
+  /**
+   * Free one slot by closing the least-recently-active session that has no
+   * open stream / in-flight request and has been idle >= evictMinIdleMs.
+   * The map entry is removed synchronously so the slot is free before the
+   * caller re-checks the cap. Returns true when a session was evicted.
+   */
+  const evictLeastRecentlyActive = (): boolean => {
+    const now = Date.now();
+    let victim: [string, SessionState] | undefined;
+    for (const entry of sessions) {
+      const [, state] = entry;
+      if (state.activeStreams !== undefined && state.activeStreams > 0) continue;
+      if (now - state.lastActivityAt < evictMinIdleMs) continue;
+      if (!victim || state.lastActivityAt < victim[1].lastActivityAt) victim = entry;
+    }
+    if (!victim) return false;
+    const [sid, state] = victim;
+    sessions.delete(sid);
+    // Trade-off: a well-behaved client idle >= evictMinIdleMs between requests
+    // can be evicted too; it reinitialises on the 404. Counted so a client that
+    // does NOT recover shows up as an eviction spike rather than silence.
+    deps.metrics.increment('mcp_http.sessions_evicted');
+    logger.info('mcp-http', 'session cap reached, evicted least-recently-active session', {
+      sid,
+      idleMs: now - state.lastActivityAt,
+    });
+    state.transport.close().catch((err: unknown) => {
+      logger.warn('mcp-http', 'transport.close failed during eviction', {
+        sid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return true;
+  };
 
   const extraAllowed: ReadonlySet<string> = new Set(
     (options.extraAllowedHosts ?? []).map((h) => h.toLowerCase()),
@@ -385,9 +439,12 @@ export async function startMcpHttpDaemon(
       // burst of concurrent initialize requests can all observe
       // `sessions.size` below the cap before any of them call
       // `onsessioninitialized` (which only fires after `handleRequest`).
-      if (sessions.size + pendingInits >= MAX_MCP_SESSIONS) {
+      if (sessions.size + pendingInits >= maxSessions) {
+        evictLeastRecentlyActive();
+      }
+      if (sessions.size + pendingInits >= maxSessions) {
         logger.warn('mcp-http', 'session cap reached, rejecting initialize', {
-          cap: MAX_MCP_SESSIONS,
+          cap: maxSessions,
           current: sessions.size,
           pending: pendingInits,
         });

@@ -3,6 +3,116 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.30.0] — 2026-10-13
+
+Retrieval-quality and reliability release, driven by a month of production
+use: search now ranks by relevance instead of popularity, non-English
+stores get a measured upgrade path, and four silent failures that lost
+memories without any error are fixed.
+
+**Upgrading existing installs:** after `npm install -g neuromcp@latest`, run
+`npx neuromcp-init-wiki` once. Installed hooks were never updated before, so
+hook fixes (transcript streaming, `.cjs` renames) only reach you after this
+step. It updates every hook that is an unmodified older neuromcp version
+(backup kept), migrates old `.js` hooks to `.cjs` while keeping your edits
+(a forwarding stub stays at the old path), and lists hooks you edited —
+`--update-hooks` replaces those as well. `npx neuromcp-doctor check` now
+reports outdated hooks.
+
+### Fixed
+
+- **FIX: multi-word queries only matched as an exact adjacent phrase.** The
+  FTS leg quoted the whole query, so "filamentrol plank" never matched
+  "de filamentrol staat op de bovenste plank". Words are now matched
+  individually (stopwords and one/two-letter Latin words dropped; numbers and
+  non-Latin words always kept, scripts such as Hangul, kana, Devanagari and
+  Thai tokenised exactly as FTS5 does), and a keyword hit is weighted by how
+  much of the query it covers, so one ordinary word no longer earns a full
+  keyword bonus.
+- **FIX: importance outweighed relevance ~10×.** The adaptive-importance
+  multiplier spanned 0.70–1.00 on top of RRF, which keeps only rank, not the
+  size of the similarity gap. A low-importance memory that was the unique
+  vector and keyword match ranked last. Cosine similarity now enters the
+  score directly and importance is a tie-breaker (`NEUROMCP_IMPORTANCE_WEIGHT`,
+  default 0.1).
+- **FIX: every returned row got `access_count + 1`.** Rows returned for
+  every query gained importance and kept winning (rich-get-richer). Only the
+  top result of a search counts as a use; `recall_memory` still counts.
+- **FIX: scoring stages failed silently.** FTS, graph, priming, attention,
+  usefulness, importance and rerank failures now log the error and are
+  reported in a new `degraded` field on `search_memory` results. A failing
+  importance lookup no longer aborts the whole search.
+- **FIX: `explain.claims` carried all-null rows** that inflated `claim_count`.
+- **FIX: the wiki indexer dropped sections and churned.** Chunks were keyed
+  on page + heading; pages that repeat a heading (dated consolidation
+  sections) kept only the last one and re-replaced the rest on every run.
+  On a real wiki 301 of 1,249 sections were not searchable and ~270 chunks
+  were rewritten per run. Repeated headings now get a content-based key, so
+  inserting another section does not re-key the rest; a second run replaces
+  nothing. The first run after upgrading re-indexes those pages once. A chunk
+  stored without a vector is re-embedded in place (same id) on the next run,
+  and a circuit breaker stops after three consecutive embedder outages
+  (connection refused, timeout) instead of waiting out every timeout.
+- **FIX: hooks lost the longest sessions.** `neuromcp-persist`,
+  `neuromcp-auto-capture` and `neuromcp-critic` read the whole transcript
+  into one string, which throws past V8's ~512 MB limit. `persist` then
+  counted zero user messages and skipped the raw log, so the session never
+  reached consolidation. All three now stream the transcript.
+- **FIX: `auto-capture` and `context-inject` crashed under an ESM parent
+  `package.json`.** Renamed to `.cjs` (as `persist` was in 0.22.0);
+  `neuromcp-init-wiki` archives the old files and rewrites `settings.json`.
+- **FIX: consolidation never ran under launchd.** The agent passed no
+  `USER`/`LOGNAME`, so `claude -p` could not find its login and every run
+  failed with "no output". The plist template now sets both, and the
+  consolidation script logs the actual CLI error instead of discarding it.
+- **FIX: consolidation summaries were rejected because of injected
+  context.** `claude -p` ran the user's hooks and loaded CLAUDE.md files,
+  skills and MCP servers, so unrelated context leaked into summaries and the
+  auditor rejected them. Every call now runs with hooks disabled, project and
+  local settings off, no CLAUDE.md, no skills and no MCP servers. User
+  settings stay loaded, so `apiKeyHelper`, `ANTHROPIC_BASE_URL`, Bedrock and
+  Vertex configuration keep working.
+- **FIX: overlapping consolidation runs** processed the same sessions twice;
+  `run-consolidation.sh` now holds a kernel `flock` for the whole run — no
+  stale lock after a crash or reboot.
+- **FIX: the daemon refused new clients at its session cap.** Abandoned
+  sessions held all 64 slots until the 30-minute idle sweep. The cap is now
+  128 and, when full, the least-recently-active idle session (≥ 2 min, no
+  open stream or in-flight request) is evicted; that client reinitialises
+  on its next request.
+- **FIX: standalone tools ignored the index's embedding model.**
+  `bin/embed.mjs`, `bin/query.mjs`, the wiki indexer and backfill created
+  the `auto` provider (always nomic-embed-text) and failed with a dimension
+  mismatch after a re-embed. With `NEUROMCP_EMBEDDING_MODEL=auto` every
+  client now follows the Ollama model the existing index was built with.
+
+### Added
+
+- `min_similarity` on `search_memory` (and `NEUROMCP_MIN_SIMILARITY`): drop
+  candidates below a cosine floor unless they have a strong keyword hit
+  (more than half of the query's words) or a knowledge-graph hit;
+  `below_threshold_dropped` reports how many. In the `search_memory` tool
+  bge-m3 gets a calibrated default of 0.45; other embedders, and library
+  callers such as `recall_answer`, prompts and the HTTP API, default to off.
+- `neuromcp-doctor check` reports outdated or edited Claude Code hooks.
+- `neuromcp-init-wiki --update-hooks`, plus a notice when an installed hook
+  differs from the shipped version.
+- `createIndexAwareProvider` export (`neuromcp/embeddings/runtime`).
+- README: multilingual guidance. On 2,402 real Dutch memories nomic-embed-text
+  reached Recall@5 2.5% versus 65% for bge-m3; the bundled English reranker
+  lowers Dutch MRR from 0.46 to 0.18 and should stay off for non-English data.
+
+### Verification
+
+- 827 tests pass (with and without Ollama); `tsc`, lint, coverage and build clean.
+- Three independent pre-release reviews (code, portability/upgrade, Codex);
+  every finding fixed or documented above. Upgrade from npm 0.29.5 verified
+  end to end: database, hooks (all seven run) and `neuromcp-doctor`.
+- Internal eval: verbatim-recall MRR 38.8% → 89.9%, Recall@5 46.7% → 95%;
+  other fixtures unchanged at 100%.
+- LongMemEval, 200 distractors, 30 questions: R@5(true) 19.1% → 19.3%,
+  P@5 92.0% → 92.7%, Hit@5 100% (no regression).
+
 ## [0.29.5] — 2026-09-15
 
 Graph-hygiene release: the knowledge graph shows your entities again

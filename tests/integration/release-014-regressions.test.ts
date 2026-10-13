@@ -239,6 +239,88 @@ describe('0.14.1 regressions', () => {
     expect(headings).not.toContain('WillRemove');
   });
 
+  it('index-wiki keeps every section when a page repeats a heading, and is idempotent', () => {
+    // Consolidation appends dated sections; the same "## [date]" heading can
+    // occur several times on one page. Chunks were keyed on path+heading, so
+    // only the LAST section survived and every run replaced the others again
+    // (~270 churned chunks per run on the real wiki, each a new id).
+    const wikiFile = join(sb.wikiDir, 'projects', 'dupes.md');
+    writeFileSync(
+      wikiFile,
+      '---\ntitle: dupes\n---\n\n## [2026-04-28]\n\nFirst section with enough text to be indexed as a chunk.\n\n' +
+        '## [2026-04-28]\n\nSecond section, same heading, different content entirely here.\n',
+    );
+    expect(runNode(INDEX_BIN, [], env()).status).toBe(0);
+
+    const db = new Database(sb.dbPath, { readonly: true });
+    const rows = db.prepare(
+      `SELECT content FROM memories WHERE source='wiki' AND json_extract(metadata, '$.wiki_path') = 'projects/dupes.md'`,
+    ).all() as Array<{ content: string }>;
+    db.close();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.content).join('\n')).toMatch(/First section/);
+    expect(rows.map((r) => r.content).join('\n')).toMatch(/Second section/);
+
+    const second = runNode(INDEX_BIN, [], env());
+    expect(second.status).toBe(0);
+    expect(String(second.stdout) + String(second.stderr)).toMatch(/inserted 0 new chunks/);
+  });
+
+  it('index-wiki keeps the identity of repeated-heading sections when another one is inserted', () => {
+    // Keys of repeated headings must not depend on position: inserting a new
+    // "## [date]" section above existing ones must not re-key (and re-id) all
+    // later sections. A literal heading such as "Topic::#2" must not collide
+    // with the key of a second "Topic" section either.
+    const wikiFile = join(sb.wikiDir, 'projects', 'shift.md');
+    const section = (h: string, body: string) => `## ${h}\n\n${body}\n\n`;
+    writeFileSync(
+      wikiFile,
+      '---\ntitle: shift\n---\n\n' +
+        section('Topic', 'Alpha section body with enough text to be indexed.') +
+        section('Topic', 'Beta section body with enough text to be indexed.') +
+        section('Topic::#2', 'Gamma section whose literal heading mimics a key suffix.'),
+    );
+    expect(runNode(INDEX_BIN, [], env()).status).toBe(0);
+    const idOf = (needle: string) => {
+      const db = new Database(sb.dbPath, { readonly: true });
+      const row = db.prepare(
+        `SELECT id FROM memories WHERE source='wiki' AND is_deleted = 0 AND content LIKE ?`,
+      ).get(`%${needle}%`) as { id: string } | undefined;
+      db.close();
+      return row?.id;
+    };
+    const betaBefore = idOf('Beta section');
+    expect(betaBefore).toBeDefined();
+    expect(idOf('Gamma section')).toBeDefined();
+
+    writeFileSync(
+      wikiFile,
+      '---\ntitle: shift\n---\n\n' +
+        section('Topic', 'New first section inserted above the others, long enough.') +
+        section('Topic', 'Alpha section body with enough text to be indexed.') +
+        section('Topic', 'Beta section body with enough text to be indexed.') +
+        section('Topic::#2', 'Gamma section whose literal heading mimics a key suffix.'),
+    );
+    expect(runNode(INDEX_BIN, [], env()).status).toBe(0);
+    expect(idOf('Beta section')).toBe(betaBefore);
+    expect(idOf('Gamma section')).toBeDefined();
+    expect(idOf('New first section')).toBeDefined();
+    expect(idOf('Alpha section')).toBeDefined();
+  });
+
+  it('index-wiki re-embeds unchanged chunks that were stored without a vector', () => {
+    // A chunk stored without a vector (transient Ollama failure) used to be
+    // skipped as "unchanged" forever, invisible to vector search. The indexer
+    // must treat it as work while an embedder is available, and must use the
+    // index-aware provider (the model the existing index was built with).
+    const src = readFileSync(INDEX_BIN, 'utf8');
+    expect(src).toMatch(/function needsWork\(r\)/);
+    expect(src).toMatch(/prev\.vectorless/);
+    expect(src).toMatch(/toInsert\.filter\(needsWork\)/);
+    expect(src).toMatch(/createIndexAwareProvider\(db, config, logger\)/);
+    expect(src).not.toMatch(/prev && prev\.hash === r\.hash\) \{ skipped\+\+/);
+  });
+
   it('auto-retrieve hook XML-escapes memory content (no <memory> smuggle)', () => {
     const db = new Database(sb.dbPath);
     sqliteVec.load(db);

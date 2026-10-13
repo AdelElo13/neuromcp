@@ -272,6 +272,30 @@ export async function resolveEmbeddingRuntime(
   return degrade(indexDimension, reason, logger, stderr);
 }
 
+/**
+ * For standalone writers/readers (bin/embed.mjs, bin/query.mjs, the wiki
+ * indexer, backfill): the provider that matches the existing index, or a
+ * thrown error. Unlike the server they must not run degraded — a script that
+ * cannot embed should fail loudly, not write nothing. One attempt by default:
+ * these are short-lived processes, not a booting daemon.
+ */
+export async function createIndexAwareProvider(
+  db: Database.Database,
+  config: NeuromcpConfig,
+  logger: Logger,
+  deps: ResolveDeps = {},
+): Promise<EmbeddingProvider> {
+  const runtime = await resolveEmbeddingRuntime(db, config, logger, {
+    attempts: 1,
+    stderr: { write: () => true },
+    ...deps,
+  });
+  if (!runtime.vectorEnabled) {
+    throw new Error(runtime.message ?? 'no embedding provider matches the vector index');
+  }
+  return runtime.embedder;
+}
+
 function degrade(
   indexDimension: number,
   reason: string,
