@@ -3,6 +3,34 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.30.2] — 2026-10-15
+
+### Fixed
+
+- **FIX: wiki pages received another session's work, or none.** The persist
+  hook filled a raw log's user messages, tools and files from the newest
+  `~/.claude/session-data/*-session.tmp`, which is one merged file per
+  directory per day and usually belongs to another session. It now summarises
+  the session's own transcript — only what was added since that session's
+  previous Stop — and records edited files, release commands (git, gh, npm)
+  and a `Projects:` line. A Stop with nothing new writes no raw log.
+- **FIX: work in another repo than the session directory was filed under the
+  wrong project.** Consolidation reads the `Projects:` line (legacy logs: the
+  session directory, then path counts), never the recycled wiki-activity tail,
+  and adds a session to every project it worked on. A multi-project session
+  reaches the ledger once all its projects are done, also across separate
+  `--project` runs, so nothing is processed twice. On a real install a
+  mac-control-mcp release made from another project's session had never
+  reached its page.
+- **FIX: versions and releases were missing from summaries.** The git history
+  of `~/projects/<project>` for the batch window is given to the summariser
+  and to the auditor as an authoritative source.
+- **FIX: pages looked stale.** Appending a section now refreshes `updated:` in
+  the page frontmatter.
+
+Upgrade: `npm install -g neuromcp@latest`, then `npx neuromcp-init-wiki`
+(updates the unmodified persist hook automatically).
+
 ## [0.30.1] — 2026-10-13
 
 ### Fixed
