@@ -28,7 +28,7 @@ import sqlite3
 import subprocess
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HOME = Path.home()
@@ -135,24 +135,102 @@ def get_unprocessed(since: str | None = None, last_n: int | None = None) -> list
     return [s for s in sessions if s.name not in ledger]
 
 
-def detect_project(content: str) -> str:
-    """Return project name for a session.
+PROJECTS_LINE_RE = re.compile(r"^Projects:\s*(.+)$", re.M)
+DIRECTORY_RE = re.compile(r"^directory:\s*(.+)$", re.M)
+PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
 
-    Only `<HOME>/projects/<NAME>` counts as a real project. Everything else
-    falls back to "home" (the control-centre / dotfiles workspace).
+
+def detect_projects(content: str) -> list[str]:
+    """Projects a session worked on.
+
+    New logs (persist hook >= 0.30.2) carry an explicit `Projects:` line derived
+    from the session's own edited files and release commands. Legacy logs fall
+    back to the session directory under <HOME>/projects, then to path counts in
+    the session body. The recycled "Recent Wiki Activity" tail is never a signal:
+    it is the same for every session and named other projects (2026-10-15).
     """
-    matches = PROJECT_PATH_RE.findall(content)
+    body = content.split(_WIKI_ACTIVITY_MARKER, 1)[0]
+    explicit = PROJECTS_LINE_RE.search(body)
+    if explicit:
+        names = {n.strip() for n in explicit.group(1).split(",")}
+        names = sorted(n for n in names if n and PROJECT_NAME_RE.match(n) and not n.startswith("."))
+        if names:
+            return names
+    directory = DIRECTORY_RE.search(body)
+    if directory:
+        in_dir = PROJECT_PATH_RE.findall(directory.group(1).strip() + "/")
+        if in_dir:
+            return [in_dir[0]]
+    matches = PROJECT_PATH_RE.findall(body)
     if matches:
-        return Counter(matches).most_common(1)[0][0]
-    return "home"
+        return [Counter(matches).most_common(1)[0][0]]
+    return ["home"]
+
+
+def detect_project(content: str) -> str:
+    """Primary project (first of detect_projects); kept for existing callers."""
+    return detect_projects(content)[0]
 
 
 def group_by_project(sessions: list[Path]) -> dict[str, list[Path]]:
     groups: dict[str, list[Path]] = {}
     for s in sessions:
-        project = detect_project(s.read_text(errors="replace"))
-        groups.setdefault(project, []).append(s)
+        for project in detect_projects(s.read_text(errors="replace")):
+            groups.setdefault(project, []).append(s)
     return groups
+
+
+def ledger_ready(groups: dict[str, list[Path]], done_by_project: dict[str, list[Path]]) -> list[Path]:
+    """Sessions that every group containing them reported terminal."""
+    membership: dict[Path, set[str]] = {}
+    for project, members in groups.items():
+        for s in members:
+            membership.setdefault(s, set()).add(project)
+    done = {project: set(paths) for project, paths in done_by_project.items()}
+    return [s for s, projects in membership.items() if all(s in done.get(p, set()) for p in projects)]
+
+
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+
+
+def bump_updated(text: str, today: str) -> str:
+    """Set `updated: <today>` inside a leading YAML frontmatter block; body untouched."""
+    m = FRONTMATTER_RE.match(text)
+    if not m:
+        return text
+    fm = m.group(1)
+    if re.search(r"^updated:.*$", fm, re.M):
+        fm = re.sub(r"^updated:.*$", f"updated: {today}", fm, count=1, flags=re.M)
+    else:
+        fm = f"{fm}\nupdated: {today}"
+    return f"---\n{fm}\n---\n" + text[m.end():]
+
+
+SESSION_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+
+def git_history(project: str, batch: list[Path], max_lines: int = 40) -> str:
+    """Commits (with tags) of <HOME>/projects/<project> from the day before the
+    batch's first session to two days after its last. Releases go through git,
+    npm and gh, which raw logs only show as commands; the history is the
+    authoritative source for versions and goes to summariser AND auditor."""
+    repo = HOME / "projects" / project
+    if project == "home" or not (repo / ".git").exists():
+        return ""
+    dates = sorted(m.group(1) for s in batch if (m := SESSION_DATE_RE.match(s.name)))
+    if not dates:
+        return ""
+    try:
+        first = datetime.strptime(dates[0], "%Y-%m-%d") - timedelta(days=1)
+        last = datetime.strptime(dates[-1], "%Y-%m-%d") + timedelta(days=2)
+        r = subprocess.run(
+            ["git", "-C", str(repo), "log", "--all", f"--since={first:%Y-%m-%d}", f"--until={last:%Y-%m-%d}",
+             "--date=short", "--format=%ad %h%d %s", f"-{max_lines}"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def extract_markdown(raw: str) -> str | None:
@@ -168,7 +246,7 @@ def extract_markdown(raw: str) -> str | None:
     return content
 
 
-def audit_summary(summary: str, batch: list[Path]) -> tuple[bool, str]:
+def audit_summary(summary: str, batch: list[Path], extra_sources: str = "") -> tuple[bool, str]:
     """Verify every factual claim in `summary` is traceable to the raw sessions.
 
     Runs a `claude -p` call with a strict verifier prompt. Returns
@@ -192,6 +270,8 @@ def audit_summary(summary: str, batch: list[Path]) -> tuple[bool, str]:
         f"<<<SOURCE session={s.name}>>>\n{s.read_text(errors='replace')[:8000]}\n<<<END session={s.name}>>>"
         for s in batch
     )
+    if extra_sources:
+        session_text += f"\n\n<<<SOURCE git-history>>>\n{extra_sources[:8000]}\n<<<END git-history>>>"
     # Explicit delimiters + injection-resistance policy. Source content is
     # user data; it may accidentally or deliberately contain directives. The
     # auditor must treat everything between delimiters as data, not prompt.
@@ -618,6 +698,11 @@ def consolidate_batch(
         f"=== {s.name} ===\n{s.read_text(errors='replace')[:1500]}"
         for s in batch
     )
+    history = git_history(project, batch)
+    if history:
+        session_text += (
+            f"\n\n=== GIT HISTORY of ~/projects/{project} (authoritative for commits, versions and tags) ===\n{history}"
+        )
     wiki_path = WIKI_DIR / "projects" / f"{project}.md"
     if not wiki_path.exists():
         wiki_path = WIKI_DIR / "systems" / f"{project}.md"
@@ -701,7 +786,7 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
             continue
 
         # Eval-loop: verify every claim traces to a source session before writing.
-        approved, reason = audit_summary(extracted, batch)
+        approved, reason = audit_summary(extracted, batch, extra_sources=history)
         if approved:
             projects_dir = WIKI_DIR / "projects"
             systems_dir = WIKI_DIR / "systems"
@@ -711,12 +796,12 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
             target.parent.mkdir(parents=True, exist_ok=True)
             attempt_note = f" [{attempt_tag}]" if attempt > 0 else ""
             if target.exists():
-                with target.open("a") as f:
-                    f.write(f"\n\n{extracted}\n")
+                # Append, then refresh `updated:` so the page no longer looks stale.
+                target.write_text(bump_updated(target.read_text(), today) + f"\n\n{extracted}\n")
                 print(f"  ✓ {target.name} batch {batch_idx}/{batch_total} ({len(batch)} sessions){attempt_note}")
             else:
                 target.write_text(
-                    f"---\ntitle: {project}\ntype: project\ncreated: {today}\n---\n\n{extracted}\n"
+                    f"---\ntitle: {project}\ntype: project\ncreated: {today}\nupdated: {today}\n---\n\n{extracted}\n"
                 )
                 print(f"  ✓ {target.name} created batch {batch_idx}/{batch_total} ({len(batch)} sessions){attempt_note}")
             # Tier 2 C+D: distill atomic facts and persist with supersession edges.
@@ -861,6 +946,7 @@ def main() -> None:
 
     ledger = load_ledger()
     ok_count = 0
+    done_by_project: dict[str, list[Path]] = {}
     for project, psessions in groups.items():
         print(f"  {project} ({len(psessions)} sessions)...")
         success, done = consolidate_project(
@@ -873,12 +959,14 @@ def main() -> None:
         # exhausted — not just successful ones, so permanently-failing or
         # content-free batches do not re-run forever. ok_count still counts
         # only projects where something was actually written to the wiki.
-        if not args.dry_run and done:
-            ledger.update(s.name for s in done)
+        done_by_project[project] = list(done)
         if success:
             ok_count += 1
 
     if not args.dry_run:
+        # A session in several project groups is terminal only once every group
+        # reported it terminal (written, skipped or exhausted).
+        ledger.update(s.name for s in ledger_ready(groups, done_by_project))
         save_ledger(ledger)
         log_path = WIKI_DIR / "log.md"
         if log_path.parent.exists():

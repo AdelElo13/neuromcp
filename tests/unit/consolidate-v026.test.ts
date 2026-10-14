@@ -29,7 +29,11 @@ describe('consolidate-sessions.py v0.26 reliability fixes', () => {
     });
 
     it('main advances the ledger for terminal sessions regardless of success', () => {
-      expect(source).toMatch(/if not args\.dry_run and done:/);
+      // Since 2026-10-15 a session can belong to several project groups; it is
+      // terminal once every group reported it terminal (written, skipped or
+      // exhausted) — still regardless of success.
+      expect(source).toMatch(/done_by_project\[project\] = list\(done\)/);
+      expect(source).toMatch(/ledger\.update\(s\.name for s in ledger_ready\(groups, done_by_project\)\)/);
     });
   });
 
