@@ -137,4 +137,21 @@ print(json.dumps({"ok": ok, "prompt": prompts[0], "audit": audits[0], "page": pa
       expect(out.page).toContain('- Released v0.10.2.');
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+
+  it('main --project X never marks a session processed that still belongs to another project', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      const raw = join(home, '.neuromcp', 'raw', 'sessions'); mkdirSync(raw, { recursive: true });
+      mkdirSync(join(home, '.neuromcp', 'wiki', 'projects'), { recursive: true });
+      writeFileSync(join(raw, '2026-10-14-000001.md'), '---\ndirectory: /x\n---\nProjects: alpha, beta\nUser messages:\n- hi\n');
+      const out = py(home, `
+import sys
+m.consolidate_project = lambda project, sessions, **k: (True, list(sessions))
+m.trigger_wiki_index = lambda: None
+sys.argv = ["cs", "--project", "alpha"]
+m.main()
+print(json.dumps(sorted(m.load_ledger())))`);
+      expect(out).toEqual([]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
 });

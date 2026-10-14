@@ -938,6 +938,9 @@ def main() -> None:
 
     print(f"{len(sessions)} unprocessed sessions")
     groups = group_by_project(sessions)
+    # Membership over ALL projects: with --project a session that also belongs
+    # to another project must stay pending for that project.
+    all_groups = dict(groups)
     if args.project:
         groups = {k: v for k, v in groups.items() if k == args.project}
         if not groups:
@@ -966,7 +969,7 @@ def main() -> None:
     if not args.dry_run:
         # A session in several project groups is terminal only once every group
         # reported it terminal (written, skipped or exhausted).
-        ledger.update(s.name for s in ledger_ready(groups, done_by_project))
+        ledger.update(s.name for s in ledger_ready(all_groups, done_by_project))
         save_ledger(ledger)
         log_path = WIKI_DIR / "log.md"
         if log_path.parent.exists():

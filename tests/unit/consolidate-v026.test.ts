@@ -33,7 +33,7 @@ describe('consolidate-sessions.py v0.26 reliability fixes', () => {
       // terminal once every group reported it terminal (written, skipped or
       // exhausted) — still regardless of success.
       expect(source).toMatch(/done_by_project\[project\] = list\(done\)/);
-      expect(source).toMatch(/ledger\.update\(s\.name for s in ledger_ready\(groups, done_by_project\)\)/);
+      expect(source).toMatch(/ledger\.update\(s\.name for s in ledger_ready\(all_groups, done_by_project\)\)/);
     });
   });
 
