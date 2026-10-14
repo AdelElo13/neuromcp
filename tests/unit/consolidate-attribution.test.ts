@@ -154,4 +154,27 @@ print(json.dumps(sorted(m.load_ledger())))`);
       expect(out).toEqual([]);
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+
+  it('separate --project runs complete a multi-project session once, without reprocessing a finished project', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      const raw = join(home, '.neuromcp', 'raw', 'sessions'); mkdirSync(raw, { recursive: true });
+      mkdirSync(join(home, '.neuromcp', 'wiki', 'projects'), { recursive: true });
+      writeFileSync(join(raw, '2026-10-14-000001.md'), '---\ndirectory: /x\n---\nProjects: alpha, beta\nUser messages:\n- hi\n');
+      const out = py(home, `
+import sys
+calls = []
+def fake(project, sessions, **k):
+    calls.append(project); return (True, list(sessions))
+m.consolidate_project = fake
+m.trigger_wiki_index = lambda: None
+states = []
+for argv in (["cs", "--project", "alpha"], ["cs", "--project", "beta"], ["cs"]):
+    sys.argv = argv; m.main(); states.append({"processed": sorted(m.load_ledger()), "partial": sorted(m.load_partial())})
+print(json.dumps({"calls": calls, "states": states}))`);
+      expect(out.calls).toEqual(['alpha', 'beta']);                        // the third, unfiltered run has nothing left
+      expect(out.states[0]).toEqual({ processed: [], partial: ['2026-10-14-000001.md#alpha'] });
+      expect(out.states[1]).toEqual({ processed: ['2026-10-14-000001.md'], partial: [] });   // runner's pending count stays correct
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
 });

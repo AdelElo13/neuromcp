@@ -113,13 +113,27 @@ def load_ledger() -> set[str]:
         return set()
 
 
-def save_ledger(processed: set[str]) -> None:
+def load_partial() -> set[str]:
+    """`<session>#<project>` entries: a multi-project session whose group for
+    that project is already terminal while another project is still pending.
+    Kept apart from `processed` so the runner's pending count stays exact."""
+    try:
+        data = json.loads(LEDGER_FILE.read_text())
+        return {str(n) for n in data.get("partial", []) if isinstance(n, str)}
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def save_ledger(processed: set[str], partial: set[str] | None = None) -> None:
     """Atomic write — tmp + os.replace — so a crash mid-write can't leave
     us with a partially-written ledger that load_ledger() misreads tomorrow.
+    `partial` defaults to the entries already on disk.
     """
+    if partial is None:
+        partial = load_partial() if LEDGER_FILE.exists() else set()
     LEDGER_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = LEDGER_FILE.with_suffix(f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps({"processed": sorted(processed)}, indent=2))
+    tmp.write_text(json.dumps({"processed": sorted(processed), "partial": sorted(partial)}, indent=2))
     os.replace(tmp, LEDGER_FILE)  # atomic on POSIX + NTFS
 
 
@@ -172,22 +186,35 @@ def detect_project(content: str) -> str:
     return detect_projects(content)[0]
 
 
-def group_by_project(sessions: list[Path]) -> dict[str, list[Path]]:
+def group_by_project(sessions: list[Path], partial: set[str] | frozenset[str] = frozenset()) -> dict[str, list[Path]]:
+    """Session -> every project it worked on, minus projects already terminal
+    for it in an earlier run (`partial`)."""
     groups: dict[str, list[Path]] = {}
     for s in sessions:
         for project in detect_projects(s.read_text(errors="replace")):
+            if f"{s.name}#{project}" in partial:
+                continue
             groups.setdefault(project, []).append(s)
     return groups
 
 
-def ledger_ready(groups: dict[str, list[Path]], done_by_project: dict[str, list[Path]]) -> list[Path]:
-    """Sessions that every group containing them reported terminal."""
+def ledger_ready(groups: dict[str, list[Path]], done_by_project: dict[str, list[Path]],
+                 partial: set[str] | frozenset[str] = frozenset()) -> list[Path]:
+    """Sessions that every project containing them reported terminal, in this
+    run (`done_by_project`) or an earlier one (`partial`)."""
     membership: dict[Path, set[str]] = {}
     for project, members in groups.items():
         for s in members:
             membership.setdefault(s, set()).add(project)
     done = {project: set(paths) for project, paths in done_by_project.items()}
-    return [s for s, projects in membership.items() if all(s in done.get(p, set()) for p in projects)]
+    return [s for s, projects in membership.items()
+            if all(s in done.get(p, set()) or f"{s.name}#{p}" in partial for p in projects)]
+
+
+def partial_entries(groups: dict[str, list[Path]], done_by_project: dict[str, list[Path]]) -> set[str]:
+    """`<session>#<project>` for every project group that finished a multi-project session."""
+    multi = {s for s, n in Counter(s for members in groups.values() for s in members).items() if n > 1}
+    return {f"{s.name}#{project}" for project, paths in done_by_project.items() for s in paths if s in multi}
 
 
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
@@ -937,10 +964,11 @@ def main() -> None:
         return
 
     print(f"{len(sessions)} unprocessed sessions")
-    groups = group_by_project(sessions)
+    partial = load_partial()
     # Membership over ALL projects: with --project a session that also belongs
     # to another project must stay pending for that project.
-    all_groups = dict(groups)
+    all_groups = group_by_project(sessions)
+    groups = group_by_project(sessions, partial)
     if args.project:
         groups = {k: v for k, v in groups.items() if k == args.project}
         if not groups:
@@ -969,8 +997,12 @@ def main() -> None:
     if not args.dry_run:
         # A session in several project groups is terminal only once every group
         # reported it terminal (written, skipped or exhausted).
-        ledger.update(s.name for s in ledger_ready(all_groups, done_by_project))
-        save_ledger(ledger)
+        complete = ledger_ready(all_groups, done_by_project, partial)
+        ledger.update(s.name for s in complete)
+        partial |= partial_entries(all_groups, done_by_project)
+        finished = {s.name for s in complete}
+        partial = {p for p in partial if p.split("#", 1)[0] not in finished}
+        save_ledger(ledger, partial)
         log_path = WIKI_DIR / "log.md"
         if log_path.parent.exists():
             with log_path.open("a") as f:
