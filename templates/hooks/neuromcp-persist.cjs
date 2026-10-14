@@ -59,8 +59,9 @@ function writeOffsets(offsets) {
 }
 function projectOf(p) {
   if (typeof p !== "string") return null;
-  const prefix = PROJECTS_ROOT + path.sep;
-  const i = p.indexOf(prefix);
+  let prefix = PROJECTS_ROOT + path.sep;
+  let i = p.indexOf(prefix);
+  if (i === -1) { prefix = "~/projects/"; i = p.indexOf(prefix); }        // shell commands use ~
   if (i === -1) return null;
   const name = p.slice(i + prefix.length).split(/[\/\s"'`;&|)]/)[0];
   return name && !name.startsWith(".") ? name : null;

@@ -96,4 +96,13 @@ describe('neuromcp-persist hook — summary from its own transcript', () => {
     expect(log).toContain('vraag 39'); expect(log).not.toContain('vraag 9\n');
     expect(log).toContain('git tag v0.24.0'); expect(log).not.toContain('git tag v0.4.0');
   });
+
+  it('a release command with ~/projects/<name> alone names the project', () => {
+    fs.writeFileSync(transcript,
+      line({ type: 'user', sessionId, message: { role: 'user', content: 'release it' } }) +
+      line({ type: 'assistant', sessionId, message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Bash', input: { command: 'cd ~/projects/agentrank && git tag v1.2.0 && git push --tags' } }] } }));
+    runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: home });
+    expect(logs()[0]).toMatch(/^Projects: agentrank$/m);
+  });
 });
