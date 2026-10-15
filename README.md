@@ -545,6 +545,7 @@ npx neuromcp-enable-consolidation
 **What it installs:**
 - `~/.neuromcp/scripts/consolidate-sessions.py` — the worker
 - `~/.neuromcp/scripts/run-consolidation.sh` — threshold-guarded runner
+- `~/.neuromcp/scripts/reprocess-exhausted.py` — re-audits exhausted batches (manual)
 - **macOS**: a launchd agent that fires every 4 hours (`com.neuromcp.consolidate`)
 - **Linux**: prints a cron snippet to add manually
 
@@ -562,7 +563,17 @@ npx neuromcp-enable-consolidation
 
 **Change interval:** `npx neuromcp-enable-consolidation --interval 7200` (every 2 hours)
 
-**Hallucination guard (eval-loop).** Every consolidator output goes through a second Haiku audit before the wiki is touched. If any factual claim in the generated summary is not traceable to the raw sessions, the chunk goes to `~/.neuromcp/review-queue/` instead of the wiki. No hallucinated claims leak through.
+**Hallucination guard (eval-loop).** Every consolidator output goes through a second Haiku audit before the wiki is touched. If any factual claim is not traceable to the raw sessions, the lines the auditor names are removed and the remainder is audited again (0.30.3); only an approved remainder reaches the wiki, and the removed lines are kept in `~/.neuromcp/review-queue/pruned/`. A summary that cannot be pruned safely is regenerated, and after three attempts it goes to `~/.neuromcp/review-queue/exhausted/` with its source sessions. No unaudited claim leaks through. A batch that only failed on infrastructure (CLI outage, timeout) stays pending instead of being marked processed.
+
+**Projects outside `~/projects`.** Map a wiki project to other directories in `~/.neuromcp/project-dirs.json`:
+
+```json
+{ "desktop-quatro": ["~/Documents/ChatGPT/Ken/duo", "~/Documents/ChatGPT/Ken/macos"] }
+```
+
+Sessions that edit files (or run release commands) under a configured prefix are filed under that project; the longest prefix wins. Work elsewhere in the same parent directory keeps its old attribution.
+
+**Recovering exhausted batches.** `python3 ~/.neuromcp/scripts/reprocess-exhausted.py` reports, without any model call, how many exhausted batches can be re-audited and what that costs. `--pilot N` re-audits N of them into `review-queue/reprocess-pilot/` without touching the wiki; `--apply` writes only re-audited sections. Batches exhausted before 0.30.3 have no recorded sources and need `--accept-guessed-sources` (guessed provenance, listed in the section); recovered sections never create facts.
 
 **Atomic facts with temporal supersession.** After a summary is approved, it is also distilled into short standalone facts and stored as `category='fact'` rows with `valid_from=today`. When a new fact is Jaccard-similar to an existing one in the same project, Haiku decides whether NEW supersedes OLD — if yes, the old row gets `superseded_by_id` and `valid_to` set. Retrieval defaults to current facts only (`superseded_by_id IS NULL`), so outdated conclusions never resurface.
 

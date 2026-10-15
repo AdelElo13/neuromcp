@@ -141,26 +141,105 @@ function daemonDownResult(name, url, reason, osPlatform, note = '') {
 }
 
 /**
+ * The single embedding model stored in the index, read with the runtime's
+ * own query (src/embeddings/validate.ts getStoredEmbeddingModels): undefined
+ * when there is no database, no stored model, several models, or the mix
+ * override is on — exactly the cases where the runtime sets no requireModel.
+ *
+ * @param {{ Database: any, env?: Record<string, string | undefined>, exists?: (p: string) => boolean, home?: string }} deps
+ * @returns {string | undefined}
+ */
+export function readIndexModel(deps) {
+  const { Database, env = process.env, exists = existsSync, home = homedir() } = deps;
+  if (Database === null || env.NEUROMCP_ALLOW_EMBEDDING_MODEL_MIX === '1') return undefined;
+  const dbPath = env.NEUROMCP_DB_PATH ?? resolve(home, '.neuromcp', 'memory.db');
+  if (!exists(dbPath)) return undefined;
+  let db = null;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    // The runtime only requires the stored model once a vector index exists.
+    const vec = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_vec'").get();
+    if (vec === undefined) return undefined;
+    const rows = /** @type {Array<{ embedding_model: string }>} */ (
+      db.prepare(
+        `SELECT DISTINCT embedding_model FROM memories
+          WHERE is_deleted = 0
+            AND embedding_model IS NOT NULL
+            AND embedding_model NOT IN ('none', '')`,
+      ).all()
+    );
+    return rows.length === 1 ? rows[0].embedding_model : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * How to bring back the provider that built the index. When every stored
+ * embedding comes from one Ollama model, name THAT model (e.g. bge-m3) —
+ * the old fixed "pull nomic-embed-text" advice was wrong for any index
+ * built with another model.
+ *
+ * @param {Array<{ embedding_model: string }>} storedModels
+ * @param {number} indexDim
+ * @returns {string}
+ */
+export function restoreHint(storedModels, indexDim) {
+  const only = storedModels.length === 1 ? storedModels[0].embedding_model : undefined;
+  if (only === 'bge-small-en-v1.5' || (only === undefined && indexDim === 384)) {
+    return 'keep the ONNX fallback (`npx neuromcp-download-model`) and set NEUROMCP_EMBEDDING_PROVIDER=onnx';
+  }
+  if (only !== undefined && only.startsWith('text-embedding')) {
+    return `set OPENAI_API_KEY so ${only} is reachable`;
+  }
+  const model = only ?? (indexDim === 768 ? 'nomic-embed-text' : undefined);
+  return model
+    ? `start Ollama and \`ollama pull ${model}\``
+    : `start the Ollama model that produced the ${indexDim}-dim embeddings`;
+}
+
+/**
+ * Mirror of src/embeddings/factory.ts resolveOllamaModel: an explicit model
+ * wins; in `auto` an Ollama-produced index model is reused, while ONNX /
+ * OpenAI-produced (or absent) index models fall back to nomic-embed-text.
+ *
+ * @param {string | undefined} configured
+ * @param {string | undefined} indexModel
+ * @returns {string}
+ */
+export function resolveAutoOllamaModel(configured, indexModel) {
+  // Exactly the runtime's rule (src/config.ts reads the env with `??`, so an
+  // empty string is passed on literally, only 'auto' means auto).
+  if (configured !== undefined && configured !== 'auto') return configured;
+  if (indexModel === undefined || indexModel === 'bge-small-en-v1.5' || indexModel.startsWith('text-embedding')) {
+    return 'nomic-embed-text';
+  }
+  return indexModel;
+}
+
+/**
  * Probe Ollama and confirm the nomic-embed-text embedding model is pulled.
  *
  * @param {{
  *   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>,
  *   env?: Record<string, string | undefined>,
+ *   indexModel?: string,
  * }} [deps]
  * @returns {Promise<{ result: CheckResult, probe: { model: string, dimensions: number | null } | null }>}
  */
 export async function checkOllama(deps = {}) {
-  const { fetchImpl = defaultFetch, env = process.env } = deps;
+  const { fetchImpl = defaultFetch, env = process.env, indexModel } = deps;
   const name = 'ollama embeddings';
   const host = env.OLLAMA_HOST ?? 'http://localhost:11434';
   const base = host.replace(/\/$/, '');
   // Probe the model the runtime will actually use — presenting a nomic
   // probe as evidence for a custom NEUROMCP_EMBEDDING_MODEL diagnosed the
-  // wrong thing entirely (Codex round 3).
-  const model =
-    env.NEUROMCP_EMBEDDING_MODEL !== undefined && env.NEUROMCP_EMBEDDING_MODEL !== 'auto'
-      ? env.NEUROMCP_EMBEDDING_MODEL
-      : 'nomic-embed-text';
+  // wrong thing entirely (Codex round 3). In `auto` the runtime follows
+  // the model of the existing index (0.30.0); probing nomic there made a
+  // healthy bge-m3 install report "DIMENSION MISMATCH … broken" (0.30.3).
+  const model = resolveAutoOllamaModel(env.NEUROMCP_EMBEDDING_MODEL, indexModel);
   // Ollama tag semantics: an untagged name means the ':latest' tag, and a
   // configured value may itself carry a tag. Comparing bases only can never
   // match a tagged configuration (Codex round 4).
@@ -574,8 +653,7 @@ export function checkEmbeddingIndex(deps) {
         `DIMENSION MISMATCH: ${dbPath} holds a ${indexDim}-dim vector index but ${offer}. ` +
         `neuromcp 0.29.3+ starts in DEGRADED mode here (full-text search works, vector search off, ` +
         `new memories queued for backfill) — it does not crash. Recovery, pick one: ` +
-        `(a) restore the ${indexDim}-dim provider — for 768 start Ollama and \`ollama pull nomic-embed-text\`, ` +
-        `for 384 keep the ONNX fallback (\`npx neuromcp-download-model\`) and set NEUROMCP_EMBEDDING_PROVIDER=onnx; ` +
+        `(a) restore the ${indexDim}-dim provider — ${restoreHint(storedModels, indexDim)}; ` +
         `or (b) rebuild the index for the provider you want: \`npx neuromcp-reembed\` (dry run on a COPY) then ` +
         `\`npx neuromcp-reembed --apply\` (swaps it in, keeps a timestamped backup).`,
     };
@@ -857,7 +935,8 @@ export async function collectChecks() {
   checks.push(checkDatabase({ Database }));
 
   // 8-10. Daemon + embedding routes (network probes run concurrently)
-  const [daemonResult, ollamaOutcome] = await Promise.all([checkDaemon(), checkOllama()]);
+  const indexModel = readIndexModel({ Database });
+  const [daemonResult, ollamaOutcome] = await Promise.all([checkDaemon(), checkOllama({ indexModel })]);
   const ollamaResult = ollamaOutcome.result;
   const onnxResult = checkOnnxModel();
   checks.push(daemonResult, ollamaResult, onnxResult);

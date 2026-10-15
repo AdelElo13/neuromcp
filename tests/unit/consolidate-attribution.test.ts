@@ -123,7 +123,7 @@ def fake(args, *a, **k):
         return subprocess.CompletedProcess(args, 0, "\\x60\\x60\\x60markdown\\n## [x]\\n- Released v0.10.2.\\n\\x60\\x60\\x60\\n", "")
     return real(args, *a, **k)
 m.subprocess.run = fake
-m.audit_summary = lambda summary, batch, extra_sources="": (audits.append(extra_sources), (True, "ok"))[1]
+m.audit_summary_detailed = lambda summary, batch, extra_sources="": (audits.append(extra_sources), (True, "ok", [], False))[1]
 m.extract_facts = lambda *a, **k: []
 ok, done = m.consolidate_batch("mac-control-mcp", [pathlib.Path(${JSON.stringify(s)})], 1, 1)
 page = (m.WIKI_DIR / "projects" / "mac-control-mcp.md").read_text()
@@ -177,4 +177,60 @@ print(json.dumps({"calls": calls, "states": states}))`);
       expect(out.states[1]).toEqual({ processed: ['2026-10-14-000001.md'], partial: [] });   // runner's pending count stays correct
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+
+  it('detect_projects (legacy log): configured project dirs outside ~/projects, longest prefix wins', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      mkdirSync(join(home, '.neuromcp'), { recursive: true });
+      writeFileSync(join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+        'desktop-quatro': ['~/Documents/ChatGPT/Ken/duo', '~/Documents/ChatGPT/Ken/macos'],
+        'ken-docs': ['~/Documents/ChatGPT/Ken/duo/docs'],
+      }));
+      const ken = `${home}/Documents/ChatGPT/Ken`;
+      const out = py(home, `print(json.dumps([
+        m.detect_projects("---\\ndirectory: ${ken}/macos\\n---\\nUser messages: - test\\n"),
+        m.detect_projects("---\\ndirectory: ${ken}\\n---\\nFiles modified:\\n- ${ken}/duo/quatro.mjs\\n- ${ken}/duo/gemini.mjs\\n"),
+        m.detect_projects("---\\ndirectory: ${ken}\\n---\\nFiles modified:\\n- ${ken}/duo/docs/a.md\\n"),
+        m.detect_projects("---\\ndirectory: ${ken}\\n---\\nFiles modified:\\n- ${home}/Downloads/pikachu.3mf\\n- ${ken}/duo-old/x\\n"),
+      ]))`);
+      expect(out).toEqual([['desktop-quatro'], ['desktop-quatro'], ['ken-docs'], ['home']]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('a missing or malformed project-dirs.json changes nothing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      mkdirSync(join(home, '.neuromcp'), { recursive: true });
+      writeFileSync(join(home, '.neuromcp', 'project-dirs.json'), '{not json');
+      const out = py(home, `print(json.dumps(m.detect_projects("---\\ndirectory: ${home}/projects/refmatch\\n---\\n")))`);
+      expect(out).toEqual(['refmatch']);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('project-dirs: every occurrence is checked, ":" is a boundary, no left-glued match, footgun prefixes ignored', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      mkdirSync(join(home, '.neuromcp'), { recursive: true });
+      writeFileSync(join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+        'desktop-quatro': [' ~/Documents/ChatGPT/Ken/duo '],
+        'grab-all': ['~', '/', '~/'],
+      }));
+      const ken = `${home}/Documents/ChatGPT/Ken`;
+      const out = py(home, `
+d = m.load_project_dirs()
+print(json.dumps([
+  sorted({n for n, _ in d}),
+  m.configured_projects_in("ls ${ken}/duo-old && cd ${ken}/duo/x", d),
+  m.configured_projects_in("${ken}/duo:12: error", d),
+  m.configured_projects_in("/mnt${ken}/duo/x", d),
+  m.detect_projects("---\\ndirectory: ${home}/projects/refmatch\\n---\\n"),
+]))`);
+      expect(out[0]).toEqual(['desktop-quatro']);
+      expect(out[1]).toEqual(['desktop-quatro']);
+      expect(out[2]).toEqual(['desktop-quatro']);
+      expect(out[3]).toEqual([]);
+      expect(out[4]).toEqual(['refmatch']);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
 });
+

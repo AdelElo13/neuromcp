@@ -57,8 +57,57 @@ function writeOffsets(offsets) {
     fs.renameSync(tmp, OFFSETS_FILE);
   } catch {}
 }
+// Projects that live outside ~/projects: ~/.neuromcp/project-dirs.json maps
+// a wiki project name to directory prefixes, e.g.
+//   { "desktop-quatro": ["~/Documents/ChatGPT/Ken/duo", "~/Documents/ChatGPT/Ken/macos"] }
+// A path under a configured prefix (longest wins) belongs to that project.
+const PROJECT_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+let projectDirsCache;
+function validProjectDir(abs) {
+  // Same footgun guard as consolidate-sessions.py: no "/", no HOME itself,
+  // at least three path components.
+  return abs.startsWith("/") && abs.split("/").filter(Boolean).length >= 3 && abs !== HOME;
+}
+function projectDirs() {
+  if (projectDirsCache !== undefined) return projectDirsCache;
+  projectDirsCache = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(HOME, ".neuromcp", "project-dirs.json"), "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return projectDirsCache;
+    for (const [name, dirs] of Object.entries(raw)) {
+      if (!PROJECT_NAME_RE.test(name) || name.startsWith(".") || !Array.isArray(dirs)) continue;
+      for (const entry of dirs) {
+        if (typeof entry !== "string" || !entry.trim()) continue;
+        const d = entry.trim();
+        const abs = (d.startsWith("~/") ? path.join(HOME, d.slice(2)) : d).replace(/\/+$/, "");
+        if (!validProjectDir(abs)) continue;
+        const tilde = abs.startsWith(HOME + path.sep) ? "~" + abs.slice(HOME.length) : null;
+        projectDirsCache.push({ name, prefixes: tilde ? [abs, tilde] : [abs] });
+      }
+    }
+  } catch {}
+  return projectDirsCache;
+}
+const RIGHT_BOUNDARY = new Set([..." \t\"'`;&|)/:,]}>="]);
+const LEFT_BOUNDARY = new Set([..." \t\"'`=(:,[{<"]);
+function configuredProjectOf(p) {
+  let best = null;
+  for (const { name, prefixes } of projectDirs()) {
+    for (const prefix of prefixes) {
+      for (let i = p.indexOf(prefix); i !== -1; i = p.indexOf(prefix, i + 1)) {
+        if (i > 0 && !LEFT_BOUNDARY.has(p[i - 1])) continue;
+        const next = p[i + prefix.length];
+        if (next !== undefined && !RIGHT_BOUNDARY.has(next)) continue;
+        if (!best || prefix.length > best.len) best = { name, len: prefix.length };
+      }
+    }
+  }
+  return best ? best.name : null;
+}
 function projectOf(p) {
   if (typeof p !== "string") return null;
+  const configured = configuredProjectOf(p);
+  if (configured) return configured;
   let prefix = PROJECTS_ROOT + path.sep;
   let i = p.indexOf(prefix);
   if (i === -1) { prefix = "~/projects/"; i = p.indexOf(prefix); }        // shell commands use ~
