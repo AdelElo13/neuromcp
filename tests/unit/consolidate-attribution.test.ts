@@ -177,4 +177,34 @@ print(json.dumps({"calls": calls, "states": states}))`);
       expect(out.states[1]).toEqual({ processed: ['2026-10-14-000001.md'], partial: [] });   // runner's pending count stays correct
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+
+  it('detect_projects (legacy log): configured project dirs outside ~/projects, longest prefix wins', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      mkdirSync(join(home, '.neuromcp'), { recursive: true });
+      writeFileSync(join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+        'desktop-quatro': ['~/Documents/ChatGPT/Ken/duo', '~/Documents/ChatGPT/Ken/macos'],
+        'ken-docs': ['~/Documents/ChatGPT/Ken/duo/docs'],
+      }));
+      const ken = `${home}/Documents/ChatGPT/Ken`;
+      const out = py(home, `print(json.dumps([
+        m.detect_projects("---\\ndirectory: ${ken}/macos\\n---\\nUser messages: - test\\n"),
+        m.detect_projects("---\\ndirectory: ${ken}\\n---\\nFiles modified:\\n- ${ken}/duo/quatro.mjs\\n- ${ken}/duo/gemini.mjs\\n"),
+        m.detect_projects("---\\ndirectory: ${ken}\\n---\\nFiles modified:\\n- ${ken}/duo/docs/a.md\\n"),
+        m.detect_projects("---\\ndirectory: ${ken}\\n---\\nFiles modified:\\n- ${home}/Downloads/pikachu.3mf\\n- ${ken}/duo-old/x\\n"),
+      ]))`);
+      expect(out).toEqual([['desktop-quatro'], ['desktop-quatro'], ['ken-docs'], ['home']]);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('a missing or malformed project-dirs.json changes nothing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      mkdirSync(join(home, '.neuromcp'), { recursive: true });
+      writeFileSync(join(home, '.neuromcp', 'project-dirs.json'), '{not json');
+      const out = py(home, `print(json.dumps(m.detect_projects("---\\ndirectory: ${home}/projects/refmatch\\n---\\n")))`);
+      expect(out).toEqual(['refmatch']);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
 });
+

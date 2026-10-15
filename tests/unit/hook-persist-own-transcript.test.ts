@@ -105,4 +105,34 @@ describe('neuromcp-persist hook — summary from its own transcript', () => {
     runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: home });
     expect(logs()[0]).toMatch(/^Projects: agentrank$/m);
   });
+
+  it('a project outside ~/projects is named via ~/.neuromcp/project-dirs.json (longest prefix, boundary-safe)', () => {
+    fs.writeFileSync(path.join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+      'desktop-quatro': ['~/Documents/ChatGPT/Ken/duo', `${home}/Documents/ChatGPT/Ken/macos/`],
+      'bad name!': ['~/Documents'],
+    }));
+    const ken = `${home}/Documents/ChatGPT/Ken`;
+    fs.writeFileSync(transcript,
+      line({ type: 'user', sessionId, cwd: ken, message: { role: 'user', content: 'fix the dispatch' } }) +
+      line({ type: 'assistant', sessionId, cwd: ken, message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Edit', input: { file_path: `${ken}/duo/quatro.mjs` } },
+        { type: 'tool_use', name: 'Edit', input: { file_path: `${ken}/duo-old/notes.md` } },
+      ] } }));
+    runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: ken });
+    expect(logs()[0]).toMatch(/^Projects: desktop-quatro$/m);
+  });
+
+  it('work in the Ken root that touches no configured dir names no project (stays home)', () => {
+    fs.writeFileSync(path.join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+      'desktop-quatro': ['~/Documents/ChatGPT/Ken/duo'],
+    }));
+    const ken = `${home}/Documents/ChatGPT/Ken`;
+    fs.writeFileSync(transcript,
+      line({ type: 'user', sessionId, cwd: ken, message: { role: 'user', content: 'maak een clipper hoes voor u1' } }) +
+      line({ type: 'assistant', sessionId, cwd: ken, message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Edit', input: { file_path: `${home}/Downloads/pikachu-u1.3mf` } }] } }));
+    runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: ken });
+    expect(logs()[0]).not.toMatch(/^Projects:/m);
+  });
 });
+

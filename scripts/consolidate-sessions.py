@@ -154,6 +154,59 @@ DIRECTORY_RE = re.compile(r"^directory:\s*(.+)$", re.M)
 PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
 
 
+PROJECT_DIRS_FILE = NEUROMCP_DIR / "project-dirs.json"
+
+
+def load_project_dirs() -> list[tuple[str, list[str]]]:
+    """Projects outside ~/projects (same file and rules as the persist hook):
+    {"name": ["~/some/dir", ...]} -> [(name, [absolute, ~-form]), ...]."""
+    try:
+        raw = json.loads(PROJECT_DIRS_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    out: list[tuple[str, list[str]]] = []
+    if not isinstance(raw, dict):
+        return out
+    for name, dirs in raw.items():
+        if not isinstance(name, str) or not PROJECT_NAME_RE.match(name) or name.startswith("."):
+            continue
+        if not isinstance(dirs, list):
+            continue
+        for d in dirs:
+            if not isinstance(d, str) or not d.strip():
+                continue
+            absolute = str(HOME / d[2:]) if d.startswith("~/") else d
+            absolute = absolute.rstrip("/")
+            forms = [absolute]
+            if absolute.startswith(str(HOME) + "/"):
+                forms.append("~" + absolute[len(str(HOME)):])
+            out.append((name, forms))
+    return out
+
+
+_BOUNDARY_RE = re.compile(r"[\s\"'`;&|)/]")
+
+
+def configured_projects_in(text: str, dirs: list[tuple[str, list[str]]]) -> list[str]:
+    """Every configured-project occurrence in `text` (longest prefix per hit)."""
+    hits: list[str] = []
+    for line in text.splitlines():
+        best: tuple[int, str] | None = None
+        for name, forms in dirs:
+            for prefix in forms:
+                i = line.find(prefix)
+                if i == -1:
+                    continue
+                nxt = line[i + len(prefix): i + len(prefix) + 1]
+                if nxt and not _BOUNDARY_RE.match(nxt):
+                    continue
+                if best is None or len(prefix) > best[0]:
+                    best = (len(prefix), name)
+        if best:
+            hits.append(best[1])
+    return hits
+
+
 def detect_projects(content: str) -> list[str]:
     """Projects a session worked on.
 
@@ -170,12 +223,16 @@ def detect_projects(content: str) -> list[str]:
         names = sorted(n for n in names if n and PROJECT_NAME_RE.match(n) and not n.startswith("."))
         if names:
             return names
+    dirs = load_project_dirs()
     directory = DIRECTORY_RE.search(body)
     if directory:
+        configured = configured_projects_in(directory.group(1).strip() + "/", dirs)
+        if configured:
+            return [configured[0]]
         in_dir = PROJECT_PATH_RE.findall(directory.group(1).strip() + "/")
         if in_dir:
             return [in_dir[0]]
-    matches = PROJECT_PATH_RE.findall(body)
+    matches = PROJECT_PATH_RE.findall(body) + configured_projects_in(body, dirs)
     if matches:
         return [Counter(matches).most_common(1)[0][0]]
     return ["home"]
