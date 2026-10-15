@@ -3,6 +3,46 @@
 All notable changes to **neuromcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.30.3] — 2026-10-15
+
+### Fixed
+
+- **FIX: one over-stated line threw away a whole consolidation batch.** The
+  auditor rejected the entire summary for a single unsupported line ("calling
+  u1 a printer is an inference"), every retry regenerated all lines with new
+  small errors, and after three tries every fact of the batch was lost — 3000+
+  batches sat in `review-queue/exhausted/`. The lines the auditor names are
+  now removed (with their sub-bullets) and the remainder is **re-audited**;
+  only an approved remainder reaches the wiki. Pruning is refused when a claim
+  cannot be located clearly or more than half of the lines would go; then the
+  old retry path runs. Removed lines are kept in `review-queue/pruned/`.
+- **FIX: a claude CLI outage silently marked sessions as processed.** When
+  every attempt failed before a real audit verdict (CLI exit, timeout, empty
+  output, auditor unavailable) the batch was still exhausted as terminal and
+  its sessions were never summarised. During a launchd "Not logged in" outage
+  this happened thousands of times. Such batches now stay pending.
+- **FIX: `neuromcp-doctor` reported a healthy bge-m3 install as broken.** In
+  `auto` it probed a hardcoded nomic-embed-text, while the runtime follows the
+  model of the existing index; result: "DIMENSION MISMATCH … broken (exit 2)".
+  The doctor now resolves the model exactly like the runtime, and its
+  recovery advice names the model that built the index.
+
+### Added
+
+- **Projects outside `~/projects`.** `~/.neuromcp/project-dirs.json` maps a
+  wiki project to directory prefixes, e.g.
+  `{"desktop-quatro": ["~/Documents/ChatGPT/Ken/duo"]}`. The persist hook and
+  consolidation file work under a configured prefix (longest prefix wins)
+  under that project; work beside it in the same parent directory keeps its
+  old attribution.
+- **`scripts/reprocess-exhausted.py`** re-audits batches exhausted before this
+  release. `--estimate` (default) makes no model calls and reports how many
+  files are empty, duplicates, already in the wiki, without sources, or to
+  process, with the expected number of model calls. `--pilot N` writes results
+  to `review-queue/reprocess-pilot/` without touching the wiki. `--apply`
+  appends only re-audited sections. Exhausted batches now record their source
+  sessions, so future ones can be re-audited exactly.
+
 ## [0.30.2] — 2026-10-15
 
 ### Fixed

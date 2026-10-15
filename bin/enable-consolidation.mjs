@@ -120,7 +120,7 @@ if (dryRun) {
   process.exit(0);
 }
 mkdirSync(SCRIPTS_DIR, { recursive: true });
-for (const name of ['consolidate-sessions.py', 'run-consolidation.sh']) {
+for (const name of ['consolidate-sessions.py', 'run-consolidation.sh', 'reprocess-exhausted.py']) {
   const src = join(REPO_SCRIPTS, name);
   const dst = join(SCRIPTS_DIR, name);
   if (!existsSync(src)) fail(`missing source: ${src}`);
