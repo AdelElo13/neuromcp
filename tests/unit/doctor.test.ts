@@ -16,6 +16,9 @@ import {
   terminateChild,
   runAuditNetwork,
   checkHooks,
+  readIndexModel,
+  resolveAutoOllamaModel,
+  restoreHint,
 } from '../../bin/doctor.mjs';
 import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -977,5 +980,87 @@ describe('checkHooks', () => {
     });
     expect(r.status).toBe('ok');
     expect(r.info).toMatch(/edited/);
+  });
+});
+
+describe('auto embedding model follows the index (0.30.3 false "broken" on bge-m3)', () => {
+  // A user who re-embedded to bge-m3 (0.30.0 index-aware runtime) got
+  // "✗ embedding index DIMENSION MISMATCH … broken (exit 2)" from the doctor
+  // while the daemon happily served bge-m3: the doctor probed a hardcoded
+  // nomic-embed-text in auto mode.
+  function tagsThenEmbed(models: string[], dims: number) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/api/tags')) {
+        return jsonResponse({ models: models.map((name) => ({ name })) });
+      }
+      return jsonResponse({ embeddings: [Array.from({ length: dims }, () => 0.1)] });
+    });
+  }
+
+  it('resolveAutoOllamaModel mirrors the runtime: explicit > index model > nomic', () => {
+    expect(resolveAutoOllamaModel(undefined, 'bge-m3')).toBe('bge-m3');
+    expect(resolveAutoOllamaModel('auto', 'bge-m3')).toBe('bge-m3');
+    expect(resolveAutoOllamaModel('', 'bge-m3')).toBe('bge-m3');
+    expect(resolveAutoOllamaModel('mxbai-embed-large', 'bge-m3')).toBe('mxbai-embed-large');
+    expect(resolveAutoOllamaModel(undefined, undefined)).toBe('nomic-embed-text');
+    expect(resolveAutoOllamaModel(undefined, 'bge-small-en-v1.5')).toBe('nomic-embed-text');
+    expect(resolveAutoOllamaModel(undefined, 'text-embedding-3-small')).toBe('nomic-embed-text');
+  });
+
+  it('checkOllama probes the index model in auto mode', async () => {
+    const fetchImpl = tagsThenEmbed(['nomic-embed-text:latest', 'bge-m3:latest'], 1024);
+    const { result, probe } = await checkOllama({ fetchImpl, env: {}, indexModel: 'bge-m3' });
+    expect(result.status).toBe('ok');
+    expect(probe).toEqual({ model: 'bge-m3', dimensions: 1024 });
+  });
+
+  it('a bge-m3 index with bge-m3 installed is healthy end to end (route + index)', async () => {
+    const fetchImpl = tagsThenEmbed(['nomic-embed-text:latest', 'bge-m3:latest'], 1024);
+    const { result, probe } = await checkOllama({ fetchImpl, env: {}, indexModel: 'bge-m3' });
+    const onnxResult = { name: 'onnx fallback model', status: 'ok', info: 'present' };
+    const dir = mkdtempSync(join(tmpdir(), 'nmcp-doctor-bge-'));
+    try {
+      const dbPath = join(dir, 'memory.db');
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(dbPath);
+      db.prepare('CREATE TABLE memories (id TEXT, is_deleted INTEGER, embedding_model TEXT)').run();
+      db.prepare('CREATE TABLE memories_vec (embedding float[1024])').run();
+      const insert = db.prepare('INSERT INTO memories VALUES (?, 0, ?)');
+      insert.run('a', 'bge-m3');
+      insert.run('b', 'bge-m3');
+      db.close();
+      const env = { NEUROMCP_DB_PATH: dbPath };
+      expect(readIndexModel({ Database, env })).toBe('bge-m3');
+      const index = checkEmbeddingIndex({ Database, ollamaProbe: probe, onnxResult, env });
+      expect(result.status).toBe('ok');
+      expect(index.status).toBe('ok');
+      expect(index.info).toMatch(/matched by ollama bge-m3/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('readIndexModel gives no model for mixed, empty or missing indexes (runtime sets no requireModel)', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const dir = mkdtempSync(join(tmpdir(), 'nmcp-doctor-idx-'));
+    try {
+      const dbPath = join(dir, 'memory.db');
+      const db = new Database(dbPath);
+      db.prepare('CREATE TABLE memories (id TEXT, is_deleted INTEGER, embedding_model TEXT)').run();
+      db.prepare("INSERT INTO memories VALUES ('a', 0, 'bge-m3'), ('b', 0, 'nomic-embed-text'), ('c', 1, 'x'), ('d', 0, 'none')").run();
+      db.close();
+      expect(readIndexModel({ Database, env: { NEUROMCP_DB_PATH: dbPath } })).toBeUndefined();
+      expect(readIndexModel({ Database, env: { NEUROMCP_DB_PATH: join(dir, 'missing.db') } })).toBeUndefined();
+      expect(readIndexModel({ Database: null, env: {} })).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('recovery advice names the model that built the index', () => {
+    expect(restoreHint([{ embedding_model: 'bge-m3' }], 1024)).toMatch(/ollama pull bge-m3/);
+    expect(restoreHint([], 768)).toMatch(/ollama pull nomic-embed-text/);
+    expect(restoreHint([{ embedding_model: 'bge-small-en-v1.5' }], 384)).toMatch(/NEUROMCP_EMBEDDING_PROVIDER=onnx/);
+    expect(restoreHint([], 1024)).not.toMatch(/nomic/);
   });
 });
