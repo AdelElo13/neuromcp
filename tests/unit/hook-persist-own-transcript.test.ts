@@ -134,5 +134,30 @@ describe('neuromcp-persist hook — summary from its own transcript', () => {
     runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: ken });
     expect(logs()[0]).not.toMatch(/^Projects:/m);
   });
+
+  it('project-dirs in the hook: a later boundary-correct path counts, footgun prefixes and arrays are ignored', () => {
+    fs.writeFileSync(path.join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+      'desktop-quatro': ['~/Documents/ChatGPT/Ken/duo'],
+      'grab-all': ['~', '/'],
+    }));
+    const ken = `${home}/Documents/ChatGPT/Ken`;
+    fs.writeFileSync(transcript,
+      line({ type: 'user', sessionId, cwd: ken, message: { role: 'user', content: 'tag it' } }) +
+      line({ type: 'assistant', sessionId, cwd: ken, message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Bash', input: { command: `ls ${ken}/duo-old && cd ${ken}/duo && git tag v1.0.0` } }] } }));
+    runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: ken });
+    expect(logs()[0]).toMatch(/^Projects: desktop-quatro$/m);
+  });
+
+  it('a project-dirs.json that is an array is ignored', () => {
+    fs.writeFileSync(path.join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify([['x', ['~/Documents/ChatGPT/Ken/duo']]]));
+    const ken = `${home}/Documents/ChatGPT/Ken`;
+    fs.writeFileSync(transcript,
+      line({ type: 'user', sessionId, cwd: ken, message: { role: 'user', content: 'edit' } }) +
+      line({ type: 'assistant', sessionId, cwd: ken, message: { role: 'assistant', content: [
+        { type: 'tool_use', name: 'Edit', input: { file_path: `${ken}/duo/a.mjs` } }] } }));
+    runHook(home, { transcript_path: transcript, session_id: sessionId, cwd: ken });
+    expect(logs()[0]).not.toMatch(/^Projects:/m);
+  });
 });
 

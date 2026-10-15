@@ -63,33 +63,43 @@ function writeOffsets(offsets) {
 // A path under a configured prefix (longest wins) belongs to that project.
 const PROJECT_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 let projectDirsCache;
+function validProjectDir(abs) {
+  // Same footgun guard as consolidate-sessions.py: no "/", no HOME itself,
+  // at least three path components.
+  return abs.startsWith("/") && abs.split("/").filter(Boolean).length >= 3 && abs !== HOME;
+}
 function projectDirs() {
   if (projectDirsCache !== undefined) return projectDirsCache;
   projectDirsCache = [];
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(HOME, ".neuromcp", "project-dirs.json"), "utf8"));
-    for (const [name, dirs] of Object.entries(raw || {})) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return projectDirsCache;
+    for (const [name, dirs] of Object.entries(raw)) {
       if (!PROJECT_NAME_RE.test(name) || name.startsWith(".") || !Array.isArray(dirs)) continue;
-      for (const d of dirs) {
-        if (typeof d !== "string" || !d.trim()) continue;
-        const abs = d.startsWith("~/") ? path.join(HOME, d.slice(2)) : d;
-        const clean = abs.replace(/\/+$/, "");
-        const tilde = clean.startsWith(HOME + path.sep) ? "~" + clean.slice(HOME.length) : null;
-        projectDirsCache.push({ name, prefixes: tilde ? [clean, tilde] : [clean] });
+      for (const entry of dirs) {
+        if (typeof entry !== "string" || !entry.trim()) continue;
+        const d = entry.trim();
+        const abs = (d.startsWith("~/") ? path.join(HOME, d.slice(2)) : d).replace(/\/+$/, "");
+        if (!validProjectDir(abs)) continue;
+        const tilde = abs.startsWith(HOME + path.sep) ? "~" + abs.slice(HOME.length) : null;
+        projectDirsCache.push({ name, prefixes: tilde ? [abs, tilde] : [abs] });
       }
     }
   } catch {}
   return projectDirsCache;
 }
+const RIGHT_BOUNDARY = new Set([..." \t\"'`;&|)/:,]}>="]);
+const LEFT_BOUNDARY = new Set([..." \t\"'`=(:,[{<"]);
 function configuredProjectOf(p) {
   let best = null;
   for (const { name, prefixes } of projectDirs()) {
     for (const prefix of prefixes) {
-      const i = p.indexOf(prefix);
-      if (i === -1) continue;
-      const next = p[i + prefix.length];
-      if (next !== undefined && next !== "/" && !/[\s"'`;&|)]/.test(next)) continue; // boundary
-      if (!best || prefix.length > best.len) best = { name, len: prefix.length };
+      for (let i = p.indexOf(prefix); i !== -1; i = p.indexOf(prefix, i + 1)) {
+        if (i > 0 && !LEFT_BOUNDARY.has(p[i - 1])) continue;
+        const next = p[i + prefix.length];
+        if (next !== undefined && !RIGHT_BOUNDARY.has(next)) continue;
+        if (!best || prefix.length > best.len) best = { name, len: prefix.length };
+      }
     }
   }
   return best ? best.name : null;

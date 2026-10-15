@@ -545,6 +545,7 @@ npx neuromcp-enable-consolidation
 **What it installs:**
 - `~/.neuromcp/scripts/consolidate-sessions.py` — the worker
 - `~/.neuromcp/scripts/run-consolidation.sh` — threshold-guarded runner
+- `~/.neuromcp/scripts/reprocess-exhausted.py` — re-audits exhausted batches (manual)
 - **macOS**: a launchd agent that fires every 4 hours (`com.neuromcp.consolidate`)
 - **Linux**: prints a cron snippet to add manually
 
@@ -572,7 +573,7 @@ npx neuromcp-enable-consolidation
 
 Sessions that edit files (or run release commands) under a configured prefix are filed under that project; the longest prefix wins. Work elsewhere in the same parent directory keeps its old attribution.
 
-**Recovering batches exhausted before 0.30.3.** `python3 ~/.neuromcp/scripts/reprocess-exhausted.py` (or `scripts/` in the repo) reports, without any model call, how many exhausted batches can be re-audited and what that costs. `--pilot N` re-audits N of them into `review-queue/reprocess-pilot/` without touching the wiki; `--apply` writes only re-audited sections.
+**Recovering exhausted batches.** `python3 ~/.neuromcp/scripts/reprocess-exhausted.py` reports, without any model call, how many exhausted batches can be re-audited and what that costs. `--pilot N` re-audits N of them into `review-queue/reprocess-pilot/` without touching the wiki; `--apply` writes only re-audited sections. Batches exhausted before 0.30.3 have no recorded sources and need `--accept-guessed-sources` (guessed provenance, listed in the section); recovered sections never create facts.
 
 **Atomic facts with temporal supersession.** After a summary is approved, it is also distilled into short standalone facts and stored as `category='fact'` rows with `valid_from=today`. When a new fact is Jaccard-similar to an existing one in the same project, Haiku decides whether NEW supersedes OLD — if yes, the old row gets `superseded_by_id` and `valid_to` set. Retrieval defaults to current facts only (`superseded_by_id IS NULL`), so outdated conclusions never resurface.
 

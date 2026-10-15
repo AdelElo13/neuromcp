@@ -84,6 +84,55 @@ print(json.dumps({"pruned": pruned, "unmatched": unmatched}))`);
     expect(out.pruned).not.toContain('u1');
   });
 
+  it('never deletes a line whose version differs from the flagged claim (v1.2.5 vs v1.2.3)', () => {
+    const summ = '## [2026-10-15]\n- Released v1.2.3 to npm after review.\n- Docs were regenerated.\n- CI passed on main.';
+    const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(summ)}, ["Released v1.2.5 to npm"])))`);
+    expect(out[0]).toBeNull();
+    expect(out[2]).toEqual(['Released v1.2.5 to npm']);
+  });
+
+  it('treats two equally matching lines as ambiguous instead of deleting the first', () => {
+    const summ = '## [2026-10-15]\n- Server restarts the worker queue nightly.\n- Server restarts the worker queue on deploy.\n- Logs rotate weekly.\n- Backups run daily.';
+    const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(summ)}, ["Server restarts the worker queue"])))`);
+    expect(out[0]).toBeNull();
+  });
+
+  it('a "(this is a label, not a claim)" suffix does not let a flagged bullet escape', () => {
+    const summ = '## [2026-10-15]\n- Deployed to prod on Friday (this is a label, not a claim).\n- Tests ran green on CI.\n- Docs regenerated for the tools.';
+    const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(summ)}, ["Deployed to prod on Friday (this is a label, not a claim)"])))`);
+    expect(out[0]).not.toBeNull();
+    expect(out[0]).not.toContain('prod');
+  });
+
+  it('a header carrying extra claims is content, the bare header is not', () => {
+    const out = py(home, `print(json.dumps([
+      m._is_claim_line("## [2026-10-14] Auth rewrite shipped, CVE-2026-1 fixed"),
+      m._is_claim_line("## [2026-10-14 batch 2/5]"),
+      m._is_claim_line("## [2026-10-14] (recovered 2026-10-15, re-audited)"),
+      m._is_claim_line("**Print job:**"),
+      m._is_claim_line("**Released v2.0:**")]))`);
+    expect(out).toEqual([true, false, false, false, true]);
+  });
+
+  it('removes indented children of a pruned bullet also after a blank line', () => {
+    const summ = '## [2026-10-15]\n- Cache layer rewritten for the worker pool.\n\n  - child detail about cache eviction\n- Tests ran green on CI.\n- Docs regenerated for the tools.';
+    const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(summ)}, ["Cache layer rewritten for the worker pool"])))`);
+    expect(out[0]).not.toContain('child detail');
+  });
+
+  it('flagged_claims_remain catches a flagged claim still present after pruning', () => {
+    const out = py(home, `print(json.dumps(m.flagged_claims_remain("## [x]\\n- Released v1.2.3 to npm today.\\n- Docs ok.", ["Released v1.2.3 to npm", "Something unrelated entirely here"])))`);
+    expect(out).toEqual(['Released v1.2.3 to npm']);
+  });
+
+  it('facts_supported_by drops facts not grounded in the audited text', () => {
+    const out = py(home, `print(json.dumps([f["content"] for f in m.facts_supported_by([
+      {"content": "neuromcp 0.30.3 prunes unsupported lines"},
+      {"content": "neuromcp 0.31.0 adds a GUI dashboard"},
+      {"content": "The wiki uses PostgreSQL replication"}], "- neuromcp 0.30.3 prunes unsupported lines and re-audits.")]))`);
+    expect(out).toEqual(['neuromcp 0.30.3 prunes unsupported lines']);
+  });
+
   it('refuses one-word claims (too ambiguous to locate)', () => {
     const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(SUMMARY)}, ["u1"])))`);
     expect(out[0]).toBeNull();
@@ -106,7 +155,7 @@ describe('consolidate_batch with a fake claude CLI', () => {
     writeFileSync(session, '---\ndate: 2026-10-15\n---\nUser messages:\n- maak een tweede versie voor u1\n- fix the dispatch (readTurnOutcome)\n');
     // Fake `claude -p`: generator -> SUMMARY, auditor -> verdict by FAKE_MODE, facts -> [].
     writeFileSync(join(bin, 'claude'), `#!/usr/bin/env python3
-import sys, json, os
+import sys, json, os, re
 prompt = sys.argv[-1]
 mode = os.environ.get("FAKE_MODE", "prune")
 with open(os.environ["FAKE_LOG"], "a") as f:
@@ -116,9 +165,13 @@ if "memory consolidation agent" in prompt and mode == "cli-down":
 if "memory consolidation agent" in prompt:
     print("\`\`\`markdown\\n" + ${JSON.stringify(SUMMARY)} + "\\n\`\`\`")
 elif "strict fact-checker" in prompt:
-    summary = prompt.split("<<<SUMMARY>>>", 1)[1]
+    summary = re.split(r"<<<SUMMARY-[0-9a-f]+>>>", prompt, maxsplit=1)[1]
     if mode == "infra":
         print("not json at all")
+    elif mode == "approved-but-flagged" and "u1 printer" in summary:
+        print(json.dumps({"approved": True, "unsupported": ["asked for a second version for the u1 printer"], "note": "ok?"}))
+    elif mode == "approved-but-flagged":
+        print(json.dumps({"approved": True, "unsupported": [], "note": "ok"}))
     elif "u1 printer" in summary or mode == "never":
         claim = "asked for a second version for the u1 printer" if mode != "never" else "Something no line says at all here"
         print(json.dumps({"approved": False, "unsupported": [claim], "note": "unsupported"}))
@@ -173,6 +226,28 @@ print(json.dumps({"ok": ok, "done": len(done)}))`, env(mode));
     expect(out).toEqual({ ok: false, done: 0 });
     expect(existsSync(join(home, '.neuromcp', 'review-queue', 'exhausted'))).toBe(false);
     expect(existsSync(join(home, '.neuromcp', 'wiki', 'projects', 'demo.md'))).toBe(false);
+  });
+
+  it('a batch with no audit verdict goes terminal only after 3 runs in a row (no endless cost)', () => {
+    const out = py(home, `
+res = []
+for _ in range(3):
+    ok, done = m.consolidate_batch("demo", [pathlib.Path(${JSON.stringify(session)})], 1, 1)
+    res.append(len(done))
+print(json.dumps(res))`, env('cli-down'));
+    expect(out).toEqual([0, 0, 1]);
+    const ex = readdirSync(join(home, '.neuromcp', 'review-queue', 'exhausted'));
+    expect(readFileSync(join(home, '.neuromcp', 'review-queue', 'exhausted', ex[0]), 'utf8')).toMatch(/no audit verdict in 3 consecutive runs/);
+  });
+
+  it('approved=true WITH unsupported claims is treated as a rejection (and pruned)', () => {
+    const out = py(home, `
+ok, done = m.consolidate_batch("demo", [pathlib.Path(${JSON.stringify(session)})], 1, 1)
+print(json.dumps({"ok": ok}))`, env('approved-but-flagged'));
+    // the contradictory first verdict must not write the flagged line; it is pruned
+    const page = readFileSync(join(home, '.neuromcp', 'wiki', 'projects', 'demo.md'), 'utf8');
+    expect(out.ok).toBe(true);
+    expect(page).not.toContain('u1 printer');
   });
 });
 

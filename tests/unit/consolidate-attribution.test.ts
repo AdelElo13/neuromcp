@@ -206,5 +206,31 @@ print(json.dumps({"calls": calls, "states": states}))`);
       expect(out).toEqual(['refmatch']);
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+
+  it('project-dirs: every occurrence is checked, ":" is a boundary, no left-glued match, footgun prefixes ignored', () => {
+    const home = mkdtempSync(join(tmpdir(), 'nmcp-attr-'));
+    try {
+      mkdirSync(join(home, '.neuromcp'), { recursive: true });
+      writeFileSync(join(home, '.neuromcp', 'project-dirs.json'), JSON.stringify({
+        'desktop-quatro': [' ~/Documents/ChatGPT/Ken/duo '],
+        'grab-all': ['~', '/', '~/'],
+      }));
+      const ken = `${home}/Documents/ChatGPT/Ken`;
+      const out = py(home, `
+d = m.load_project_dirs()
+print(json.dumps([
+  sorted({n for n, _ in d}),
+  m.configured_projects_in("ls ${ken}/duo-old && cd ${ken}/duo/x", d),
+  m.configured_projects_in("${ken}/duo:12: error", d),
+  m.configured_projects_in("/mnt${ken}/duo/x", d),
+  m.detect_projects("---\\ndirectory: ${home}/projects/refmatch\\n---\\n"),
+]))`);
+      expect(out[0]).toEqual(['desktop-quatro']);
+      expect(out[1]).toEqual(['desktop-quatro']);
+      expect(out[2]).toEqual(['desktop-quatro']);
+      expect(out[3]).toEqual([]);
+      expect(out[4]).toEqual(['refmatch']);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
 });
 

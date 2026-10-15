@@ -3,7 +3,8 @@
  * neuromcp enable-consolidation — install the auto-consolidation pipeline.
  *
  * What this does:
- *  1. Copies scripts/consolidate-sessions.py + run-consolidation.sh to ~/.neuromcp/scripts/
+ *  1. Copies scripts/consolidate-sessions.py, run-consolidation.sh and
+ *     reprocess-exhausted.py to ~/.neuromcp/scripts/
  *  2. (macOS) Renders the launchd plist template with real paths + PATH + HOME
  *     and registers it with launchctl so it fires every 4h by default.
  *  3. (Linux) Prints a cron snippet the user can add manually.

@@ -40,11 +40,11 @@ describe('reprocess-exhausted.py', () => {
     writeFileSync(join(ex, '2026-09-21T09-00-00_demo_batch3.md'),
       '# Rejected consolidation — demo batch 3\n\n> REJECTED — x\n\n---\n\n## [2026-09-21]\n- Existing line about readOnlyBridge and quatro.mjs config.\n');
     writeFileSync(join(bin, 'claude'), `#!/usr/bin/env python3
-import sys, json, os
+import sys, json, os, re
 p = sys.argv[-1]
 with open(os.environ["FAKE_LOG"], "a") as f: f.write("CALL\\n")
 if "strict fact-checker" in p:
-    s = p.split("<<<SUMMARY>>>", 1)[1]
+    s = re.split(r"<<<SUMMARY-[0-9a-f]+>>>", p, maxsplit=1)[1]
     if "production" in s:
         print(json.dumps({"approved": False, "unsupported": ["The deploy to production succeeded on Friday"], "note": "no deploy in sources"}))
     else:
@@ -68,39 +68,84 @@ else:
   const calls = () => (existsSync(join(home, 'calls.log')) ? readFileSync(join(home, 'calls.log'), 'utf8').trim().split('\n').length : 0);
 
   it('--estimate classifies without a single model call', () => {
-    const out = run('--estimate');
+    const out = run('--estimate', '--accept-guessed-sources');
     expect(out).toMatch(/exhausted files: 4/);
     expect(out).toMatch(/process\s+1/);
     expect(out).toMatch(/skip_duplicate\s+1/);
-    expect(out).toMatch(/skip_empty\s+1/);
+    expect(out).toMatch(/skip_outage_no_summary\s+1/);
     expect(out).toMatch(/skip_in_wiki\s+1/);
-    expect(out).toMatch(/estimated model calls: 2–3/);
+    expect(out).toMatch(/estimated model calls: 1–2/);
     expect(calls()).toBe(0);
   });
 
   it('--pilot prunes and re-audits, writes to reprocess-pilot/, never the wiki', () => {
     const before = readFileSync(join(wiki, 'demo.md'), 'utf8');
-    const out = run('--pilot', '5');
+    const out = run('--pilot', '5', '--accept-guessed-sources');
     expect(out).toMatch(/recovered — pruned 1 line/);
     expect(readFileSync(join(wiki, 'demo.md'), 'utf8')).toBe(before);
     const pilot = join(home, '.neuromcp', 'review-queue', 'reprocess-pilot');
     const [f] = readdirSync(pilot);
     const body = readFileSync(join(pilot, f), 'utf8');
-    expect(body).toContain('Sources: 2026-09-20-101010.md');   // the "other" project session is not a source
+    expect(body).toContain('<!-- guessed sources: 2026-09-20-101010.md -->');   // the "other" project session is not a source
     expect(body).toContain('dispatch recovery');
     const [header, section] = body.split('\n---\n');
     expect(header).toMatch(/pruned 1 line\(s\): - The deploy to production/);   // transparency
+    expect(section).toContain('<!-- guessed sources:');
     expect(section).not.toContain('production');                                 // what the wiki would get
     expect(section).toMatch(/recovered \d{4}-\d{2}-\d{2}, re-audited/);
     expect(readdirSync(ex).filter((n) => n.endsWith('.md'))).toHaveLength(4);   // nothing moved
   });
 
   it('--apply appends the re-audited section and moves the file to recovered/', () => {
-    run('--apply');
+    run('--apply', '--accept-guessed-sources');
     const page = readFileSync(join(wiki, 'demo.md'), 'utf8');
     expect(page).toContain('Release v1.2.3 was prepared.');
     expect(page).not.toContain('production');
     expect(readdirSync(join(ex, 'recovered'))).toEqual(['2026-09-21T04-00-00_demo_batch1.md']);
     expect(readdirSync(ex).filter((n) => n.endsWith('.md'))).toHaveLength(3);
   });
+
+  it('without --accept-guessed-sources, pre-0.30.3 files (no Source lines) are not processed', () => {
+    const out = run('--estimate');
+    expect(out).toMatch(/process\s+0/);
+    expect(out).toMatch(/skip_needs_guessed_sources\s+2/);   // original + its older duplicate
+  });
+
+  it('files with recorded Source lines use exactly those, never guessed ones', () => {
+    writeFileSync(join(ex, '2026-09-22T05-00-00_demo_batch9.md'),
+      '# Rejected consolidation — demo batch 9\nSource: 2026-09-20-101010.md\nSource: ../../etc/passwd\n\n> REJECTED — x\n\n---\n\n## [2026-09-22]\n- Release v1.2.3 was prepared for gemini.mjs.\n');
+    const out = run('--pilot', '1');
+    expect(out).toMatch(/demo_batch9\.md: recovered/);
+    const body = readFileSync(join(home, '.neuromcp', 'review-queue', 'reprocess-pilot', '2026-09-22T05-00-00_demo_batch9.md'), 'utf8');
+    expect(body).toContain('<!-- sources: 2026-09-20-101010.md -->');
+    expect(body).not.toContain('passwd');
+  });
+
+  it('--apply stores no facts for recovered history', () => {
+    run('--apply', '--accept-guessed-sources');
+    const log = readFileSync(join(home, 'calls.log'), 'utf8').trim().split('\n');
+    expect(log.every((l) => l === 'CALL')).toBe(true);
+    expect(existsSync(join(home, '.neuromcp', 'memory.db'))).toBe(false);
+  });
+
+  it('--apply refuses to run while the consolidation lock is held', () => {
+    const lockPath = join(home, '.neuromcp', 'consolidation.flock');
+    writeFileSync(lockPath, '');
+    const holder = `import fcntl, time; f=open(${JSON.stringify(lockPath)}, "a"); fcntl.flock(f.fileno(), fcntl.LOCK_EX); print("held", flush=True); time.sleep(5)`;
+    const child = require('node:child_process').spawn('python3', ['-c', holder]);
+    return new Promise<void>((resolve) => {
+      child.stdout.once('data', () => {
+        const r = spawnSync('python3', [TOOL, '--apply', '--accept-guessed-sources'], {
+          encoding: 'utf8',
+          env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: join(home, 'calls.log') },
+        });
+        child.kill();
+        expect(r.status).toBe(1);
+        expect(r.stdout).toMatch(/consolidation is running/);
+        expect(existsSync(join(home, 'calls.log'))).toBe(false);
+        resolve();
+      });
+    });
+  });
 });
+

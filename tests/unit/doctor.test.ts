@@ -1000,7 +1000,7 @@ describe('auto embedding model follows the index (0.30.3 false "broken" on bge-m
   it('resolveAutoOllamaModel mirrors the runtime: explicit > index model > nomic', () => {
     expect(resolveAutoOllamaModel(undefined, 'bge-m3')).toBe('bge-m3');
     expect(resolveAutoOllamaModel('auto', 'bge-m3')).toBe('bge-m3');
-    expect(resolveAutoOllamaModel('', 'bge-m3')).toBe('bge-m3');
+    expect(resolveAutoOllamaModel('', 'bge-m3')).toBe('');   // runtime passes '' on literally
     expect(resolveAutoOllamaModel('mxbai-embed-large', 'bge-m3')).toBe('mxbai-embed-large');
     expect(resolveAutoOllamaModel(undefined, undefined)).toBe('nomic-embed-text');
     expect(resolveAutoOllamaModel(undefined, 'bge-small-en-v1.5')).toBe('nomic-embed-text');
@@ -1047,11 +1047,19 @@ describe('auto embedding model follows the index (0.30.3 false "broken" on bge-m
       const dbPath = join(dir, 'memory.db');
       const db = new Database(dbPath);
       db.prepare('CREATE TABLE memories (id TEXT, is_deleted INTEGER, embedding_model TEXT)').run();
+      db.prepare('CREATE TABLE memories_vec (embedding float[1024])').run();
       db.prepare("INSERT INTO memories VALUES ('a', 0, 'bge-m3'), ('b', 0, 'nomic-embed-text'), ('c', 1, 'x'), ('d', 0, 'none')").run();
       db.close();
       expect(readIndexModel({ Database, env: { NEUROMCP_DB_PATH: dbPath } })).toBeUndefined();
       expect(readIndexModel({ Database, env: { NEUROMCP_DB_PATH: join(dir, 'missing.db') } })).toBeUndefined();
       expect(readIndexModel({ Database: null, env: {} })).toBeUndefined();
+      // stored model rows but no vector index yet: runtime requires no model
+      const noVec = join(dir, 'novec.db');
+      const db2 = new Database(noVec);
+      db2.prepare('CREATE TABLE memories (id TEXT, is_deleted INTEGER, embedding_model TEXT)').run();
+      db2.prepare("INSERT INTO memories VALUES ('a', 0, 'bge-m3')").run();
+      db2.close();
+      expect(readIndexModel({ Database, env: { NEUROMCP_DB_PATH: noVec } })).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

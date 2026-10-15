@@ -5,22 +5,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.30.3] — 2026-10-15
 
+**Upgrade:** after `npm i -g neuromcp@0.30.3` run `npx neuromcp-enable-consolidation`
+(copies the new consolidation scripts to `~/.neuromcp/scripts/`) and
+`npx neuromcp-init-wiki` (updates the persist hook). Until then the old
+scripts keep running and `neuromcp-doctor` reports the hook as outdated.
+
 ### Fixed
 
 - **FIX: one over-stated line threw away a whole consolidation batch.** The
-  auditor rejected the entire summary for a single unsupported line ("calling
-  u1 a printer is an inference"), every retry regenerated all lines with new
-  small errors, and after three tries every fact of the batch was lost — 3000+
-  batches sat in `review-queue/exhausted/`. The lines the auditor names are
-  now removed (with their sub-bullets) and the remainder is **re-audited**;
-  only an approved remainder reaches the wiki. Pruning is refused when a claim
-  cannot be located clearly or more than half of the lines would go; then the
-  old retry path runs. Removed lines are kept in `review-queue/pruned/`.
-- **FIX: a claude CLI outage silently marked sessions as processed.** When
-  every attempt failed before a real audit verdict (CLI exit, timeout, empty
-  output, auditor unavailable) the batch was still exhausted as terminal and
-  its sessions were never summarised. During a launchd "Not logged in" outage
-  this happened thousands of times. Such batches now stay pending.
+  auditor rejected the entire summary for a single unsupported line, every
+  retry regenerated all lines with new small errors, and after three tries
+  every fact of the batch was lost — 3000+ batches sat in
+  `review-queue/exhausted/`. The lines the auditor names are now removed (with
+  their sub-bullets) and the remainder is **re-audited**; only an approved
+  remainder reaches the wiki, and only if no claim the first audit flagged is
+  still in it. A line is removed only when it clearly states the claim: every
+  number/version in the claim must be in the line, and a line that matches as
+  well as another one is ambiguous. Pruning is refused when a claim cannot be
+  located that way or more than half of the lines would go; then the old retry
+  path runs. Removed lines are kept in `review-queue/pruned/`.
+- **Auditor hardening.** Every audit uses per-call random delimiters (source or
+  summary text can no longer close a block early), repeats its integrity policy
+  after the data, and treats `approved: true` with listed unsupported claims as
+  a rejection. Facts extracted from an approved summary are kept only when
+  their words come from that audited text.
+- **FIX: a claude CLI outage silently marked sessions as processed.** When the
+  last attempt failed on infrastructure (CLI exit, timeout, empty output,
+  auditor unavailable) the batch was still exhausted as terminal and its
+  sessions were never summarised; during a launchd "Not logged in" outage this
+  happened thousands of times. Such batches now stay pending, at most three
+  runs in a row (`consolidation-no-verdict.json`) so a batch that always times
+  out cannot cost model calls forever. An unusable model answer (no fenced
+  summary) counts as a real failure, not an outage. Note: the scheduled run
+  only looks back `NEUROMCP_WINDOW_DAYS` (default 7); after a longer outage run
+  `consolidate-sessions.py --since <date>` once.
 - **FIX: `neuromcp-doctor` reported a healthy bge-m3 install as broken.** In
   `auto` it probed a hardcoded nomic-embed-text, while the runtime follows the
   model of the existing index; result: "DIMENSION MISMATCH … broken (exit 2)".
@@ -32,16 +50,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Projects outside `~/projects`.** `~/.neuromcp/project-dirs.json` maps a
   wiki project to directory prefixes, e.g.
   `{"desktop-quatro": ["~/Documents/ChatGPT/Ken/duo"]}`. The persist hook and
-  consolidation file work under a configured prefix (longest prefix wins)
-  under that project; work beside it in the same parent directory keeps its
-  old attribution.
-- **`scripts/reprocess-exhausted.py`** re-audits batches exhausted before this
-  release. `--estimate` (default) makes no model calls and reports how many
-  files are empty, duplicates, already in the wiki, without sources, or to
-  process, with the expected number of model calls. `--pilot N` writes results
-  to `review-queue/reprocess-pilot/` without touching the wiki. `--apply`
-  appends only re-audited sections. Exhausted batches now record their source
-  sessions, so future ones can be re-audited exactly.
+  consolidation file work under a configured prefix (longest prefix, path
+  boundaries on both sides) under that project; work beside it in the same
+  parent directory keeps its old attribution. Prefixes like `/`, `~` or other
+  paths with fewer than three components are ignored.
+- **`scripts/reprocess-exhausted.py`** re-audits exhausted batches.
+  `--estimate` (default) makes no model calls. `--pilot N` writes results to
+  `review-queue/reprocess-pilot/` without touching the wiki. `--apply` appends
+  only re-audited sections, under the consolidation lock. Exhausted batches now
+  record their source sessions; files from before 0.30.3 do not, and are only
+  processed with `--accept-guessed-sources` — their sources are guessed from
+  raw sessions, so provenance is weaker (the source list is kept in an HTML
+  comment in the section). Recovered sections never produce facts, so old
+  history cannot supersede current facts. Batches that never got a summary
+  (`skip_outage_no_summary`) cannot be recovered by this tool.
 
 ## [0.30.2] — 2026-10-15
 

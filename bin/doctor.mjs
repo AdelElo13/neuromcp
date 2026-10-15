@@ -157,6 +157,9 @@ export function readIndexModel(deps) {
   let db = null;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    // The runtime only requires the stored model once a vector index exists.
+    const vec = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_vec'").get();
+    if (vec === undefined) return undefined;
     const rows = /** @type {Array<{ embedding_model: string }>} */ (
       db.prepare(
         `SELECT DISTINCT embedding_model FROM memories
@@ -207,7 +210,9 @@ export function restoreHint(storedModels, indexDim) {
  * @returns {string}
  */
 export function resolveAutoOllamaModel(configured, indexModel) {
-  if (configured !== undefined && configured !== '' && configured !== 'auto') return configured;
+  // Exactly the runtime's rule (src/config.ts reads the env with `??`, so an
+  // empty string is passed on literally, only 'auto' means auto).
+  if (configured !== undefined && configured !== 'auto') return configured;
   if (indexModel === undefined || indexModel === 'bge-small-en-v1.5' || indexModel.startsWith('text-embedding')) {
     return 'nomic-embed-text';
   }
