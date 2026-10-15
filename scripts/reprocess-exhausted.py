@@ -47,13 +47,13 @@ PILOT_DIR: Path = cs.REVIEW_QUEUE / "reprocess-pilot"
 RECOVERED_DIR = EXHAUSTED_DIR / "recovered"
 UNRECOVERABLE_DIR = EXHAUSTED_DIR / "unrecoverable"
 
-SOURCE_WINDOW_DAYS = 10      # sessions considered: up to this many days before the file
 MAX_SOURCES = 15             # same cap as a normal consolidation batch
 MIN_SOURCE_HITS = 2          # distinctive words a session must contain to count as a source
 COVERED_THRESHOLD = 0.6      # share of claim lines already present in the wiki -> skip
 # Model calls per processed batch: audit + (re-audit after pruning) + fact extraction.
 CALLS_LOW, CALLS_HIGH = 2, 3
 
+_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 _STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})_(.+)_batch(\d+)\.md$")
 _SOURCE_LINE_RE = re.compile(r"^Source: (.+)$", re.M)
 _QUOTED_RE = re.compile(r"[\"“'‘`]([^\"”'’`\n]{4,80})[\"”'’`]")
@@ -124,6 +124,25 @@ class RawIndex:
             self._projects[p] = cs.detect_projects(self.text(p))
         return self._projects[p]
 
+    def candidate_days(self, e: Exhausted) -> list[str]:
+        """Days whose sessions may be sources. Backlog runs summarised sessions
+        months old (a 170-day window on 2026-10-13), so a fixed look-back
+        found the wrong sessions. Prefer the dates the summary itself names
+        (±1 day); otherwise every day up to the file's own date."""
+        named: set[str] = set()
+        for d in _DATE_RE.findall(e.summary):
+            try:
+                base = datetime.strptime(d, "%Y-%m-%d")
+            except ValueError:
+                continue
+            for delta in (-1, 0, 1):
+                named.add((base + timedelta(days=delta)).strftime("%Y-%m-%d"))
+        last = e.stamp.strftime("%Y-%m-%d")
+        named = {d for d in named if d <= last and d in self.by_date}
+        if named:
+            return sorted(named)
+        return [d for d in self.by_date if d <= last]
+
     def find_sources(self, e: Exhausted) -> list[Path]:
         if e.sources:
             found = [RAW_DIR / name for name in e.sources]
@@ -132,8 +151,7 @@ class RawIndex:
         if not terms:
             return []
         scored: list[tuple[int, Path]] = []
-        for back in range(SOURCE_WINDOW_DAYS + 1):
-            day = (e.stamp - timedelta(days=back)).strftime("%Y-%m-%d")
+        for day in self.candidate_days(e):
             for p in self.by_date.get(day, []):
                 if e.project not in self.projects(p):
                     continue

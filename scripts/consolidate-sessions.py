@@ -451,6 +451,11 @@ def _claim_words(text: str) -> set[str]:
     return {w.lower().strip(".-/") for w in _CLAIM_WORD_RE.findall(text)} - {""}
 
 
+def _is_header_claim(claim: str) -> bool:
+    c = claim.strip().lower()
+    return c.startswith("#") or "is a label" in c or "not a claim" in c
+
+
 def _is_claim_line(line: str) -> bool:
     stripped = line.strip()
     return bool(stripped) and not _HEADER_RE.match(line) and stripped not in ("```", "---")
@@ -466,6 +471,10 @@ def prune_summary(summary: str, unsupported: list[str]) -> tuple[str | None, lis
     """
     lines = summary.splitlines()
     claim_idx = [i for i, ln in enumerate(lines) if _is_claim_line(ln)]
+    # The auditor is told the section header is a label, yet sometimes lists
+    # it anyway ("## [2026-10-14 batch 15/15] (header is a label, not a
+    # claim; excluded)"). A header is never something to prune or to block on.
+    unsupported = [u for u in unsupported if not _is_header_claim(u)]
     if not claim_idx or not unsupported:
         return None, [], list(unsupported)
     drop: set[int] = set()

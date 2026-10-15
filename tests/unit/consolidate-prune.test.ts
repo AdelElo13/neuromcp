@@ -73,6 +73,17 @@ print(json.dumps(m.prune_summary(${JSON.stringify(SUMMARY)}, [
     expect(out[0]).toBeNull();
   });
 
+  it('ignores a section header the auditor lists despite its own rules', () => {
+    const out = py(home, `
+pruned, removed, unmatched = m.prune_summary(${JSON.stringify(SUMMARY)}, [
+  "## [2026-10-15] (header is a label, not a claim; excluded)",
+  "asked for a second version for the 'u1' printer"])
+print(json.dumps({"pruned": pruned, "unmatched": unmatched}))`);
+    expect(out.unmatched).toEqual([]);
+    expect(out.pruned).toContain('## [2026-10-15]');
+    expect(out.pruned).not.toContain('u1');
+  });
+
   it('refuses one-word claims (too ambiguous to locate)', () => {
     const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(SUMMARY)}, ["u1"])))`);
     expect(out[0]).toBeNull();
