@@ -33,30 +33,76 @@ function readStdin() {
 }
 
 /**
- * Read the most recent session .tmp file to get richer context
- * about what was happening in this session.
+ * Own-transcript summary (2026-10-15). The hook used to read the newest
+ * ~/.claude/session-data/*-session.tmp, which belongs to whichever session
+ * stopped last (one merged file per directory per day). Raw logs then carried
+ * another session's tasks and file list, and consolidation filed the work under
+ * the wrong project. Now everything comes from THIS session's transcript, and
+ * only from the part added since this session's previous Stop (byte offset per
+ * session in OFFSETS_FILE), so repeated Stops do not repeat old content.
  */
-function getSessionContent() {
-  const sessDir = path.join(
-    HOME,
-    ".claude",
-    "session-data"
-  );
-  if (!fs.existsSync(sessDir)) return null;
+const OFFSETS_FILE = path.join(HOME, ".neuromcp", "raw", ".transcript-offsets.json");
+const PROJECTS_ROOT = path.join(HOME, "projects");
+const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const RELEASE_RE = /\b(git\s+(commit|tag|push)|gh\s+(release|pr\s+(create|merge))|npm\s+(publish|version)|cargo\s+publish|twine\s+upload)\b/;
+
+function readOffsets() {
+  try { return JSON.parse(fs.readFileSync(OFFSETS_FILE, "utf8")) || {}; } catch { return {}; }
+}
+function writeOffsets(offsets) {
   try {
-    const files = fs
-      .readdirSync(sessDir)
-      .filter((f) => f.endsWith("-session.tmp"))
-      .map((f) => ({
-        name: f,
-        mtime: fs.statSync(path.join(sessDir, f)).mtimeMs,
-      }))
-      .sort((a, b) => b.mtime - a.mtime);
-    if (files.length === 0) return null;
-    return fs.readFileSync(path.join(sessDir, files[0].name), "utf8");
-  } catch {
-    return null;
-  }
+    fs.mkdirSync(path.dirname(OFFSETS_FILE), { recursive: true });
+    const tmp = `${OFFSETS_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(offsets));
+    fs.renameSync(tmp, OFFSETS_FILE);
+  } catch {}
+}
+function projectOf(p) {
+  if (typeof p !== "string") return null;
+  let prefix = PROJECTS_ROOT + path.sep;
+  let i = p.indexOf(prefix);
+  if (i === -1) { prefix = "~/projects/"; i = p.indexOf(prefix); }        // shell commands use ~
+  if (i === -1) return null;
+  const name = p.slice(i + prefix.length).split(/[\/\s"'`;&|)]/)[0];
+  return name && !name.startsWith(".") ? name : null;
+}
+function messageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((x) => x && x.type === "text" && typeof x.text === "string").map((x) => x.text).join(" ");
+}
+
+/** Summary of transcript bytes [startOffset, EOF). Returns null when unreadable. */
+function summarizeOwnTranscript(transcriptPath, startOffset) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
+  const out = { userMessages: [], tools: new Set(), files: new Set(), releases: [], cwds: new Set(), projects: new Set(), end: startOffset };
+  try {
+    const { end } = forEachJsonlLine(transcriptPath, (line) => {
+      let e; try { e = JSON.parse(line); } catch { return; }
+      if (typeof e.cwd === "string") out.cwds.add(e.cwd);
+      const role = e.message?.role ?? e.role ?? e.type;
+      const content = e.message?.content ?? e.content;
+      if (role === "user" && !e.isMeta) {
+        const text = messageText(content).replace(/\s+/g, " ").trim();
+        if (text) { out.userMessages.push(text.slice(0, 200)); if (out.userMessages.length > 30) out.userMessages.shift(); }   // keep the most recent
+      }
+      if (Array.isArray(content)) for (const part of content) {
+        if (!part || part.type !== "tool_use" || typeof part.name !== "string") continue;
+        out.tools.add(part.name);
+        const input = part.input || {};
+        const file = input.file_path ?? input.notebook_path;
+        if (FILE_TOOLS.has(part.name) && typeof file === "string" && out.files.size < 100) out.files.add(file);
+        if (part.name === "Bash" && typeof input.command === "string" && RELEASE_RE.test(input.command)) {
+          out.releases.push(input.command.replace(/\s+/g, " ").trim().slice(0, 300));
+          if (out.releases.length > 20) out.releases.shift();                     // keep the most recent
+        }
+      }
+    }, startOffset);
+    out.end = end;
+  } catch { return null; }
+  for (const f of out.files) { const p = projectOf(f); if (p) out.projects.add(p); }
+  for (const r of out.releases) { const p = projectOf(r); if (p) out.projects.add(p); }
+  return out;
 }
 
 // ─── Transcript streaming ──────────────────────────────────────────
@@ -72,12 +118,13 @@ const TRANSCRIPT_CHUNK_BYTES = Number(process.env.NEUROMCP_TRANSCRIPT_CHUNK_BYTE
 const TRANSCRIPT_MAX_LINE_BYTES = 256 * 1024 * 1024;
 
 /**
- * Calls onLine(string) for every non-empty line; onLine may return false to
- * stop early. Returns the number of oversized lines skipped.
+ * Calls onLine(string) for every non-empty line from startOffset on; onLine may
+ * return false to stop early. Returns { skipped: oversized lines, end: byte position read }.
  */
-function forEachJsonlLine(filePath, onLine) {
+function forEachJsonlLine(filePath, onLine, startOffset = 0) {
   const fd = fs.openSync(filePath, 'r');
   let skipped = 0;
+  let position = startOffset;
   try {
     const buf = Buffer.alloc(TRANSCRIPT_CHUNK_BYTES);
     let pieces = [];
@@ -106,7 +153,8 @@ function forEachJsonlLine(filePath, onLine) {
       pending += piece.length;
     };
     let n;
-    while (!stopped && (n = fs.readSync(fd, buf, 0, TRANSCRIPT_CHUNK_BYTES, null)) > 0) {
+    while (!stopped && (n = fs.readSync(fd, buf, 0, TRANSCRIPT_CHUNK_BYTES, position)) > 0) {
+      position += n;
       const chunk = buf.subarray(0, n);
       let start = 0;
       let nl;
@@ -121,7 +169,7 @@ function forEachJsonlLine(filePath, onLine) {
   } finally {
     fs.closeSync(fd);
   }
-  return skipped;
+  return { skipped, end: position };
 }
 
 /**
@@ -286,34 +334,39 @@ try {
     // Build a rich session summary from all available sources
     const parts = [];
     parts.push(`Session ended: ${new Date().toISOString()}`);
-    parts.push(`Working directory: ${process.cwd()}`);
+    const sessionCwd = typeof parsed.cwd === "string" && parsed.cwd ? parsed.cwd : process.cwd();
+    parts.push(`Working directory: ${sessionCwd}`);
 
-    // Include session .tmp content (has tasks, tools used, files modified)
-    const sessionContent = getSessionContent();
-    let tasksMatch = null;
-    let toolsMatch = null;
-    let filesMatch = null;
-    let notesMatch = null;
-    if (sessionContent) {
-      // Extract the useful parts from the session .tmp
-      tasksMatch = sessionContent.match(
-        /### Tasks\n([\s\S]*?)(?=\n###|\n---)/
-      );
-      toolsMatch = sessionContent.match(
-        /### Tools Used\n([\s\S]*?)(?=\n###|\n---)/
-      );
-      filesMatch = sessionContent.match(
-        /### Files Modified\n([\s\S]*?)(?=\n###|\n---)/
-      );
-      notesMatch = sessionContent.match(
-        /### Notes for Next Session\n([\s\S]*?)(?=\n###|\n---)/
-      );
-
-      if (tasksMatch) parts.push(`User messages: ${tasksMatch[1].trim()}`);
-      if (toolsMatch) parts.push(`Tools used: ${toolsMatch[1].trim()}`);
-      if (filesMatch) parts.push(`Files modified: ${filesMatch[1].trim()}`);
-      if (notesMatch && notesMatch[1].trim() !== "-")
-        parts.push(`Notes: ${notesMatch[1].trim()}`);
+    // Summary of THIS session only, since its previous Stop.
+    const sessionKey = parsed.session_id || parsed.transcript_path;
+    const offsets = readOffsets();
+    let startOffset = 0;
+    try {
+      const prev = offsets[sessionKey];
+      const size = fs.statSync(parsed.transcript_path).size;
+      if (prev && prev.path === parsed.transcript_path && prev.offset <= size) startOffset = prev.offset;
+    } catch {}
+    const own = summarizeOwnTranscript(parsed.transcript_path, startOffset);
+    if (own && own.userMessages.length === 0 && own.tools.size === 0) {
+      offsets[sessionKey] = { path: parsed.transcript_path, offset: own.end };
+      writeOffsets(offsets);
+      process.stderr.write("[neuromcp-persist] Nothing new since previous Stop; no raw log\n");
+      break stopHookBody;
+    }
+    const files = own ? [...own.files] : [];
+    const tools = own ? [...own.tools] : [];
+    const filesMatch = files.length ? [null, files.map((f) => `- ${f}`).join("\n")] : null;
+    const toolsMatch = tools.length ? [null, tools.join(", ")] : null;
+    if (parsed.session_id) parts.push(`Session ID: ${parsed.session_id}`);
+    if (own) {
+      if (own.userMessages.length) parts.push(`User messages:\n${own.userMessages.map((m) => `- ${m}`).join("\n")}`);
+      if (tools.length) parts.push(`Tools used: ${tools.join(", ")}`);
+      if (files.length) parts.push(`Files modified:\n${filesMatch[1]}`);
+      if (own.releases.length) parts.push(`Release commands:\n${own.releases.map((r) => `- ${r}`).join("\n")}`);
+      const cwdProject = projectOf(sessionCwd + path.sep);
+      const projects = new Set(own.projects);
+      if (!projects.size && cwdProject) projects.add(cwdProject);
+      if (projects.size) parts.push(`Projects: ${[...projects].join(", ")}`);
     }
 
     // Read wiki log for session context (replaces work-state.md)
@@ -356,13 +409,14 @@ try {
       const logParts = [];
       logParts.push(`---`);
       logParts.push(`date: ${today}`);
-      logParts.push(`directory: ${process.cwd()}`);
+      logParts.push(`directory: ${sessionCwd}`);
       logParts.push(`---`);
       logParts.push(``);
       for (const p of parts) {
         logParts.push(p);
       }
       fs.writeFileSync(logFile, logParts.join("\n"));
+      if (own) { offsets[sessionKey] = { path: parsed.transcript_path, offset: own.end }; writeOffsets(offsets); }
 
       // v4: Auto-update .work-state.md so next session has fresh context.
       // Contract: `## Current Work`, `## Next Steps`, `## Decisions Made`,

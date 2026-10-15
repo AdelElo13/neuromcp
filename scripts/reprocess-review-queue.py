@@ -59,11 +59,30 @@ def load_ledger() -> set[str]:
         return set()
 
 
-def detect_project(content: str) -> str:
-    matches = PROJECT_PATH_RE.findall(content)
+_WIKI_ACTIVITY_MARKER = "--- Recent Wiki Activity ---"
+PROJECTS_LINE_RE = re.compile(r"^Projects:\s*(.+)$", re.M)
+DIRECTORY_RE = re.compile(r"^directory:\s*(.+)$", re.M)
+PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
+
+
+def detect_projects(content: str) -> list[str]:
+    """Same attribution as consolidate-sessions.py detect_projects (2026-10-15)."""
+    body = content.split(_WIKI_ACTIVITY_MARKER, 1)[0]
+    explicit = PROJECTS_LINE_RE.search(body)
+    if explicit:
+        names = sorted({n.strip() for n in explicit.group(1).split(",")
+                        if n.strip() and PROJECT_NAME_RE.match(n.strip()) and not n.strip().startswith(".")})
+        if names:
+            return names
+    directory = DIRECTORY_RE.search(body)
+    if directory:
+        in_dir = PROJECT_PATH_RE.findall(directory.group(1).strip() + "/")
+        if in_dir:
+            return [in_dir[0]]
+    matches = PROJECT_PATH_RE.findall(body)
     if matches:
-        return Counter(matches).most_common(1)[0][0]
-    return "home"
+        return [Counter(matches).most_common(1)[0][0]]
+    return ["home"]
 
 
 def projects_with_pending_sessions() -> set[str]:
@@ -81,7 +100,7 @@ def projects_with_pending_sessions() -> set[str]:
         if s.name in ledger:
             continue
         try:
-            projects.add(detect_project(s.read_text(errors="replace")))
+            projects.update(detect_projects(s.read_text(errors="replace")))
         except OSError:
             continue
     return projects
