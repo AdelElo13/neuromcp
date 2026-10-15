@@ -225,6 +225,7 @@ export function resolveAutoOllamaModel(configured, indexModel) {
  * @param {{
  *   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>,
  *   env?: Record<string, string | undefined>,
+ *   indexModel?: string,
  * }} [deps]
  * @returns {Promise<{ result: CheckResult, probe: { model: string, dimensions: number | null } | null }>}
  */
