@@ -123,7 +123,7 @@ def fake(args, *a, **k):
         return subprocess.CompletedProcess(args, 0, "\\x60\\x60\\x60markdown\\n## [x]\\n- Released v0.10.2.\\n\\x60\\x60\\x60\\n", "")
     return real(args, *a, **k)
 m.subprocess.run = fake
-m.audit_summary = lambda summary, batch, extra_sources="": (audits.append(extra_sources), (True, "ok"))[1]
+m.audit_summary_detailed = lambda summary, batch, extra_sources="": (audits.append(extra_sources), (True, "ok", [], False))[1]
 m.extract_facts = lambda *a, **k: []
 ok, done = m.consolidate_batch("mac-control-mcp", [pathlib.Path(${JSON.stringify(s)})], 1, 1)
 page = (m.WIKI_DIR / "projects" / "mac-control-mcp.md").read_text()

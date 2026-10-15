@@ -331,10 +331,18 @@ def extract_markdown(raw: str) -> str | None:
 
 
 def audit_summary(summary: str, batch: list[Path], extra_sources: str = "") -> tuple[bool, str]:
+    """(approved, reason) — see audit_summary_detailed."""
+    approved, reason, _unsupported, _infra = audit_summary_detailed(summary, batch, extra_sources)
+    return approved, reason
+
+
+def audit_summary_detailed(
+    summary: str, batch: list[Path], extra_sources: str = ""
+) -> tuple[bool, str, list[str], bool]:
     """Verify every factual claim in `summary` is traceable to the raw sessions.
 
     Runs a `claude -p` call with a strict verifier prompt. Returns
-    (approved, reason).
+    (approved, reason, unsupported_claims, infra_failure).
 
     On any audit-infrastructure failure (CLI missing, timeout, empty/malformed
     JSON) we default to **fail-closed** — the batch is rejected and queued for
@@ -342,10 +350,10 @@ def audit_summary(summary: str, batch: list[Path], extra_sources: str = "") -> t
     wiki") even when the auditor is flaky. Opt in to fail-open via the
     NEUROMCP_AUDIT_FAIL_OPEN=1 env var if you accept the risk.
     """
-    def _infra_fail(reason: str) -> tuple[bool, str]:
+    def _infra_fail(reason: str) -> tuple[bool, str, list[str], bool]:
         if AUDIT_FAIL_OPEN:
-            return True, f"audit skipped (fail-open): {reason}"
-        return False, f"AUDIT UNAVAILABLE — {reason} (set NEUROMCP_AUDIT_FAIL_OPEN=1 to bypass)"
+            return True, f"audit skipped (fail-open): {reason}", [], True
+        return False, f"AUDIT UNAVAILABLE — {reason} (set NEUROMCP_AUDIT_FAIL_OPEN=1 to bypass)", [], True
 
     # Per-session payload. Bounded so the auditor fits in context, but large
     # enough to verify most claims — 8k chars per session × 15 sessions = 120k
@@ -414,14 +422,94 @@ Rules:
     # Approval must be an explicit boolean True — anything else is treated
     # as not-approved. This closes the "missing key = default true" hole.
     approved = verdict.get("approved") is True
-    unsupported = verdict.get("unsupported") or []
+    raw_unsupported = verdict.get("unsupported") or []
+    unsupported = [str(u) for u in raw_unsupported if str(u).strip()] if isinstance(raw_unsupported, list) else []
     note = verdict.get("note") or ""
     if approved:
-        return True, note or "approved"
+        return True, note or "approved", [], False
     reason = f"REJECTED — {note or 'unsupported claims'}"
     if unsupported:
-        reason += " | " + " ; ".join(str(u)[:200] for u in unsupported[:5])
-    return False, reason
+        reason += " | " + " ; ".join(u[:200] for u in unsupported[:5])
+    return False, reason, unsupported, False
+
+
+# ─── Claim-level pruning (0.30.3) ─────────────────────────────────────────
+#
+# The auditor rejected a whole batch for one over-stated line ("calling u1 a
+# printer is an inference"), every retry regenerated everything with new small
+# errors, and after three tries ALL facts were dropped — 3000+ exhausted
+# batches. Now the lines the auditor names are removed and the rest is
+# re-audited; nothing reaches the wiki without passing the auditor.
+PRUNE_MIN_COVERAGE = 0.5   # share of a claim's words that must appear in the line
+PRUNE_MAX_FRACTION = 0.5   # never keep a summary that lost more than half its claim lines
+PRUNED_DIR = REVIEW_QUEUE / "pruned"
+_CLAIM_WORD_RE = re.compile(r"[\w][\w.\-/]{2,}", re.U)
+_HEADER_RE = re.compile(r"^\s*(#{1,6}\s|\*\*[^*]+\*\*:?\s*$|[A-Za-z][^:]{0,60}:\s*$)")
+
+
+def _claim_words(text: str) -> set[str]:
+    return {w.lower().strip(".-/") for w in _CLAIM_WORD_RE.findall(text)} - {""}
+
+
+def _is_claim_line(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not _HEADER_RE.match(line) and stripped not in ("```", "---")
+
+
+def prune_summary(summary: str, unsupported: list[str]) -> tuple[str | None, list[str], list[str]]:
+    """Remove the lines the auditor flagged. Returns (pruned, removed, unmatched).
+
+    pruned is None when pruning is unsafe: a flagged claim matches no line
+    clearly, nothing would be removed, or more than PRUNE_MAX_FRACTION of
+    the claim lines would go. A removed bullet takes its deeper-indented
+    continuation lines with it; headers never count as claims.
+    """
+    lines = summary.splitlines()
+    claim_idx = [i for i, ln in enumerate(lines) if _is_claim_line(ln)]
+    if not claim_idx or not unsupported:
+        return None, [], list(unsupported)
+    drop: set[int] = set()
+    unmatched: list[str] = []
+    for claim in unsupported:
+        words = _claim_words(claim)
+        if len(words) < 2:
+            unmatched.append(claim)
+            continue
+        best_i, best_score, best_shared = -1, 0.0, 0
+        for i in claim_idx:
+            shared = len(words & _claim_words(lines[i]))
+            score = shared / len(words)
+            if score > best_score:
+                best_i, best_score, best_shared = i, score, shared
+        if best_i < 0 or best_score < PRUNE_MIN_COVERAGE or best_shared < 2:
+            unmatched.append(claim)
+            continue
+        drop.add(best_i)
+    if unmatched or not drop:
+        return None, [], unmatched
+    # Continuation lines: deeper indented lines directly under a dropped one.
+    for i in sorted(drop):
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        j = i + 1
+        while j < len(lines) and lines[j].strip() and (len(lines[j]) - len(lines[j].lstrip())) > indent:
+            drop.add(j)
+            j += 1
+    dropped_claims = [i for i in drop if i in claim_idx]
+    remaining_claims = [i for i in claim_idx if i not in drop]
+    if not remaining_claims or len(dropped_claims) / len(claim_idx) > PRUNE_MAX_FRACTION:
+        return None, [], []
+    removed = [lines[i] for i in sorted(drop)]
+    pruned = "\n".join(ln for i, ln in enumerate(lines) if i not in drop)
+    return pruned, removed, []
+
+
+def log_pruned(project: str, batch_idx: int, removed: list[str], reason: str) -> Path:
+    """Keep what pruning removed, for inspection (never silently lost)."""
+    PRUNED_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    path = PRUNED_DIR / f"{stamp}_{project}_batch{batch_idx}.md"
+    path.write_text(f"# Pruned claims — {project} batch {batch_idx}\n\n> {reason}\n\n" + "\n".join(removed) + "\n")
+    return path
 
 
 def queue_for_review(
@@ -430,6 +518,7 @@ def queue_for_review(
     summary: str,
     reason: str,
     exhausted: bool = False,
+    batch: list[Path] | None = None,
 ) -> Path:
     """Park a rejected summary under review-queue/ for human inspection.
 
@@ -441,9 +530,12 @@ def queue_for_review(
     target_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     path = target_dir / f"{stamp}_{project}_batch{batch_idx}.md"
+    # Sources (0.30.3): the raw session files of the batch, so an exhausted
+    # batch can be re-audited later (reprocess-exhausted.py).
+    sources = "".join(f"\nSource: {s.name}" for s in (batch or []))
     path.write_text(
         f"# Rejected consolidation — {project} batch {batch_idx}\n"
-        f"\n> {reason}\n\n---\n\n{summary}\n"
+        f"{sources}\n\n> {reason}\n\n---\n\n{summary}\n"
     )
     return path
 
@@ -870,7 +962,18 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
             continue
 
         # Eval-loop: verify every claim traces to a source session before writing.
-        approved, reason = audit_summary(extracted, batch, extra_sources=history)
+        approved, reason, unsupported, infra = audit_summary_detailed(extracted, batch, extra_sources=history)
+        pruned_note = ""
+        if not approved and not infra and unsupported:
+            pruned, removed, _unmatched = prune_summary(extracted, unsupported)
+            if pruned is not None:
+                re_ok, re_reason, _u, _i = audit_summary_detailed(pruned, batch, extra_sources=history)
+                if re_ok:
+                    log_pruned(project, batch_idx, removed, reason)
+                    extracted, approved = pruned, True
+                    pruned_note = f", pruned {len(removed)} unsupported line(s)"
+                else:
+                    reason = f"{reason} || after pruning: {re_reason}"
         if approved:
             projects_dir = WIKI_DIR / "projects"
             systems_dir = WIKI_DIR / "systems"
@@ -878,7 +981,7 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
             if not target.exists() and (systems_dir / f"{project}.md").exists():
                 target = systems_dir / f"{project}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
-            attempt_note = f" [{attempt_tag}]" if attempt > 0 else ""
+            attempt_note = f" [{attempt_tag}{pruned_note}]" if attempt > 0 or pruned_note else ""
             if target.exists():
                 # Append, then refresh `updated:` so the page no longer looks stale.
                 target.write_text(bump_updated(target.read_text(), today) + f"\n\n{extracted}\n")
@@ -910,7 +1013,7 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
     # it for inspection / manual reprocessing.
     if not last_summary:
         last_summary = "(no summary produced — all attempts failed before audit)"
-    path = queue_for_review(project, batch_idx, last_summary, last_reason, exhausted=True)
+    path = queue_for_review(project, batch_idx, last_summary, last_reason, exhausted=True, batch=batch)
     print(f"  ✗ {project} batch {batch_idx}/{batch_total} EXHAUSTED after {MAX_AUDIT_ATTEMPTS + 1} attempts — queued: exhausted/{path.name} (terminal; ledger advanced)")
     print(f"    Final rejection: {last_reason[:200]}")
     return False, list(batch)
