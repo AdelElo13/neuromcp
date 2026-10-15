@@ -33,6 +33,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
@@ -340,7 +341,7 @@ def main() -> int:
     if args.apply:
         # Same kernel lock as run-consolidation.sh: never append to a wiki page
         # while the scheduled consolidation does a read-modify-write on it.
-        lock = open(cs.NEUROMCP_DIR / "consolidation.flock", "a")
+        lock = open(os.environ.get("NEUROMCP_LOCK_FILE") or (cs.NEUROMCP_DIR / "consolidation.flock"), "a")
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -377,7 +378,9 @@ def main() -> int:
         try:
             if outcome == "recovered":
                 # Re-check: an earlier file in this run may have added the same content.
-                if already_covered(Exhausted(e.path, e.project, e.stamp, "", section)):
+                content_only = "\n".join(ln for ln in section.splitlines()
+                                         if not ln.startswith("## [") and not ln.strip().startswith("<!--"))
+                if already_covered(Exhausted(e.path, e.project, e.stamp, "", content_only)):
                     move(e, RECOVERED_DIR)
                     print("    (already in the wiki now — not appended again)")
                     continue
@@ -385,8 +388,8 @@ def main() -> int:
                 # No fact extraction here: recovered history must never supersede
                 # current facts (facts are stored as valid from today).
             move(e, RECOVERED_DIR if outcome == "recovered" else UNRECOVERABLE_DIR)
-        except OSError as exc:
-            print(f"    could not finish {e.path.name}: {exc}")
+        except Exception as exc:  # e.g. OSError, UnicodeDecodeError on a wiki page
+            print(f"    could not finish {e.path.name}: {type(exc).__name__}: {exc}")
     print("outcomes: " + ", ".join(f"{k} {v}" for k, v in outcomes.most_common()))
     if args.pilot:
         print(f"pilot results: {PILOT_DIR} (wiki untouched)")

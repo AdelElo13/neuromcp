@@ -33,10 +33,11 @@ scripts keep running and `neuromcp-doctor` reports the hook as outdated.
   last attempt failed on infrastructure (CLI exit, timeout, empty output,
   auditor unavailable) the batch was still exhausted as terminal and its
   sessions were never summarised; during a launchd "Not logged in" outage this
-  happened thousands of times. Such batches now stay pending, at most three
-  runs in a row (`consolidation-no-verdict.json`) so a batch that always times
-  out cannot cost model calls forever. An unusable model answer (no fenced
-  summary) counts as a real failure, not an outage. Note: the scheduled run
+  happened thousands of times. Such batches now stay pending
+  (`consolidation-no-verdict.json`): up to 42 runs (7 days) when the CLI
+  fails at once, which costs nothing, but only 3 runs when it keeps timing
+  out, so an oversized batch cannot cost model time forever. An unusable model
+  answer (no fenced summary) counts as a real failure, not an outage. Note: the scheduled run
   only looks back `NEUROMCP_WINDOW_DAYS` (default 7); after a longer outage run
   `consolidate-sessions.py --since <date>` once.
 - **FIX: `neuromcp-doctor` reported a healthy bge-m3 install as broken.** In

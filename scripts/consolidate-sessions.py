@@ -457,7 +457,9 @@ Rules:
     unsupported = [str(u) for u in raw_unsupported if str(u).strip()] if isinstance(raw_unsupported, list) else []
     note = verdict.get("note") or ""
     # approved=true WITH unsupported claims is self-contradictory: trust the
-    # claims, not the flag (0.30.3 review).
+    # claims, not the flag (0.30.3 review). Listing only the bare section
+    # header (a label by the prompt's own rule) is no contradiction.
+    unsupported = [u for u in unsupported if not _is_header_claim(u)]
     if approved and not unsupported:
         return True, note or "approved", [], False
     reason = f"REJECTED — {note or 'unsupported claims'}"
@@ -492,8 +494,12 @@ _SECTION_HEADER_RE = re.compile(r"^##\s*\[\d{4}-\d{2}-\d{2}(?: batch \d+/\d+)?\]
 _LABEL_RE = re.compile(r"^\s*(\*\*[^*]+\*\*:?|[A-Za-z][^:]{0,60}:)\s*$")
 
 
+_VERSION_PREFIX_RE = re.compile(r"^v(?=\d)")
+
+
 def _claim_words(text: str) -> set[str]:
-    words = {w.lower().strip(".-/") for w in _CLAIM_WORD_RE.findall(text)} - {""}
+    # "v0.30.3" and "0.30.3" are the same version.
+    words = {_VERSION_PREFIX_RE.sub("", w.lower().strip(".-/")) for w in _CLAIM_WORD_RE.findall(text)} - {""}
     return words - _STOPWORDS
 
 
@@ -517,6 +523,8 @@ def _is_claim_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped or stripped in ("```", "---"):
         return False
+    if stripped.startswith("<!--") and stripped.endswith("-->"):
+        return False         # provenance comment (reprocess), never a claim
     if _SECTION_HEADER_RE.match(stripped):
         return False
     if stripped.startswith("#"):
@@ -996,7 +1004,13 @@ def persist_facts(facts: list[dict], project: str, batch: list[Path]) -> int:
 
 
 NO_VERDICT_FILE = NEUROMCP_DIR / "consolidation-no-verdict.json"
+# How many runs in a row a batch may end without an audit verdict before it
+# becomes terminal. Timeouts are expensive (minutes of model time per
+# attempt), so a batch that keeps timing out stops after 3 runs. A CLI that
+# fails at once (auth outage, CLI missing) costs nothing; such batches wait
+# up to 42 runs (7 days at the 4-hour default) for the outage to end.
 NO_VERDICT_RUN_LIMIT = 3
+NO_VERDICT_FAST_FAIL_LIMIT = 42
 
 
 def _batch_key(project: str, batch: list[Path]) -> str:
@@ -1224,11 +1238,12 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
     # it for inspection / manual reprocessing.
     if last_was_infra:
         runs = bump_no_verdict(project, batch)
-        if runs < NO_VERDICT_RUN_LIMIT:
+        limit = NO_VERDICT_RUN_LIMIT if "timeout" in last_reason else NO_VERDICT_FAST_FAIL_LIMIT
+        if runs < limit:
             # Infrastructure failure: keep the sessions pending so the next
             # run (after the CLI/auth problem is fixed) consolidates them.
             print(f"  ✗ {project} batch {batch_idx}/{batch_total} not consolidated "
-                  f"(no audit verdict, run {runs}/{NO_VERDICT_RUN_LIMIT}: {last_reason[:160]}) — sessions stay pending")
+                  f"(no audit verdict, run {runs}/{limit}: {last_reason[:160]}) — sessions stay pending")
             return False, []
         last_reason = f"no audit verdict in {runs} consecutive runs — {last_reason}"
     clear_no_verdict(project, batch)

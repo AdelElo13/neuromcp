@@ -133,6 +133,17 @@ print(json.dumps({"pruned": pruned, "unmatched": unmatched}))`);
     expect(out).toEqual(['neuromcp 0.30.3 prunes unsupported lines']);
   });
 
+  it('residuals: provenance comment is never a claim, v-prefixed versions match, header-only flag is no contradiction', () => {
+    const out = py(home, `
+summ = "## [2026-10-15] (recovered 2026-10-16, re-audited)\\n<!-- guessed sources: 2026-10-15-1.md -->\\n- Released v0.30.3 to npm.\\n- Docs regenerated for the tools.\\n- CI passed on main."
+pruned, removed, unmatched = m.prune_summary(summ, ["Released 0.30.3 to npm"])
+print(json.dumps({"comment": m._is_claim_line("<!-- sources: a.md -->"), "pruned": pruned, "unmatched": unmatched}))`);
+    expect(out.comment).toBe(false);
+    expect(out.unmatched).toEqual([]);
+    expect(out.pruned).toContain('<!-- guessed sources: 2026-10-15-1.md -->');
+    expect(out.pruned).not.toContain('0.30.3');
+  });
+
   it('refuses one-word claims (too ambiguous to locate)', () => {
     const out = py(home, `print(json.dumps(m.prune_summary(${JSON.stringify(SUMMARY)}, ["u1"])))`);
     expect(out[0]).toBeNull();
@@ -160,6 +171,8 @@ prompt = sys.argv[-1]
 mode = os.environ.get("FAKE_MODE", "prune")
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(("GEN" if "memory consolidation agent" in prompt else "AUDIT" if "strict fact-checker" in prompt else "OTHER") + "\\n")
+if "memory consolidation agent" in prompt and mode == "timeout":
+    import time; time.sleep(3)
 if "memory consolidation agent" in prompt and mode == "cli-down":
     print("Not logged in · Please run /login", file=sys.stderr); sys.exit(1)
 if "memory consolidation agent" in prompt:
@@ -228,16 +241,17 @@ print(json.dumps({"ok": ok, "done": len(done)}))`, env(mode));
     expect(existsSync(join(home, '.neuromcp', 'wiki', 'projects', 'demo.md'))).toBe(false);
   });
 
-  it('a batch with no audit verdict goes terminal only after 3 runs in a row (no endless cost)', () => {
+  it('a batch that keeps timing out goes terminal after 3 runs; a fast CLI failure waits much longer', () => {
     const out = py(home, `
+m.NO_VERDICT_FAST_FAIL_LIMIT = 5
 res = []
-for _ in range(3):
+for _ in range(5):
     ok, done = m.consolidate_batch("demo", [pathlib.Path(${JSON.stringify(session)})], 1, 1)
     res.append(len(done))
 print(json.dumps(res))`, env('cli-down'));
-    expect(out).toEqual([0, 0, 1]);
+    expect(out).toEqual([0, 0, 0, 0, 1]);   // cli-down = fast failure: limit 5 here (42 in production)
     const ex = readdirSync(join(home, '.neuromcp', 'review-queue', 'exhausted'));
-    expect(readFileSync(join(home, '.neuromcp', 'review-queue', 'exhausted', ex[0]), 'utf8')).toMatch(/no audit verdict in 3 consecutive runs/);
+    expect(readFileSync(join(home, '.neuromcp', 'review-queue', 'exhausted', ex[0]), 'utf8')).toMatch(/no audit verdict in 5 consecutive runs/);
   });
 
   it('approved=true WITH unsupported claims is treated as a rejection (and pruned)', () => {
@@ -248,6 +262,24 @@ print(json.dumps({"ok": ok}))`, env('approved-but-flagged'));
     const page = readFileSync(join(home, '.neuromcp', 'wiki', 'projects', 'demo.md'), 'utf8');
     expect(out.ok).toBe(true);
     expect(page).not.toContain('u1 printer');
+  });
+
+  it('timeouts count against the short limit (3 runs)', () => {
+    const out = py(home, `
+m.subprocess_timeout_marker = True
+import subprocess as sp
+real = sp.run
+def fake(args, *a, **k):
+    if args and args[0] == "claude" and "memory consolidation agent" in args[-1]:
+        raise sp.TimeoutExpired(args, 1)
+    return real(args, *a, **k)
+m.subprocess.run = fake
+res = []
+for _ in range(3):
+    ok, done = m.consolidate_batch("demo", [pathlib.Path(${JSON.stringify(session)})], 1, 1)
+    res.append(len(done))
+print(json.dumps(res))`, env('prune'));
+    expect(out).toEqual([0, 0, 1]);
   });
 });
 
