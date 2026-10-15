@@ -100,11 +100,15 @@ prompt = sys.argv[-1]
 mode = os.environ.get("FAKE_MODE", "prune")
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(("GEN" if "memory consolidation agent" in prompt else "AUDIT" if "strict fact-checker" in prompt else "OTHER") + "\\n")
+if "memory consolidation agent" in prompt and mode == "cli-down":
+    print("Not logged in · Please run /login", file=sys.stderr); sys.exit(1)
 if "memory consolidation agent" in prompt:
     print("\`\`\`markdown\\n" + ${JSON.stringify(SUMMARY)} + "\\n\`\`\`")
 elif "strict fact-checker" in prompt:
     summary = prompt.split("<<<SUMMARY>>>", 1)[1]
-    if "u1 printer" in summary or mode == "never":
+    if mode == "infra":
+        print("not json at all")
+    elif "u1 printer" in summary or mode == "never":
         claim = "asked for a second version for the u1 printer" if mode != "never" else "Something no line says at all here"
         print(json.dumps({"approved": False, "unsupported": [claim], "note": "unsupported"}))
     else:
@@ -150,4 +154,14 @@ print(json.dumps({"ok": ok}))`, env('never'));
     expect(readFileSync(join(home, '.neuromcp', 'review-queue', 'exhausted', ex[0]), 'utf8'))
       .toContain('Source: 2026-10-15-120000-abc.md');
   });
+
+  it.each(['cli-down', 'infra'])('an infrastructure-only failure (%s) is NOT terminal: sessions stay pending, nothing exhausted', (mode) => {
+    const out = py(home, `
+ok, done = m.consolidate_batch("demo", [pathlib.Path(${JSON.stringify(session)})], 1, 1)
+print(json.dumps({"ok": ok, "done": len(done)}))`, env(mode));
+    expect(out).toEqual({ ok: false, done: 0 });
+    expect(existsSync(join(home, '.neuromcp', 'review-queue', 'exhausted'))).toBe(false);
+    expect(existsSync(join(home, '.neuromcp', 'wiki', 'projects', 'demo.md'))).toBe(false);
+  });
 });
+

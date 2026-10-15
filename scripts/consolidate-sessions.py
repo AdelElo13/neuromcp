@@ -924,6 +924,12 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
     # Bounded by MAX_AUDIT_ATTEMPTS. Exhausted batches land in EXHAUSTED_DIR.
     last_reason = "no attempt completed"
     last_summary = ""
+    # 0.30.3: did any attempt get a real verdict from the auditor? If every
+    # attempt failed on infrastructure (CLI exit/timeout, empty output, audit
+    # unavailable), the batch must NOT become terminal — that marked thousands
+    # of never-summarised sessions as processed during the launchd
+    # "Not logged in" outage (2026-06..10).
+    got_verdict = False
 
     for attempt in range(MAX_AUDIT_ATTEMPTS + 1):
         # attempt 0 uses AUDIT_MODEL (cheap default for cost control);
@@ -963,6 +969,7 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
 
         # Eval-loop: verify every claim traces to a source session before writing.
         approved, reason, unsupported, infra = audit_summary_detailed(extracted, batch, extra_sources=history)
+        got_verdict = got_verdict or not infra
         pruned_note = ""
         if not approved and not infra and unsupported:
             pruned, removed, _unmatched = prune_summary(extracted, unsupported)
@@ -1011,6 +1018,11 @@ SESSIONS — claims it cannot trace are rejected and the whole batch is dropped)
     # this the same doomed batch was re-generated + re-audited every 4h for
     # days, burning tokens and never converging. The exhausted/ copy preserves
     # it for inspection / manual reprocessing.
+    if not got_verdict:
+        # Infrastructure failure only: keep the sessions pending so the next
+        # run (after the CLI/auth problem is fixed) consolidates them.
+        print(f"  ✗ {project} batch {batch_idx}/{batch_total} not consolidated (no audit verdict: {last_reason[:160]}) — sessions stay pending")
+        return False, []
     if not last_summary:
         last_summary = "(no summary produced — all attempts failed before audit)"
     path = queue_for_review(project, batch_idx, last_summary, last_reason, exhausted=True, batch=batch)
